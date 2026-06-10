@@ -17,6 +17,10 @@ export interface PhysicsContext {
    *  the player nor trigger crashtime when touched. Buildings are NOT in
    *  here — slamming a wall at full speed is a crash. */
   noCrashIds: Set<number>;
+  /** Track-barrier bodies → their along-wall direction. Wall contacts are
+   *  judged against this (the segment's side normal), never the raw engine
+   *  contact normal — segment END faces would otherwise read as head-ons. */
+  wallDirs: Map<number, { x: number; z: number }>;
 }
 
 export function createPhysics(): PhysicsContext {
@@ -38,5 +42,5 @@ export function createPhysics(): PhysicsContext {
   groundBody.quaternion.setFromAxisAngle(new CANNON.Vec3(1, 0, 0), -Math.PI / 2);
   world.addBody(groundBody);
 
-  return { world, matGround, matCar, groundBody, noCrashIds: new Set([groundBody.id]) };
+  return { world, matGround, matCar, groundBody, noCrashIds: new Set([groundBody.id]), wallDirs: new Map() };
 }

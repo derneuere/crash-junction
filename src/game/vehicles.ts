@@ -9,17 +9,17 @@ import { makeBarrelTexture } from './textures';
 
 export const SPECS: Record<Variant, VehicleSpec> = {
   sedan: {
-    variant: 'sedan', mass: 850, width: 1.9, height: 1.35, length: 4.6, halfY: 0.72,
+    variant: 'sedan', mass: 1450, width: 1.9, height: 1.35, length: 4.6, halfY: 0.72,
     rideHeight: 0.8, hullY: 0.14, wheelRadius: 0.34, wheelX: 0.82, wheelZFront: -1.5, wheelZRear: 1.45,
     valueMult: 1, cashCap: 12000,
   },
   bus: {
-    variant: 'bus', mass: 2300, width: 2.3, height: 2.4, length: 8.8, halfY: 1.05,
+    variant: 'bus', mass: 11500, width: 2.3, height: 2.4, length: 8.8, halfY: 1.05,
     rideHeight: 1.13, hullY: 0.15, wheelRadius: 0.42, wheelX: 0.95, wheelZFront: -2.9, wheelZRear: 2.9,
     valueMult: 1.6, cashCap: 22000,
   },
   tanker: {
-    variant: 'tanker', mass: 2600, width: 2.35, height: 2.5, length: 9.2, halfY: 1.0,
+    variant: 'tanker', mass: 15000, width: 2.35, height: 2.5, length: 9.2, halfY: 1.0,
     rideHeight: 1.06, hullY: 0, wheelRadius: 0.45, wheelX: 0.95, wheelZFront: -3.2, wheelZRear: 3.0,
     valueMult: 2, cashCap: 30000,
     explosive: { power: 2.4, fuseDamage: 16 },
@@ -28,10 +28,44 @@ export const SPECS: Record<Variant, VehicleSpec> = {
 
 function registerDeformable(mesh: THREE.Mesh, deformables: DeformablePart[]): void {
   const pos = mesh.geometry.attributes.position as THREE.BufferAttribute;
-  deformables.push({ mesh, base: Float32Array.from(pos.array as Float32Array) });
+  const col = mesh.geometry.attributes.color as THREE.BufferAttribute;
+  deformables.push({
+    mesh,
+    base: Float32Array.from(pos.array as Float32Array),
+    baseCol: Float32Array.from(col.array as Float32Array),
+  });
 }
 
 export type CollideHandler = (actor: Actor, e: CollideEvent) => void;
+
+function buildWheels(spec: VehicleSpec, group: THREE.Group): THREE.Mesh[] {
+  const wheels: THREE.Mesh[] = [];
+  const corners: [number, number][] = [
+    [-spec.wheelX, spec.wheelZFront], [spec.wheelX, spec.wheelZFront],
+    [-spec.wheelX, spec.wheelZRear], [spec.wheelX, spec.wheelZRear],
+  ];
+  for (const [wx, wz] of corners) {
+    const wh = new THREE.Mesh(wheelGeometry(spec.wheelRadius), wheelMat);
+    wh.position.set(wx, -(spec.rideHeight - spec.wheelRadius), wz);
+    wh.castShadow = true;
+    group.add(wh);
+    wheels.push(wh);
+  }
+  return wheels;
+}
+
+/** Per-wheel spring rates derived from the car's own weight: preload holds
+ *  the body exactly at rideHeight, k stiffens it around that point. */
+function buildSuspension(spec: VehicleSpec, wheels: THREE.Mesh[], mass: number): SuspensionCorner[] {
+  const mw = mass / 4;
+  const preload = mw * Math.abs(GRAVITY);
+  const k = preload / SUSP_SAG;
+  const c = 2 * SUSP_ZETA * Math.sqrt(k * mw);
+  return wheels.map((w) => ({
+    ax: w.position.x, az: w.position.z, preload, k, c,
+    fmax: (preload + k * SUSP_MAX_COMP) * 1.5, dist: spec.rideHeight, grounded: false,
+  }));
+}
 
 function makeActor(
   kind: Actor['kind'], body: CANNON.Body, group: THREE.Group, valueMult: number, cashLeft: number,
@@ -39,7 +73,8 @@ function makeActor(
   return {
     kind, body, group, spec: null, wheels: [], susp: [], deformables: [], panels: [],
     q0: body.quaternion.clone(), scripted: null, started: false, curSpeed: 0,
-    isPlayer: false, crashed: false, popped: 0, damageLvl: 0, smokeT: 0,
+    isPlayer: false, crashed: false, destabilized: 0, destabilizedByPlayer: false,
+    popped: 0, damageLvl: 0, smokeT: 0,
     exploded: false, fuse: null, valueMult, cashLeft,
   };
 }
@@ -91,18 +126,7 @@ export function createVehicle(
     group.add(wing);
   }
 
-  const wheels: THREE.Mesh[] = [];
-  const corners: [number, number][] = [
-    [-spec.wheelX, spec.wheelZFront], [spec.wheelX, spec.wheelZFront],
-    [-spec.wheelX, spec.wheelZRear], [spec.wheelX, spec.wheelZRear],
-  ];
-  for (const [wx, wz] of corners) {
-    const wh = new THREE.Mesh(wheelGeometry(spec.wheelRadius), wheelMat);
-    wh.position.set(wx, -(spec.rideHeight - spec.wheelRadius), wz);
-    wh.castShadow = true;
-    group.add(wh);
-    wheels.push(wh);
-  }
+  const wheels = buildWheels(spec, group);
   scene.add(group);
 
   const body = new CANNON.Body({ mass: isPlayer ? spec.mass + 130 : spec.mass, material: phys.matCar });
@@ -122,16 +146,7 @@ export function createVehicle(
   phys.world.addBody(body);
   if (!isPlayer) body.sleep();
 
-  // per-wheel spring rates derived from the car's own weight: preload holds
-  // the body exactly at rideHeight, k stiffens it around that point
-  const mw = body.mass / 4;
-  const preload = mw * Math.abs(GRAVITY);
-  const k = preload / SUSP_SAG;
-  const c = 2 * SUSP_ZETA * Math.sqrt(k * mw);
-  const susp: SuspensionCorner[] = wheels.map((w) => ({
-    ax: w.position.x, az: w.position.z, preload, k, c,
-    fmax: (preload + k * SUSP_MAX_COMP) * 1.5, dist: spec.rideHeight, grounded: false,
-  }));
+  const susp = buildSuspension(spec, wheels, body.mass);
 
   const actor = makeActor('vehicle', body, group, spec.valueMult, spec.cashCap);
   actor.spec = spec;
@@ -265,6 +280,42 @@ export function deformActor(actor: Actor, worldPoint: THREE.Vector3, strength: n
       geo.computeVertexNormals();
     }
   }
+}
+
+/** Full body-shop pass: un-crumple every panel, restore the paint, re-hang
+ *  detached panels at their hinges and refit any popped wheels. Loose-part
+ *  physics bodies for torn panels must be reclaimed by the caller (they
+ *  share the panel meshes). */
+export function repairVehicle(actor: Actor): void {
+  for (const part of actor.deformables) {
+    const geo = part.mesh.geometry;
+    const pos = geo.attributes.position as THREE.BufferAttribute;
+    (pos.array as Float32Array).set(part.base);
+    pos.needsUpdate = true;
+    const col = geo.attributes.color as THREE.BufferAttribute;
+    (col.array as Float32Array).set(part.baseCol);
+    col.needsUpdate = true;
+    geo.computeVertexNormals();
+  }
+  for (const p of actor.panels) {
+    if (p.detached) {
+      p.pivot.add(p.mesh); // re-parent from the scene back onto the hinge
+      p.mesh.position.copy(p.home);
+      p.mesh.quaternion.set(0, 0, 0, 1);
+    }
+    p.detached = false;
+    p.damage = 0;
+    p.angle = 0;
+    p.pivot.quaternion.set(0, 0, 0, 1);
+  }
+  if (actor.spec && actor.wheels.length < 4) {
+    for (const w of actor.wheels) actor.group.remove(w); // geometry is cached/shared — don't dispose
+    actor.wheels = buildWheels(actor.spec, actor.group);
+    actor.susp = buildSuspension(actor.spec, actor.wheels, actor.body.mass);
+  }
+  actor.popped = 0;
+  actor.damageLvl = 0;
+  actor.smokeT = 0;
 }
 
 /** Darken the paint after a vehicle burns/detonates. */

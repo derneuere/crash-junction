@@ -14,7 +14,7 @@ const BRAKE = 16;
 const JUNCTION = 9.5; // half-extent of the yield box around the crossing
 const LOOP_AT = 105; // recycle distance from the center (deep in the fog)
 
-export function updateTraffic(actors: Actor[], state: GameState, simTime: number, heightAt: HeightSampler): void {
+export function updateTraffic(actors: readonly Actor[], state: GameState, simTime: number, heightAt: HeightSampler): void {
   for (const a of actors) {
     if (a.kind !== 'vehicle' || a.isPlayer || a.crashed || !a.scripted) continue;
     if (state === GameState.Idle) continue;

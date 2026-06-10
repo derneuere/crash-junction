@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import { Game } from './game/Game';
 import { LEVELS, type LevelId } from './game/levels';
-import { GameState, type CashFloatData, type ReportData } from './game/types';
+import { GameState } from './game/types';
+import type { CashFloatData, RaceStanding, ReportData } from './game/events';
 import { Hud, type FlashState } from './ui/Hud';
 
 export default function App() {
@@ -15,7 +16,7 @@ export default function App() {
   const [crashbreaker, setCrashbreaker] = useState(0);
   const [multiplier, setMultiplier] = useState(1);
   const [boost, setBoost] = useState(1);
-  const [race, setRace] = useState<{ lap: number; laps: number; pos: number; racers: number } | null>(null);
+  const [race, setRace] = useState<RaceStanding | null>(null);
 
   useEffect(() => {
     const game = new Game(containerRef.current!, LEVELS[levelId]);
@@ -60,9 +61,9 @@ export default function App() {
       <div id="game" ref={containerRef} />
       <Hud
         state={state}
+        mode={level.mode.kind}
         damage={damage}
-        goldTarget={level.practice ? 0 : level.medals.gold}
-        practice={!!level.practice}
+        goldTarget={level.mode.kind === 'crash' ? level.mode.medals.gold : 0}
         levelId={levelId}
         onSelectLevel={setLevelId}
         multiplier={multiplier}
@@ -71,8 +72,7 @@ export default function App() {
         report={report}
         cash={cash}
         crashbreaker={crashbreaker}
-        race={level.race ? race : null}
-        isRace={!!level.race}
+        race={level.mode.kind === 'race' ? race : null}
         onCashDone={(id) => setCash((list) => list.filter((c) => c.id !== id))}
       />
     </>

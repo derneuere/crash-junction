@@ -30,9 +30,8 @@ const ringAt = (angle: number, y: number, mult: number) => ({
 export const driftTrack: LevelDef = {
   name: 'PROVING GROUND',
   ground: 'pad',
-  practice: true,
+  mode: { kind: 'practice' },
   padDecals: { rings: [SKID], dashes },
-  medals: { bronze: 0, silver: 0, gold: 0 }, // practice — nothing to win
   player: { variant: 'sedan', color: 0xe8352a, x: 0, z: -60, dir: { x: 0, z: 1 }, speed: 0 },
   traffic: [],
   poles,

@@ -67,11 +67,12 @@ export function buildEnvironment(scene: THREE.Scene, phys: PhysicsContext, level
 
   const roadMat = new THREE.MeshStandardMaterial({ color: 0x2e3138, roughness: 0.95 });
 
-  if (level.race) {
+  const race = level.mode.kind === 'race' ? level.mode.race : null;
+  if (race) {
     // the circuit ribbon: a triangle strip between the left/right edges of
     // every race section, with centre dashes and a start/finish stripe
-    const secs = level.race.sections;
-    const w2 = level.race.width / 2;
+    const secs = race.sections;
+    const w2 = race.width / 2;
     const N = secs.length;
     const pos = new Float32Array((N + 1) * 2 * 3);
     for (let i = 0; i <= N; i++) {
@@ -106,11 +107,81 @@ export function buildEnvironment(scene: THREE.Scene, phys: PhysicsContext, level
     marks.push({
       x: secs[0].x,
       z: secs[0].z,
-      w: level.race.width - 2,
+      w: race.width - 2,
       l: 1.0,
       yaw: Math.atan2(secs[0].dirX, secs[0].dirZ),
     });
+
+    // checkpoints: a painted stripe + glowing gate posts every 6th section,
+    // so the racing line always has a visible next target
+    const postGeo = new THREE.CylinderGeometry(0.12, 0.16, 2.6, 8);
+    const postMat = new THREE.MeshStandardMaterial({
+      color: 0x22262c,
+      emissive: 0xffb327,
+      emissiveIntensity: 1.4,
+    });
+    for (let i = 6; i < N; i += 6) {
+      const s = secs[i];
+      marks.push({ x: s.x, z: s.z, w: race.width - 2, l: 0.7, yaw: Math.atan2(s.dirX, s.dirZ) });
+      for (const side of [1, -1]) {
+        const post = new THREE.Mesh(postGeo, postMat);
+        post.position.set(s.x - side * s.dirZ * (w2 + 1.1), 1.3, s.z + side * s.dirX * (w2 + 1.1));
+        post.castShadow = true;
+        scene.add(post);
+      }
+    }
     addMarkInstances(scene, marks);
+
+    // barriers: red/white wall segments chained just outside both edges —
+    // hard enough to wreck on head-on, perfect for pinning a rival.
+    // Deliberately NOT in noCrashIds: a barrier is a wall.
+    const wallT = 0.5;
+    const wallH = 1.0;
+    const wallSegs: { x: number; z: number; len: number; yaw: number }[] = [];
+    for (const side of [1, -1] as const) {
+      for (let i = 0; i < N; i++) {
+        const a = secs[i];
+        const b = secs[(i + 1) % N];
+        const off = w2 + wallT / 2 + 0.15;
+        const ax = a.x - side * a.dirZ * off;
+        const az = a.z + side * a.dirX * off;
+        const bx = b.x - side * b.dirZ * off;
+        const bz = b.z + side * b.dirX * off;
+        const len = Math.hypot(bx - ax, bz - az) + 0.5; // overlap hides the seams
+        wallSegs.push({ x: (ax + bx) / 2, z: (az + bz) / 2, len, yaw: Math.atan2(bx - ax, bz - az) });
+      }
+    }
+    const wallGeo = new THREE.BoxGeometry(1, 1, 1);
+    const wallColors = [0xd8dde2, 0xc23a2c]; // alternating white/red
+    for (const parity of [0, 1]) {
+      const mine = wallSegs.filter((_, i) => i % 2 === parity);
+      const inst = new THREE.InstancedMesh(
+        wallGeo,
+        new THREE.MeshStandardMaterial({ color: wallColors[parity], roughness: 0.8 }),
+        mine.length,
+      );
+      const m4 = new THREE.Matrix4();
+      const q = new THREE.Quaternion();
+      const sc = new THREE.Vector3();
+      const up = new THREE.Vector3(0, 1, 0);
+      mine.forEach((sg, i) => {
+        q.setFromAxisAngle(up, sg.yaw);
+        sc.set(wallT, wallH, sg.len);
+        m4.compose(new THREE.Vector3(sg.x, wallH / 2, sg.z), q, sc);
+        inst.setMatrixAt(i, m4);
+      });
+      inst.instanceMatrix.needsUpdate = true;
+      inst.castShadow = inst.receiveShadow = true;
+      scene.add(inst);
+    }
+    for (const sg of wallSegs) {
+      const wb = new CANNON.Body({ mass: 0, material: phys.matGround });
+      wb.addShape(new CANNON.Box(new CANNON.Vec3(wallT / 2, wallH / 2, sg.len / 2)));
+      wb.position.set(sg.x, wallH / 2, sg.z);
+      wb.quaternion.setFromAxisAngle(new CANNON.Vec3(0, 1, 0), sg.yaw);
+      phys.world.addBody(wb);
+      phys.wallDirs.set(wb.id, { x: Math.sin(sg.yaw), z: Math.cos(sg.yaw) });
+    }
   }
 
   if (level.ground === 'pad') {

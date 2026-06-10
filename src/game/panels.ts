@@ -90,7 +90,12 @@ export function buildPanels(
     pivot.add(mesh);
     group.add(pivot);
     const pos = mesh.geometry.attributes.position as THREE.BufferAttribute;
-    deformables.push({ mesh, base: Float32Array.from(pos.array as Float32Array) });
+    const col = mesh.geometry.attributes.color as THREE.BufferAttribute;
+    deformables.push({
+      mesh,
+      base: Float32Array.from(pos.array as Float32Array),
+      baseCol: Float32Array.from(col.array as Float32Array),
+    });
     out.push({
       kind: def.kind,
       mesh,
@@ -101,6 +106,7 @@ export function buildPanels(
       maxAngle: def.maxAngle,
       outward: new THREE.Vector3(...def.outward),
       threshold: def.threshold,
+      home: mesh.position.clone(),
       damage: 0,
       angle: 0,
       detached: false,

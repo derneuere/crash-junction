@@ -1,6 +1,7 @@
 import * as CANNON from 'cannon-es';
-import type { Actor, GameEvents, RaceDef } from './types';
+import type { Actor, RaceDef } from './types';
 import { GameState } from './types';
+import type { GameEvents } from './events';
 import type { Emitter } from './emitter';
 import type { PlayerControl } from './control';
 import { GROUP_DECOR } from './physics';
@@ -72,12 +73,14 @@ export function buildLoopSections(waypoints: [number, number][], spacing: number
     const l = Math.hypot(dx, dz) || 1;
     return { x: p[0], z: p[1], dirX: dx / l, dirZ: dz / l, v: 0 };
   });
-  // curvature → corner speed (v = sqrt(a_lat · R)), then brake backwards
+  // curvature → corner speed (v = sqrt(a_lat · R)), then brake backwards.
+  // the lateral-accel budget is generous: corners are meant to be taken
+  // flat-out (with a drift), never on the brakes
   for (let i = 0; i < N; i++) {
     const h0 = Math.atan2(secs[i].dirX, secs[i].dirZ);
     const h1 = Math.atan2(secs[(i + 1) % N].dirX, secs[(i + 1) % N].dirZ);
     const R = spacing / Math.max(1e-4, Math.abs(wrapAngle(h1 - h0)));
-    secs[i].v = clamp(Math.sqrt(7.5 * R), 14, 34);
+    secs[i].v = clamp(Math.sqrt(16 * R), 18, 38);
   }
   for (let pass = 0; pass < 3; pass++) {
     for (let i = N - 1; i >= 0; i--) {
@@ -102,6 +105,7 @@ interface RacerState {
   respawnT: number;
   skill: number; // corner-speed multiplier <1 — what makes them beatable
   progress: number;
+  loose: boolean; // was destabilized last step — resync AI on recovery
 }
 
 export class RaceDirector {
@@ -127,12 +131,13 @@ export class RaceDirector {
     this.secs = race.sections;
     this.N = this.secs.length;
     this.width = race.width;
-    // grid: stagger the rivals behind/beside the start line (section 0)
+    // grid: stagger the rivals AHEAD of the start line (section 0) — the
+    // player starts last and fights their way to the top
     const s0 = this.secs[0];
     const px = -s0.dirZ; // perpendicular
     const pz = s0.dirX;
     rivals.forEach(({ actor, skill }, i) => {
-      const back = -(4.5 + i * 5.5);
+      const back = 7 + i * 7;
       const side = (i % 2 === 0 ? 1 : -1) * 2.6;
       const heading = Math.atan2(s0.dirX, s0.dirZ);
       actor.body.position.set(s0.x + s0.dirX * back + px * side, actor.spec?.rideHeight ?? 0.8, s0.z + s0.dirZ * back + pz * side);
@@ -140,7 +145,7 @@ export class RaceDirector {
       actor.q0.copy(actor.body.quaternion);
       actor.body.wakeUp();
       actor.started = true;
-      this.racers.push({ a: actor, heading, speed: 0, target: 1, lap: 1, respawnT: 0, skill, progress: 0 });
+      this.racers.push({ a: actor, heading, speed: 0, target: 1, lap: 1, respawnT: 0, skill, progress: 0, loose: false });
     });
   }
 
@@ -179,9 +184,25 @@ export class RaceDirector {
         r.heading = Math.atan2(this.secs[idx].dirX, this.secs[idx].dirZ);
         r.speed = RESET_SPEED;
         r.a.crashed = false;
+        r.a.destabilized = 0;
+        r.a.destabilizedByPlayer = false;
+        r.loose = false;
         r.a.body.collisionFilterMask = ~GROUP_DECOR;
       }
       return;
+    }
+    if (r.a.destabilized > 0) {
+      // shunt mode: nobody's steering — physics carries the slide (into the
+      // wall, if the shove was good)
+      r.loose = true;
+      return;
+    }
+    if (r.loose) {
+      // gathered it up — resume the racing line from wherever we slid to
+      r.loose = false;
+      const sp = Math.hypot(b.velocity.x, b.velocity.z);
+      if (sp > 2) r.heading = Math.atan2(b.velocity.x / sp, b.velocity.z / sp);
+      r.speed = sp;
     }
 
     const t = this.secs[r.target];
@@ -268,6 +289,15 @@ export class RaceDirector {
     this.playerPos = ahead + 1;
   }
 
+  /** Heading toward the middle of the road ahead — the takedown-cam
+   *  autopilot steers the player along this while the camera is away. */
+  playerAimHeading(): number {
+    const t = this.secs[this.playerTarget];
+    const look = this.secs[(this.playerTarget + 1) % this.N];
+    const b = this.player.body;
+    return Math.atan2((look.x + t.x) / 2 - b.position.x, (look.z + t.z) / 2 - b.position.z);
+  }
+
   /** Reset-pair for the player: back into the section before their target. */
   respawnPlayer(control: PlayerControl): void {
     const idx = (this.playerTarget - 1 + this.N) % this.N;
@@ -278,6 +308,8 @@ export class RaceDirector {
     const s = this.secs[idx];
     this.player.body.velocity.set(s.dirX * RESET_SPEED, 0, s.dirZ * RESET_SPEED);
     this.player.crashed = false;
+    this.player.destabilized = 0;
+    this.player.destabilizedByPlayer = false;
     this.player.body.collisionFilterMask = ~GROUP_DECOR;
   }
 

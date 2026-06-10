@@ -12,7 +12,7 @@ export const LAUNCH_ACCEL = 34;
 
 export const CRUSH_MAX = 0.55; // max vertex crumple depth (m)
 export const CRUSH_SCALE = 0.1; // crumple amount per impact unit
-export const AFTERTOUCH_F = 5600; // aftertouch force (N)
+export const AFTERTOUCH_F = 9000; // aftertouch force (N) — sized to the 1.45 t sedan
 
 // ---- suspension + downforce (see suspension.ts) ----
 // Arcade-standard model: the chassis box never touches the road while
@@ -31,6 +31,7 @@ export const WRECK_GRIP = 0.85; // Coulomb friction of wrecks rolling on suspens
 export const EXPLOSION_RADIUS_BASE = 9; // m
 export const EXPLOSION_RADIUS_PER_POWER = 5; // m per power unit
 export const EXPLOSION_KICK = 6.5; // Δv (m/s) at ground zero per power unit (and base)
+export const EXPLOSION_MASS_REF = 1700; // kg that takes the full kick — heavier bodies loft less
 // Crashbreaker is EARNED, Burnout-3 style: wrecking vehicles fills the
 // meter; full meter → press E → detonate → meter resets (rechargeable).
 export const CB_PER_WRECK = 0.34; // 3 wrecks = one detonation

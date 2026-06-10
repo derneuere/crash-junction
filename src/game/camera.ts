@@ -11,6 +11,9 @@ const wrapAngle = (a: number) => Math.atan2(Math.sin(a), Math.cos(a));
  *  rotates inside the frame and you watch the drift from mostly-behind,
  *  rather than the camera hard-locking to the velocity direction. */
 export class CameraDirector {
+  /** Idle-orbit framing — the junction reads best tight, a circuit wide. */
+  idleRadius = 34;
+  idleHeight = 12.5;
   readonly focusTarget = new THREE.Vector3(0, 1, 0);
   private focus = new THREE.Vector3(0, 1, 0);
   private orbitA = 0;
@@ -47,6 +50,8 @@ export class CameraDirector {
     player: Actor | null,
     boosting = false,
     drifting = false,
+    aftertouch = false,
+    takedownFocus: THREE.Vector3 | null = null,
   ): void {
     let fovTarget = 55;
     let chaseRate = 3.5; // how hard the camera position clings to `desired`
@@ -54,11 +59,25 @@ export class CameraDirector {
     const wreckSpeed = player?.crashed && pv ? Math.hypot(pv.x, pv.z) : 0;
 
     if (state === GameState.Idle) {
-      // radius 34 keeps the orbit outside every building footprint
+      // default radius 34 keeps the orbit outside every building footprint
       const a = t * 0.12;
-      this.desired.set(Math.cos(a) * 34, 12.5, Math.sin(a) * 34);
+      this.desired.set(Math.cos(a) * this.idleRadius, this.idleHeight, Math.sin(a) * this.idleRadius);
       this.look.set(0, 0.8, 0);
       this.camYawLive = false;
+    } else if (takedownFocus && state === GameState.Launch && player && !player.crashed) {
+      // takedown cam: hang near the victim hitting the wall, the player's
+      // car driving off in frame — the autopilot has the wheel meanwhile
+      const p = player.body.position;
+      let ox = p.x - takedownFocus.x;
+      let oz = p.z - takedownFocus.z;
+      const ol = Math.hypot(ox, oz) || 1;
+      ox /= ol;
+      oz /= ol;
+      this.desired.set(takedownFocus.x + ox * 9, takedownFocus.y + 4.5, takedownFocus.z + oz * 9);
+      this.look.set(takedownFocus.x, takedownFocus.y + 0.6, takedownFocus.z);
+      fovTarget = 52;
+      chaseRate = 5;
+      this.camYawLive = false; // snap back behind the nose when it ends
     } else if (state === GameState.Launch && player && !player.crashed) {
       const p = player.body.position;
       const bq = player.body.quaternion;
@@ -81,8 +100,9 @@ export class CameraDirector {
       this.look.set(p.x + this.fwd.x * 8, p.y + 1.2, p.z + this.fwd.z * 8);
       fovTarget = boosting ? 71 : drifting ? 65 : 62;
       chaseRate = 9;
-    } else if (player && player.crashed && state !== GameState.Done && wreckSpeed > 3.5) {
-      // the wreck is still flying: stay behind it so aftertouch has eyes
+    } else if (player && player.crashed && state !== GameState.Done && wreckSpeed > 3.5 && aftertouch) {
+      // only follow the flying wreck while the player is actively steering
+      // it with aftertouch — otherwise the camera holds its crash orbit
       const p = player.body.position;
       this.fwd.set(pv!.x / wreckSpeed, 0, pv!.z / wreckSpeed);
       this.desired.set(p.x - this.fwd.x * 11, p.y + 4.6, p.z - this.fwd.z * 11);

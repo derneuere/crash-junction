@@ -2,9 +2,9 @@ import * as THREE from 'three';
 import * as CANNON from 'cannon-es';
 import {
   AFTERTOUCH_F,
-  CB_PER_WRECK,
   CRASHBREAKER_POWER,
   EXPLOSION_KICK,
+  EXPLOSION_MASS_REF,
   EXPLOSION_RADIUS_BASE,
   EXPLOSION_RADIUS_PER_POWER,
   FIXED_DT,
@@ -12,17 +12,18 @@ import {
   SLOWMO_HOLD,
   SUSP_MAX_COMP,
 } from './constants';
-import { GameState, type Actor, type CollideEvent, type GameEvents, type LevelDef, type Medal } from './types';
+import { GameState, type Actor, type CollideEvent, type LevelDef } from './types';
+import type { GameEvents, ReportData } from './events';
+import { contactPointOf } from './collision';
 import { Emitter } from './emitter';
+import { createMode, type GameMode, type ModeHost } from './modes/mode';
 import { createPhysics, type PhysicsContext } from './physics';
 import { buildEnvironment, makeHeightSampler } from './environment';
-import { charActor, createBarrel, createPole, createVehicle, deformActor, popWheel, type LoosePart } from './vehicles';
+import { charActor, createBarrel, createPole, createVehicle, deformActor, popWheel, repairVehicle, type LoosePart } from './vehicles';
 import { accumulatePanelDamage, makePanelBody, updatePanelFlap } from './panels';
 import type { PanelState } from './types';
 import { applySuspension, type HeightSampler } from './suspension';
-import { updateTraffic } from './traffic';
 import { PlayerControl, BOOST_CAP } from './control';
-import { RaceDirector } from './race';
 import { Pickups } from './pickups';
 import { Effects } from './effects';
 import { GameAudio } from './audio';
@@ -72,17 +73,15 @@ export class Game {
   private settleTimer = 0;
   private simTime = 0;
   private accumulator = 0;
-  private damage = 0;
-  private displayedDamage = 0;
-  private lastEmittedDamage = -1;
-  private cbCharge = 0; // crashbreaker meter 0..1 — earned by wrecking cars
-  private multiplier = 1;
+  private mode!: GameMode; // composed per level in buildActors()
   private pickups: Pickups;
   private control = new PlayerControl();
-  private race: RaceDirector | null = null;
   private lastEmittedBoost = -1;
-  private cashId = 0;
 
+  private aftertouchActive = false;
+  private lastGlance = -9; // simTime of the last wall-glance reroute
+  private takedownCamT = 0; // seconds left on the takedown camera beat
+  private takedownVictim: Actor | null = null;
   private deformQueue: DeformJob[] = [];
   private pairCooldown = new Map<string, number>();
   private checked = new Map<number, number>(); // bodyId → simTime of the shunt
@@ -128,6 +127,14 @@ export class Game {
     sun.shadow.bias = -0.0008;
     this.scene.add(sun);
 
+    if (level.mode.kind === 'race') {
+      // the circuit is far bigger than the junction — orbit high and wide
+      // so the level select actually shows the track, and push the fog out
+      // so the far straight doesn't dissolve
+      this.director.idleRadius = 95;
+      this.director.idleHeight = 60;
+      this.scene.fog = new THREE.Fog(0xb6cde6, 90, 340);
+    }
     this.heightAt = makeHeightSampler(level);
     this.phys = createPhysics();
     buildEnvironment(this.scene, this.phys, level);
@@ -174,7 +181,7 @@ export class Game {
     this.director.focusTarget.copy(p);
 
     const R = EXPLOSION_RADIUS_BASE + EXPLOSION_RADIUS_PER_POWER * power;
-    let payout = 1500 * power * this.multiplier; // one-shot per detonation
+    this.mode.score?.beginBlast(power);
 
     const kick = (body: CANNON.Body, massScale: number): number => {
       const dx = body.position.x - p.x;
@@ -205,16 +212,16 @@ export class Game {
     };
 
     for (const a of this.actors) {
-      const massScale = Math.min(1, Math.max(0.35, 1100 / a.body.mass));
+      const massScale = Math.min(1, Math.max(0.35, EXPLOSION_MASS_REF / a.body.mass));
       const fall = kick(a.body, massScale);
       if (fall <= 0) continue;
       if (a.kind === 'vehicle') {
-        if (!(a.isPlayer && this.level.practice)) this.markCrashed(a); // practice: blasted, not wrecked
+        if (!a.isPlayer || this.mode.playerCanCrash()) this.markCrashed(a); // practice: blasted, not wrecked
         a.damageLvl += 12 * power * fall;
         this.deformQueue.push({ actor: a, p: p.clone(), strength: (6 + 7 * power) * fall });
         accumulatePanelDamage(a, p, (6 + 7 * power) * fall, this.detachPanel);
-        if (fall > 0.55 && a.popped < 3 && Math.random() < 0.5) this.popLooseWheel(a, p);
-        payout += this.drawCash(a, 950 * power * fall * a.valueMult * this.multiplier);
+        if (fall > 0.55 && a.popped < 3 && a.crashed && Math.random() < 0.5) this.popLooseWheel(a, p);
+        this.mode.score?.blastDraw(a, power, fall);
         if (a.spec?.explosive && !a.exploded && a.fuse === null && fall > 0.2) a.fuse = 0.25 + Math.random() * 0.2;
       } else if (a.kind === 'barrel' && !a.exploded && a.fuse === null) {
         // chain reaction: farther barrels pop later — the JC2 ripple
@@ -223,8 +230,7 @@ export class Game {
     }
     for (const lp of this.looseParts) kick(lp.body, 1);
 
-    this.damage += payout;
-    this.emitCashAt(p, '+$' + Math.round(payout).toLocaleString('en-US'));
+    this.mode.score?.endBlast(p);
 
     if (this.player) {
       if (this.state === GameState.Launch && this.player.crashed) this.enterCrashTime();
@@ -259,26 +265,22 @@ export class Game {
     this.checked.clear();
     this.deformQueue.length = 0;
 
-    this.damage = 0;
-    this.displayedDamage = 0;
-    this.lastEmittedDamage = -1;
     this.timeScale = 1;
     this.slowTimer = 0;
     this.settleTimer = 0;
     this.crashElapsed = 0;
     this.simTime = 0;
     this.accumulator = 0;
-    this.cbCharge = 0;
-    this.multiplier = 1;
+    this.lastGlance = -9;
+    this.takedownCamT = 0;
+    this.takedownVictim = null;
     this.pickups.reset();
     this.control.reset(Math.atan2(this.level.player.dir.x, this.level.player.dir.z));
     this.director.reset();
     this.state = GameState.Idle;
     this.buildActors();
     this.events.emit('state', this.state);
-    this.events.emit('damage', 0);
-    this.events.emit('crashbreaker', 0);
-    this.events.emit('multiplier', 1);
+    this.mode.score?.reset(); // resync the HUD zeros
   }
 
   dispose(): void {
@@ -306,25 +308,47 @@ export class Game {
     for (const p of this.level.poles) this.register(createPole(this.scene, this.phys, onCollide, p.x, p.z));
     for (const b of this.level.barrels) this.register(createBarrel(this.scene, this.phys, onCollide, b.x, b.z));
 
-    if (this.level.race) {
-      const rivals = this.level.race.rivals.map((r) => {
-        const a = createVehicle(
-          this.scene,
-          this.phys,
-          onCollide,
-          { variant: 'sedan', color: r.color, x: 0, z: 0, dir: { x: 0, z: 1 }, speed: 0 },
-          false,
-        );
-        a.scripted = null; // rivals are driven by the RaceDirector, not traffic AI
-        a.body.allowSleep = false; // a dozing racer ignores velocity writes
-        a.body.wakeUp();
+    // the mode is recreated, not reset — a fresh strategy (and its rivals /
+    // scoreboard) every run, same as the actors above
+    this.mode = createMode(this.level, this.makeHost());
+  }
+
+  /** The narrow surface of Game a mode is allowed to touch. */
+  private makeHost(): ModeHost {
+    const game = this;
+    return {
+      events: this.events,
+      get actors(): readonly Actor[] {
+        return game.actors;
+      },
+      get player(): Actor {
+        return game.player!;
+      },
+      control: this.control,
+      heightAt: this.heightAt,
+      project: (p) => this.projectToScreen(p),
+      spawnVehicle: (spawn) => {
+        const a = createVehicle(this.scene, this.phys, (act, e) => this.onCollide(act, e), spawn, false);
         this.register(a);
-        return { actor: a, skill: r.skill };
-      });
-      this.race = new RaceDirector(this.level.race, this.player, rivals, this.events, (pos) => this.finishRace(pos));
-    } else {
-      this.race = null;
-    }
+        return a;
+      },
+      repairPlayer: () => this.repairPlayer(),
+      finish: (report) => this.finishRun(report),
+    };
+  }
+
+  /** Body-shop the player: reclaim the loose parts that are this car's torn
+   *  panels (they share meshes), then restore the car itself. */
+  private repairPlayer(): void {
+    const p = this.player;
+    if (!p) return;
+    const panelMeshes = new Set(p.panels.filter((pl) => pl.detached).map((pl) => pl.mesh));
+    this.looseParts = this.looseParts.filter((lp) => {
+      if (!panelMeshes.has(lp.mesh as THREE.Mesh)) return true;
+      this.phys.world.removeBody(lp.body);
+      return false;
+    });
+    repairVehicle(p);
   }
 
   private register(a: Actor): void {
@@ -380,11 +404,9 @@ export class Game {
   }
 
   private tryCrashbreaker(): void {
-    if (this.race) return; // no crashbreakers in a race, Burnout-style
+    if (!this.mode.allowCrashbreaker()) return;
     if (this.state !== GameState.Crash && this.state !== GameState.Settle) return;
-    if (!this.player?.crashed || this.cbCharge < 1) return;
-    this.cbCharge = 0; // spent — wreck more cars to charge it again
-    this.events.emit('crashbreaker', 0);
+    if (!this.player?.crashed || !this.mode.score?.spendCrashbreaker()) return;
     this.events.emit('flash', 'CRASHBREAKER');
     const p = this.player.body.position;
     this.explode(new THREE.Vector3(p.x, p.y + 0.6, p.z), CRASHBREAKER_POWER);
@@ -400,62 +422,60 @@ export class Game {
 
     if (impact > 2.2 && !scenery) {
       const oa = this.byBody.get(other.id);
-      // Burnout crash rules (burnout wiki: Takedown / Traffic Check / Wreck):
-      // ramming a same-direction lighter vehicle is a SHUNT — they wreck,
-      // you power through and the boost bar refills. Walls, oncoming
-      // traffic and heavies wreck YOU. Poles and barrels are smashables —
-      // they get batted aside and never trigger the crash sequence.
-      const wall = !oa; // static non-scenery body = building
-      if (self.isPlayer && !self.crashed && !this.level.practice && (oa?.kind === 'vehicle' || wall)) {
-        let crashes = wall && impact > 5;
-        if (oa?.kind === 'vehicle') {
-          const v = self.body.velocity;
-          const sp = Math.hypot(v.x, v.z);
-          const ov = oa.body.velocity;
-          const osp = Math.hypot(ov.x, ov.z);
-          // their direction of travel — facing, if they're sitting still
-          const odx = osp > 3 ? ov.x / osp : (oa.scripted?.dir.x ?? 0);
-          const odz = osp > 3 ? ov.z / osp : (oa.scripted?.dir.z ?? 0);
-          const align = sp > 2 ? ((v.x / sp) * odx + (v.z / sp) * odz) : 1;
-          const heavy = (oa.spec?.mass ?? 0) > (self.spec?.mass ?? 1) * 1.6;
-          // a car we just shunted is still tumbling clear — Revenge launches
-          // the checked car harmlessly, so it can't wreck us for a beat
-          const graced = this.simTime - (this.checked.get(oa.body.id) ?? -9) < 1.2;
-          if ((align > 0.35 && !heavy) || graced) {
-            // shunt takedown: no crash for the player
-            if (impact > 4 && !oa.crashed) {
-              this.checked.set(oa.body.id, this.simTime);
-              this.events.emit('flash', 'TAKEDOWN');
-              this.control.boostMeter = BOOST_CAP; // shunts steal their boost
-              const bonus = this.drawCash(oa, 2500 * oa.valueMult * this.multiplier);
-              if (bonus > 0) {
-                this.damage += bonus;
-                _impact.set(oa.body.position.x, oa.body.position.y + 1, oa.body.position.z);
-                this.emitCashAt(_impact, '+$' + Math.round(bonus).toLocaleString('en-US'));
-              }
-            }
-          } else if (align < -0.35 && osp > 3) {
-            crashes = impact > 5; // head-on with oncoming
-          } else if (heavy) {
-            crashes = impact > 5; // the bus always wins
-          } else {
-            crashes = impact > 6.5; // T-boned by crossing traffic
+      // poles and barrels are smashables — they get batted aside and never
+      // trigger the crash sequence; the rules per mode live in collision.ts
+      const wallDir = oa ? null : (this.phys.wallDirs.get(other.id) ?? null);
+      const out = this.mode.resolveContact({
+        self,
+        other: oa ?? null,
+        impact,
+        simTime: this.simTime,
+        shuntGrace: this.checked,
+        wallDir,
+      });
+      if (out.takedown) {
+        this.events.emit('flash', 'TAKEDOWN');
+        this.control.boostMeter = BOOST_CAP; // takedowns steal their boost
+        // junction: the shunted car; race: the rival that just met the wall
+        const victim = out.wreckSelf && !self.isPlayer ? self : oa;
+        if (victim) {
+          if (out.graceOther && oa) this.checked.set(oa.body.id, this.simTime);
+          _impact.set(victim.body.position.x, victim.body.position.y + 1, victim.body.position.z);
+          this.mode.score?.takedownBonus(victim, _impact);
+          if (out.takedownCam) {
+            this.takedownVictim = victim;
+            this.takedownCamT = 1.7; // the autopilot drives while we watch
           }
         }
-        if (crashes) {
-          this.markCrashed(self);
-          if (this.state === GameState.Launch) this.enterCrashTime();
+      }
+      if (out.destabilizeOther > 0 && oa && !oa.crashed) {
+        if (oa.destabilized <= 0 && oa.isPlayer) this.events.emit('flash', 'SLAMMED');
+        if (self.isPlayer) oa.destabilizedByPlayer = true;
+        oa.destabilized = Math.max(oa.destabilized, out.destabilizeOther);
+        if (out.shoveOther > 0) {
+          // the ram's kick: an extra shove down the rammer's line — strictly
+          // horizontal, nobody gets lofted off a bumper
+          const v = self.body.velocity;
+          const sp = Math.hypot(v.x, v.z) || 1;
+          const ob = oa.body;
+          ob.velocity.x += (v.x / sp) * out.shoveOther;
+          ob.velocity.z += (v.z / sp) * out.shoveOther;
+          if (ob.velocity.y > 1.2) ob.velocity.y = 1.2;
+          ob.wakeUp();
+          if (v.y > 1.2) v.y = 1.2; // the rammer stays planted too
         }
       }
-      // traffic only wrecks from player-made chaos: the player itself, an
-      // existing wreck, or a prop sent flying by a blast — never from its
-      // own driving
-      const selfDangerous =
-        self.isPlayer || self.crashed || (self.kind !== 'vehicle' && self.body.velocity.length() > 5);
-      if (selfDangerous && oa && oa.kind === 'vehicle' && !oa.isPlayer && impact > 4) this.markCrashed(oa);
-      if (!self.isPlayer && self.kind === 'vehicle' && oa && (oa.isPlayer || oa.crashed) && impact > 4) {
-        this.markCrashed(self);
+      if (out.destabilizeSelf > 0 && !self.crashed) {
+        if (self.destabilized <= 0 && self.isPlayer) this.events.emit('flash', 'SLAMMED');
+        if (oa?.isPlayer) self.destabilizedByPlayer = true;
+        self.destabilized = Math.max(self.destabilized, out.destabilizeSelf);
       }
+      if (out.wreckOther && oa) this.markCrashed(oa);
+      if (out.wreckSelf) {
+        this.markCrashed(self);
+        if (self.isPlayer && this.state === GameState.Launch) this.enterCrashTime();
+      }
+      if (out.wallGlance && self.isPlayer) this.applyWallGlance(e, wallDir);
     }
     if (self.kind === 'barrel' && impact > 4.5 && !self.exploded && self.fuse === null) self.fuse = 0.06;
     if (self.spec?.explosive && impact > 9.5 && !self.exploded && self.fuse === null) self.fuse = 0.18;
@@ -466,34 +486,16 @@ export class Game {
     if (this.simTime - (this.pairCooldown.get(key) ?? -1) < 0.12) return;
     this.pairCooldown.set(key, this.simTime);
 
-    // world contact point
-    const c = e.contact;
-    let px: number, py: number, pz: number;
-    if (c.bi === self.body) {
-      px = c.bi.position.x + c.ri.x;
-      py = c.bi.position.y + c.ri.y;
-      pz = c.bi.position.z + c.ri.z;
-    } else {
-      px = c.bj.position.x + c.rj.x;
-      py = c.bj.position.y + c.rj.y;
-      pz = c.bj.position.z + c.rj.z;
-    }
-    const p = _impact.set(px, py, pz);
+    const p = contactPointOf(self, e, _impact);
 
-    // cash money — drawn from this actor's finite damage budget, so a car
-    // (or a wreck grinding the road) can only ever pay out its full value
-    const dmg = this.drawCash(
-      self,
-      impact * (scenery ? 80 : 135) * (0.85 + Math.random() * 0.3) * self.valueMult * this.multiplier,
-    );
-    this.damage += dmg;
-    if (dmg > 800 && (scenery || self.body.id < other.id)) {
-      this.emitCashAt(p, '+$' + Math.round(dmg).toLocaleString('en-US'));
-    }
+    // cash money — both actors of a pair report the hit; only the lower
+    // body id floats it, so a crash doesn't shower duplicate numbers
+    this.mode.score?.impactPayout(self, impact, scenery, p, scenery || self.body.id < other.id);
 
-    // effects
+    // effects — crumple, panel loss and the damage ledger belong to wrecks:
+    // a car that's still being driven trades paint, not body panels
     this.fx.sparks.spawn(p, Math.min(40, Math.round(impact * 5)), impact * 0.55);
-    if (impact > 4.2 && self.deformables.length) {
+    if (impact > 4.2 && self.deformables.length && self.crashed) {
       this.deformQueue.push({ actor: self, p: p.clone(), strength: impact });
       accumulatePanelDamage(self, p, impact, this.detachPanel);
       self.damageLvl += impact;
@@ -506,7 +508,7 @@ export class Game {
       this.fx.smoke.spawn(p, { big: true });
       this.fx.smoke.spawn(p, {});
     }
-    if (impact > 9 && py < 1.6) this.fx.scorch.add(px, pz);
+    if (impact > 9 && p.y < 1.6) this.fx.scorch.add(p.x, p.z);
     if (impact > 9.5 && self.kind === 'vehicle' && self.popped < 3 && Math.random() < 0.75) this.popLooseWheel(self, p);
 
     this.audio.thump(impact, this.timeScale);
@@ -525,18 +527,52 @@ export class Game {
   private markCrashed(a: Actor): void {
     if (a.crashed) return;
     a.crashed = true;
+    a.destabilized = 0; // a wreck is past losing control
+    a.destabilizedByPlayer = false;
     a.body.collisionFilterMask = -1;
-    if (!a.isPlayer && a.kind === 'vehicle') {
-      this.cbCharge = Math.min(1, this.cbCharge + CB_PER_WRECK);
-      this.events.emit('crashbreaker', this.cbCharge);
-    }
+    if (!a.isPlayer && a.kind === 'vehicle') this.mode.score?.chargeCrashbreaker();
   }
 
-  /** Take up to `amount` from an actor's remaining damage-money budget. */
-  private drawCash(a: Actor, amount: number): number {
-    const pay = Math.min(a.cashLeft, amount);
-    a.cashLeft -= pay;
-    return pay;
+  /** Shallow wall touch at racing speed: scrub a little speed and point the
+   *  car back along the wall instead of grinding into it. */
+  private applyWallGlance(e: CollideEvent, wallDir: { x: number; z: number } | null): void {
+    const p = this.player;
+    if (!p || p.crashed || p.destabilized > 0) return;
+    if (this.simTime - this.lastGlance < 0.3) return;
+    this.lastGlance = this.simTime;
+    const v = p.body.velocity;
+    let tx: number;
+    let tz: number;
+    if (wallDir) {
+      // slide along the barrier, whichever way we're already going
+      const s = Math.sign(v.x * wallDir.x + v.z * wallDir.z) || 1;
+      tx = wallDir.x * s;
+      tz = wallDir.z * s;
+    } else {
+      const c = e.contact;
+      // contact normal, oriented to point from the wall into the car
+      let nx = c.ni.x;
+      let nz = c.ni.z;
+      if (c.bi === p.body) {
+        nx = -nx;
+        nz = -nz;
+      }
+      const vn = v.x * nx + v.z * nz;
+      tx = v.x - vn * nx;
+      tz = v.z - vn * nz;
+      const tl = Math.hypot(tx, tz);
+      if (tl < 1) return; // square-on crawl — let physics sort that out
+      tx /= tl;
+      tz /= tl;
+    }
+    const speed = Math.hypot(v.x, v.z) * 0.82; // the wall takes its toll
+    const heading = Math.atan2(tx, tz);
+    this.control.heading = heading; // not control.reset() — that refills boost
+    this.control.velAngle = heading;
+    this.control.drifting = false;
+    this.control.speed = speed;
+    p.body.velocity.set(tx * speed, v.y, tz * speed);
+    this.director.addShake(0.18);
   }
 
   private popLooseWheel(actor: Actor, p: THREE.Vector3): void {
@@ -555,24 +591,20 @@ export class Game {
   };
 
   private collectMultiplier(mult: number, pos: THREE.Vector3): void {
-    if (mult > this.multiplier) {
-      this.multiplier = mult;
-      this.events.emit('multiplier', mult);
-    }
+    this.mode.score?.raiseMultiplier(mult);
     this.fx.sparks.spawn(pos, 30, 4);
     this.audio.ding();
-    this.emitCashAt(pos, `x${mult} MULTIPLIER`);
+    this.mode.score?.floatAt(pos, `x${mult} MULTIPLIER`);
   }
 
-  private emitCashAt(p: THREE.Vector3, text: string): void {
+  /** World point → HUD pixel coords for the cash floaters. */
+  private projectToScreen(p: THREE.Vector3): { x: number; y: number } | null {
     const v = p.clone().project(this.camera);
-    if (v.z > 1) return;
-    this.events.emit('cash', {
-      id: this.cashId++,
+    if (v.z > 1) return null;
+    return {
       x: (v.x * 0.5 + 0.5) * this.container.clientWidth,
       y: (-v.y * 0.5 + 0.5) * this.container.clientHeight,
-      text,
-    });
+    };
   }
 
   // ---------- state machine ----------
@@ -586,22 +618,11 @@ export class Game {
     this.events.emit('flash', 'CRASHTIME');
   }
 
-  private finish(): void {
+  /** End the run — the shared tail of every mode's finish. */
+  private finishRun(report: ReportData): void {
     this.state = GameState.Done;
-    const wrecked = this.actors.filter((a) => a.kind === 'vehicle' && !a.isPlayer && a.crashed).length;
-    const m = this.level.medals;
-    const medal: Medal =
-      this.damage >= m.gold ? 'GOLD' : this.damage >= m.silver ? 'SILVER' : this.damage >= m.bronze ? 'BRONZE' : 'NONE';
     this.events.emit('state', this.state);
-    this.events.emit('report', { total: Math.round(this.damage), wrecked, medal });
-  }
-
-  private finishRace(position: number): void {
-    this.state = GameState.Done;
-    const wrecked = this.actors.filter((a) => a.kind === 'vehicle' && !a.isPlayer && a.crashed).length;
-    const medal: Medal = position === 1 ? 'GOLD' : position === 2 ? 'SILVER' : position === 3 ? 'BRONZE' : 'NONE';
-    this.events.emit('state', this.state);
-    this.events.emit('report', { total: Math.round(this.damage), wrecked, medal, position });
+    this.events.emit('report', report);
   }
 
   private updateTimeScale(dt: number): void {
@@ -614,10 +635,7 @@ export class Game {
         this.timeScale += dt * 0.45;
         if (this.timeScale >= 1) {
           this.timeScale = 1;
-          if (this.race && this.player?.crashed) {
-            // race mode: the crash cam is just a beat — reset-pair respawn
-            // back onto the track and keep racing
-            this.race.respawnPlayer(this.control);
+          if (this.player?.crashed && this.mode.onCrashTimeOver() === 'resume') {
             this.state = GameState.Launch;
           } else {
             this.state = GameState.Settle;
@@ -632,34 +650,67 @@ export class Game {
       let speedSum = 0;
       for (const a of this.actors) if (a.kind === 'vehicle' && a.crashed) speedSum += a.body.velocity.length();
       const fusesPending = this.actors.some((a) => a.fuse !== null && !a.exploded);
-      if ((speedSum < 2.5 && !fusesPending) || this.settleTimer > 8) this.finish();
+      if ((speedSum < 2.5 && !fusesPending) || this.settleTimer > 8) this.mode.onSettled();
     }
   }
 
   // ---------- simulation ----------
 
   private stepControls(): void {
-    // the player drives for real (until they crash, then physics owns the wreck)
-    const p = this.player;
-    if (p && !p.crashed && this.state !== GameState.Idle && this.state !== GameState.Done) {
-      this.control.update(
-        p,
-        {
-          steer:
-            (this.keys['ArrowRight'] || this.keys['KeyD'] ? 1 : 0) -
-            (this.keys['ArrowLeft'] || this.keys['KeyA'] ? 1 : 0),
-          throttle: !!(this.keys['ArrowUp'] || this.keys['KeyW']),
-          boost: !!(this.keys['Space'] || this.keys['ShiftLeft'] || this.keys['ShiftRight']),
-          brake: !!(this.keys['ArrowDown'] || this.keys['KeyS']),
-        },
-        this.heightAt,
-      );
+    if (this.takedownCamT > 0) this.takedownCamT -= FIXED_DT;
+
+    // shunt-mode timers: a destabilized car is physics-owned (no steering)
+    // until it recovers — or wrecks on whatever it slides into
+    for (const a of this.actors) {
+      if (a.destabilized <= 0) continue;
+      // a shunt slide skids, it doesn't fly — keep the car planted
+      if (a.body.velocity.y > 1.5) a.body.velocity.y = 1.5;
+      a.destabilized -= FIXED_DT;
+      if (a.destabilized > 0) continue;
+      a.destabilized = 0;
+      a.destabilizedByPlayer = false;
+      if (a.isPlayer && !a.crashed) {
+        // hand the wheel back pointing the way we're sliding
+        const v = a.body.velocity;
+        const sp = Math.hypot(v.x, v.z);
+        if (sp > 1) {
+          const h = Math.atan2(v.x, v.z);
+          this.control.heading = h;
+          this.control.velAngle = h;
+        }
+        this.control.drifting = false;
+        this.control.speed = Math.hypot(v.x, v.z);
+      }
     }
 
-    updateTraffic(this.actors, this.state, this.simTime, this.heightAt);
-    this.race?.step(FIXED_DT, this.state);
+    // the player drives for real (until they crash or get slammed loose —
+    // then physics owns the car)
+    const p = this.player;
+    if (p && !p.crashed && p.destabilized <= 0 && this.state !== GameState.Idle && this.state !== GameState.Done) {
+      let input = {
+        steer:
+          (this.keys['ArrowRight'] || this.keys['KeyD'] ? 1 : 0) -
+          (this.keys['ArrowLeft'] || this.keys['KeyA'] ? 1 : 0),
+        throttle: !!(this.keys['ArrowUp'] || this.keys['KeyW']),
+        boost: !!(this.keys['Space'] || this.keys['ShiftLeft'] || this.keys['ShiftRight']),
+        brake: !!(this.keys['ArrowDown'] || this.keys['KeyS']),
+      };
+      if (this.takedownCamT > 0) {
+        // takedown cam: the autopilot holds the middle of the road while
+        // the camera is busy admiring your handiwork
+        const aim = this.mode.autopilotHeading();
+        if (aim !== null) {
+          const err = Math.atan2(Math.sin(aim - this.control.heading), Math.cos(aim - this.control.heading));
+          input = { steer: Math.max(-1, Math.min(1, -err * 2.5)), throttle: true, boost: false, brake: false };
+        }
+      }
+      this.control.update(p, input, this.heightAt);
+    }
+
+    this.mode.fixedStep(FIXED_DT, this.state, this.simTime);
 
     // aftertouch — nudge the wreck mid-flight, camera-relative
+    this.aftertouchActive = false;
     if ((this.state === GameState.Crash || this.state === GameState.Settle) && this.player?.crashed) {
       let ix = 0;
       let iz = 0;
@@ -668,6 +719,7 @@ export class Game {
       if (this.keys['ArrowLeft']) ix -= 1;
       if (this.keys['ArrowRight']) ix += 1;
       if (ix || iz) {
+        this.aftertouchActive = true;
         this.camera.getWorldDirection(_fwd);
         _fwd.y = 0;
         _fwd.normalize();
@@ -758,14 +810,8 @@ export class Game {
     }
   }
 
-  private updateHudDamage(dt: number): void {
-    this.displayedDamage += (this.damage - this.displayedDamage) * Math.min(1, dt * 6);
-    if (this.damage - this.displayedDamage < 1) this.displayedDamage = this.damage;
-    const v = Math.round(this.displayedDamage);
-    if (v !== this.lastEmittedDamage) {
-      this.lastEmittedDamage = v;
-      this.events.emit('damage', v);
-    }
+  private updateHud(dt: number): void {
+    this.mode.score?.update(dt);
     const boost = Math.round((this.control.boostMeter / BOOST_CAP) * 100);
     if (boost !== this.lastEmittedBoost) {
       this.lastEmittedBoost = boost;
@@ -848,8 +894,10 @@ export class Game {
       this.player,
       this.control.boosting,
       this.control.drifting,
+      this.aftertouchActive,
+      this.takedownCamT > 0 && this.takedownVictim ? this.takedownVictim.group.position : null,
     );
-    this.updateHudDamage(dt);
+    this.updateHud(dt);
     // engine note: revs saw through the gears, drop on every upshift
     const driving = this.state === GameState.Launch && this.player && !this.player.crashed;
     this.audio.engine(

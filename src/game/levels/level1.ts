@@ -12,7 +12,7 @@ import type { LevelDef } from '../types';
 
 export const level1: LevelDef = {
   name: 'CRASH JUNCTION',
-  medals: { bronze: 100000, silver: 160000, gold: 220000 },
+  mode: { kind: 'crash', medals: { bronze: 100000, silver: 160000, gold: 220000 } },
   player: { variant: 'sedan', color: 0xe8352a, x: 2.3, z: -120, dir: { x: 0, z: 1 }, speed: 0 },
   traffic: [
     { variant: 'sedan', color: 0xf2b01e, x: -21.5, z: -2.3, dir: { x: 1, z: 0 }, speed: 8.8 }, // taxi

@@ -71,22 +71,29 @@ export interface RaceDef {
   rivals: { color: number; skill: number }[];
 }
 
+/** What kind of run a level is — each arm carries only the data that mode
+ *  actually uses. 'crash' scores damage cash against medal thresholds;
+ *  'practice' has no stakes (the player can never wreck — crashes scuff and
+ *  shed panels but driving continues, no crashtime, no report); 'race' is a
+ *  closed circuit against AI rivals, scored by finishing position. */
+export type ModeDef =
+  | { kind: 'crash'; medals: { bronze: number; silver: number; gold: number } }
+  | { kind: 'practice' }
+  | { kind: 'race'; race: RaceDef };
+
+export type ModeKind = ModeDef['kind'];
+
 export interface LevelDef {
   name: string;
   /** 'junction' = the crossroad; 'pad' = open practice asphalt;
-   *  'field' = bare grass (the race ribbon is drawn from `race`). */
+   *  'field' = bare grass (the race ribbon is drawn from the race def). */
   ground?: 'junction' | 'pad' | 'field';
-  /** Closed-circuit race against AI rivals. */
-  race?: RaceDef;
-  /** Practice mode: the player can never wreck — crashes scuff and shed
-   *  panels but driving continues. No crashtime, no report. */
-  practice?: boolean;
+  mode: ModeDef;
   /** Painted decals for 'pad' ground: skidpad rings + dash lines. */
   padDecals?: {
     rings: { x: number; z: number; r: number }[];
     dashes: { x: number; z: number; yaw: number }[];
   };
-  medals: { bronze: number; silver: number; gold: number };
   player: VehicleSpawn;
   traffic: VehicleSpawn[];
   poles: { x: number; z: number }[];
@@ -110,6 +117,7 @@ export interface SuspensionCorner {
 export interface DeformablePart {
   mesh: THREE.Mesh;
   base: Float32Array; // undeformed vertex positions
+  baseCol: Float32Array; // unscuffed vertex paint
 }
 
 export type PanelKind = 'door' | 'bonnet' | 'boot' | 'bumper';
@@ -126,6 +134,7 @@ export interface PanelState {
   maxAngle: number; // loose-flap limit (rad) — BP mfMaxJointAngle
   outward: THREE.Vector3; // group-local outward normal (detach kick direction)
   threshold: number; // accumulated crumple (m) to detach — BP detach thresholds
+  home: THREE.Vector3; // pivot-local rest position (for repairs)
   damage: number;
   angle: number;
   detached: boolean;
@@ -148,6 +157,11 @@ export interface Actor {
   curSpeed: number;
   isPlayer: boolean;
   crashed: boolean;
+  /** Shunt mode: seconds of lost control left — the car is physics-owned
+   *  (no steering) until it recovers. A wall touch while destabilized is a
+   *  wreck; if the player caused it, that wreck is a TAKEDOWN. */
+  destabilized: number;
+  destabilizedByPlayer: boolean;
   popped: number;
   damageLvl: number;
   smokeT: number;
@@ -161,32 +175,3 @@ export interface CollideEvent {
   body: CANNON.Body;
   contact: CANNON.ContactEquation;
 }
-
-export type Medal = 'GOLD' | 'SILVER' | 'BRONZE' | 'NONE';
-
-export interface ReportData {
-  total: number;
-  wrecked: number;
-  medal: Medal;
-  /** Race mode: finishing position (1 = win). */
-  position?: number;
-}
-
-export interface CashFloatData {
-  id: number;
-  x: number;
-  y: number;
-  text: string;
-}
-
-export type GameEvents = {
-  state: GameState;
-  damage: number;
-  cash: CashFloatData;
-  flash: string; // 'CRASHTIME' | 'CRASHBREAKER' | 'TAKEDOWN'
-  report: ReportData;
-  crashbreaker: number; // charge fraction 0..1 (1 = ready to detonate)
-  multiplier: number; // current damage-cash multiplier
-  boost: number; // boost meter fraction 0..1
-  race: { lap: number; laps: number; pos: number; racers: number };
-};
