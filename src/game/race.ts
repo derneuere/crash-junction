@@ -208,7 +208,10 @@ export class RaceDirector {
     const t = this.secs[r.target];
     const dx = t.x - b.position.x;
     const dz = t.z - b.position.z;
-    if (Math.hypot(dx, dz) < this.width * 0.8) {
+    // gate-reached radius: roughly the half-width, but never multiple
+    // section spacings — on a wide track that would skip targets and pull
+    // the racing line off the sections entirely
+    if (Math.hypot(dx, dz) < Math.min(this.width * 0.8, 13)) {
       r.target = (r.target + 1) % this.N;
       if (r.target === 1) r.lap++;
     }
@@ -298,19 +301,34 @@ export class RaceDirector {
     return Math.atan2((look.x + t.x) / 2 - b.position.x, (look.z + t.z) / 2 - b.position.z);
   }
 
-  /** Reset-pair for the player: back into the section before their target. */
-  respawnPlayer(control: PlayerControl): void {
+  /** Reset-pair for the player: back into the section before their target.
+   *  `speed` lets the takedown-cam handback keep the player's earned pace
+   *  instead of the crash respawn's SLOW start. */
+  respawnPlayer(control: PlayerControl, speed = RESET_SPEED): void {
     const idx = (this.playerTarget - 1 + this.N) % this.N;
     this.placeAt(this.player, idx);
     const heading = Math.atan2(this.secs[idx].dirX, this.secs[idx].dirZ);
     control.reset(heading);
-    control.speed = RESET_SPEED;
+    control.speed = speed;
     const s = this.secs[idx];
-    this.player.body.velocity.set(s.dirX * RESET_SPEED, 0, s.dirZ * RESET_SPEED);
+    this.player.body.velocity.set(s.dirX * speed, 0, s.dirZ * speed);
     this.player.crashed = false;
     this.player.destabilized = 0;
     this.player.destabilizedByPlayer = false;
     this.player.body.collisionFilterMask = ~GROUP_DECOR;
+  }
+
+  /** Metres the player sits beyond the road edge (0 = on the track). The
+   *  centreline is sampled at section spacing, so the nearest-centre check
+   *  carries a half-spacing slack. */
+  playerOffTrackDistance(): number {
+    const p = this.player.body.position;
+    let best = Infinity;
+    for (const s of this.secs) {
+      const d = Math.hypot(p.x - s.x, p.z - s.z);
+      if (d < best) best = d;
+    }
+    return Math.max(0, best - this.width / 2 - 4);
   }
 
   private placeAt(a: Actor, idx: number): void {

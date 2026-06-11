@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { GameState, type Actor } from './types';
+import { simRand } from './rng';
 
 const wrapAngle = (a: number) => Math.atan2(Math.sin(a), Math.cos(a));
 
@@ -130,9 +131,11 @@ export class CameraDirector {
     // the chase cam clings tightly while driving; crash orbits stay floaty
     camera.position.lerp(this.desired, 1 - Math.exp(-chaseRate * dt));
 
+    // seeded, not Math.random: aftertouch forces are camera-relative, so the
+    // shaken camera orientation feeds back into the sim and must replay
     this.shakeMag *= Math.exp(-3.2 * dt);
     this.shakeVec
-      .set(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5)
+      .set(simRand() - 0.5, simRand() - 0.5, simRand() - 0.5)
       .multiplyScalar(this.shakeMag * 0.6);
     camera.position.add(this.shakeVec);
     this.look.addScaledVector(this.shakeVec, 1.5);

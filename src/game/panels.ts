@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import * as CANNON from 'cannon-es';
 import { CRUSH_SCALE } from './constants';
 import type { Actor, DeformablePart, PanelKind, PanelState, Variant } from './types';
+import { simRand } from './rng';
 import { hullMat, makeColoredBox } from './geometry';
 
 // Detachable body panels, modeled on Burnout Paradise's DeformationSpec
@@ -174,11 +175,11 @@ export function makePanelBody(actor: Actor, p: PanelState, matCar: CANNON.Materi
   _out.copy(p.outward).applyQuaternion(actor.group.quaternion);
   const v = actor.body.velocity;
   body.velocity.set(
-    v.x + _out.x * (3 + Math.random() * 3) + (Math.random() - 0.5) * 2,
-    Math.abs(v.y) * 0.3 + 2.5 + Math.random() * 3 + _out.y * 3,
-    v.z + _out.z * (3 + Math.random() * 3) + (Math.random() - 0.5) * 2,
+    v.x + _out.x * (3 + simRand() * 3) + (simRand() - 0.5) * 2,
+    Math.abs(v.y) * 0.3 + 2.5 + simRand() * 3 + _out.y * 3,
+    v.z + _out.z * (3 + simRand() * 3) + (simRand() - 0.5) * 2,
   );
-  body.angularVelocity.set((Math.random() - 0.5) * 14, (Math.random() - 0.5) * 14, (Math.random() - 0.5) * 14);
+  body.angularVelocity.set((simRand() - 0.5) * 14, (simRand() - 0.5) * 14, (simRand() - 0.5) * 14);
   body.linearDamping = 0.12;
   body.angularDamping = 0.12;
   body.allowSleep = true;

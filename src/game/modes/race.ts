@@ -1,4 +1,5 @@
 import type { GameState, RaceDef } from '../types';
+import { LAUNCH_SPEED } from '../constants';
 import { resolveRaceContact, type ContactContext, type ContactOutcome } from '../collision';
 import type { Medal } from '../events';
 import { RaceDirector } from '../race';
@@ -10,6 +11,7 @@ import { countWrecked, type GameMode, type ModeHost } from './mode';
 export class RaceMode implements GameMode {
   readonly score = null;
   private director: RaceDirector;
+  private handbackSpeed = 0; // player speed when the takedown cam was earned
 
   constructor(def: RaceDef, private host: ModeHost) {
     const rivals = def.rivals.map((r) => {
@@ -31,11 +33,34 @@ export class RaceMode implements GameMode {
   }
 
   resolveContact(ctx: ContactContext): ContactOutcome {
-    return resolveRaceContact(ctx);
+    const out = resolveRaceContact(ctx);
+    if (out.takedownCam) {
+      const v = this.host.player.body.velocity;
+      this.handbackSpeed = Math.hypot(v.x, v.z);
+    }
+    return out;
   }
 
   autopilotHeading(): number | null {
     return this.director.playerAimHeading();
+  }
+
+  playerOffTrackDistance(): number {
+    return this.director.playerOffTrackDistance();
+  }
+
+  /** The cam beat is over — if it left the player thrown over the barrier,
+   *  beached on the grass or ground to a halt, the reset-pair puts them
+   *  back on the track carrying the speed they had at the takedown. */
+  onTakedownCamOver(): void {
+    const p = this.host.player;
+    if (p.crashed) return; // the crash flow has its own respawn
+    const v = p.body.velocity;
+    const sp = Math.hypot(v.x, v.z);
+    if (this.director.playerOffTrackDistance() > 0 || sp < 8) {
+      this.director.respawnPlayer(this.host.control, Math.min(Math.max(this.handbackSpeed, 10), LAUNCH_SPEED));
+      this.host.repairPlayer();
+    }
   }
 
   allowCrashbreaker(): boolean {

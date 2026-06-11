@@ -42,18 +42,20 @@ export const driftTrack: LevelDef = {
     { x: -49.8, z: -38.6 },
     { x: -50.4, z: -35.4 },
   ],
+  // proper test ramps: 14° and 17° — at speed these give real ballistic air
+  // (vy ≈ √(4·g·height), see RAMP_LAUNCH_VY_MAX), not kerb hops
   ramps: [
-    { x: 48, zStart: -14, length: 8, width: 4.2, height: 0.9 },
-    { x: 48, zStart: 18, length: 8, width: 4.2, height: 1.2 },
+    { x: 48, zStart: -14, length: 8, width: 4.2, height: 2.0 },
+    { x: 48, zStart: 18, length: 9, width: 4.2, height: 2.8 },
   ],
   buildings: [],
   // rings at door height around the skidpad — collect them mid-drift —
-  // plus one over each jump
+  // plus one on each jump's flight arc (ascent off ramp 1, apex off ramp 2)
   pickups: [
     ringAt(0, 1.1, 2),
     ringAt((Math.PI * 2) / 3, 1.1, 3),
     ringAt((Math.PI * 4) / 3, 1.1, 2),
-    { x: 48, y: 2.3, z: -2, mult: 2 },
-    { x: 48, y: 2.7, z: 30, mult: 3 },
+    { x: 48, y: 5.2, z: 10, mult: 2 },
+    { x: 48, y: 8.5, z: 70, mult: 3 },
   ],
 };

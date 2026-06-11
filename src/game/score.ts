@@ -1,6 +1,7 @@
 import type * as THREE from 'three';
 import { CB_PER_WRECK } from './constants';
 import type { Actor } from './types';
+import { simRand } from './rng';
 import type { EventBus, ScoreEvents } from './events';
 
 /** Crash-scoring: the damage-cash total, the pickup multiplier, the
@@ -36,7 +37,7 @@ export class Scoreboard {
   /** Collision payout — drawn from this actor's finite damage budget, so a
    *  car (or a wreck grinding the road) can only ever pay out its full value. */
   impactPayout(self: Actor, impact: number, scenery: boolean, p: THREE.Vector3, showFloat: boolean): void {
-    const dmg = this.draw(self, impact * (scenery ? 80 : 135) * (0.85 + Math.random() * 0.3) * self.valueMult * this.mult);
+    const dmg = this.draw(self, impact * (scenery ? 80 : 135) * (0.85 + simRand() * 0.3) * self.valueMult * this.mult);
     this.damage += dmg;
     if (dmg > 800 && showFloat) this.floatAt(p, '+$' + Math.round(dmg).toLocaleString('en-US'));
   }

@@ -3,6 +3,7 @@ import * as CANNON from 'cannon-es';
 import { CRUSH_MAX, CRUSH_SCALE, GRAVITY, SUSP_MAX_COMP, SUSP_SAG, SUSP_ZETA } from './constants';
 import type { Actor, CollideEvent, DeformablePart, SuspensionCorner, VehicleSpawn, VehicleSpec, Variant } from './types';
 import { GROUP_DECOR, type PhysicsContext } from './physics';
+import { simRand } from './rng';
 import { GLASS, hullMat, makeBoxHullGeometry, makeSedanGeometry, makeTankGeometry, wheelGeometry, wheelMat } from './geometry';
 import { buildPanels } from './panels';
 import { makeBarrelTexture } from './textures';
@@ -208,7 +209,7 @@ export function createBarrel(scene: THREE.Scene, phys: PhysicsContext, onCollide
   const body = new CANNON.Body({ mass: 55, material: phys.matCar });
   body.addShape(new CANNON.Cylinder(0.32, 0.32, 0.85, 10));
   body.position.set(x, 0.425, z);
-  body.quaternion.setFromAxisAngle(new CANNON.Vec3(0, 1, 0), Math.random() * Math.PI);
+  body.quaternion.setFromAxisAngle(new CANNON.Vec3(0, 1, 0), simRand() * Math.PI);
   body.linearDamping = 0.1;
   body.angularDamping = 0.2;
   body.allowSleep = true;
@@ -359,11 +360,11 @@ export function popWheel(actor: Actor, worldPoint: THREE.Vector3, scene: THREE.S
   b.position.set(wheel.position.x, wheel.position.y, wheel.position.z);
   const v = actor.body.velocity;
   b.velocity.set(
-    v.x + (Math.random() - 0.5) * 6,
-    Math.abs(v.y) * 0.4 + 3 + Math.random() * 4,
-    v.z + (Math.random() - 0.5) * 6,
+    v.x + (simRand() - 0.5) * 6,
+    Math.abs(v.y) * 0.4 + 3 + simRand() * 4,
+    v.z + (simRand() - 0.5) * 6,
   );
-  b.angularVelocity.set((Math.random() - 0.5) * 16, (Math.random() - 0.5) * 16, (Math.random() - 0.5) * 16);
+  b.angularVelocity.set((simRand() - 0.5) * 16, (simRand() - 0.5) * 16, (simRand() - 0.5) * 16);
   b.linearDamping = 0.15;
   b.angularDamping = 0.15;
   world.addBody(b);

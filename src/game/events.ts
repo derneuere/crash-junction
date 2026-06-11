@@ -42,6 +42,8 @@ export type CoreEvents = {
   flash: string; // 'CRASHTIME' | 'CRASHBREAKER' | 'TAKEDOWN'
   report: ReportData;
   boost: number; // boost meter fraction 0..1
+  replay: boolean; // a recorded take is driving the sim (ESC exits)
+  cine: boolean; // cinematic beat outside crashtime (takedown cam) — letterbox
 };
 
 export type ScoreEvents = {

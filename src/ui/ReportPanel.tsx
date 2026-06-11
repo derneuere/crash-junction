@@ -15,7 +15,7 @@ export function ReportPanel({ report }: { report: ReportData }) {
       <div className={`medal ${report.medal.toLowerCase()}`}>
         {report.medal === 'NONE' ? 'NO MEDAL' : `${report.medal} MEDAL`}
       </div>
-      <div className="key">R — RUN IT BACK</div>
+      <div className="key">ENTER — RUN IT BACK &middot; R — BUG REPORT</div>
     </div>
   );
 }

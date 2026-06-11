@@ -41,7 +41,7 @@ export const raceway: LevelDef = {
     kind: 'race',
     race: {
       laps: 3,
-      width: 16, // four lanes — room to trade paint
+      width: 22, // four generous lanes — Burnout roads, room for combat
       sections: SECTIONS,
       rivals: [
         { color: 0x2266dd, skill: 0.97 },

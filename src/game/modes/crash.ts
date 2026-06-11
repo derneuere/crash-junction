@@ -34,6 +34,12 @@ export class CrashMode implements GameMode {
     return null; // no takedown cam at the junction
   }
 
+  playerOffTrackDistance(): number {
+    return 0; // the junction is open ground
+  }
+
+  onTakedownCamOver(): void {}
+
   allowCrashbreaker(): boolean {
     return true;
   }

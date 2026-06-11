@@ -29,8 +29,10 @@ const _up = new CANNON.Vec3();
 //    boost Capacity default). Refill-from-drift/airtime rates are invented —
 //    BP keeps earn rules in code (Stunt-type behavior, ECarType 2).
 
-const STEER_LOCK_LOW = (15 * Math.PI) / 180;
-const STEER_LOCK_HIGH = (2.4 * Math.PI) / 180; // MinAngle range 1.2–2.5°
+// locks run ×1.5 over the BP-derived values (10°/1.6°) — hands-on verdict:
+// authentic locks made ramming at speed nearly impossible on these tight maps
+const STEER_LOCK_LOW = (22.5 * Math.PI) / 180;
+const STEER_LOCK_HIGH = (3.6 * Math.PI) / 180;
 const STEER_FULL_BELOW = 13.4; // m/s (30 mph)
 const STEER_MIN_AT = 38; // m/s — lock fades fast: gripped steering is for
 //                          ramming and lane changes, corners want the drift
@@ -41,7 +43,9 @@ const CENTER_BIAS = 2.5;
 const WHEELBASE = 2.95;
 
 const DRIFT_MIN_SPEED = 18; // m/s (40 mph)
-const DRIFT_MAX_SLIP = (60 * Math.PI) / 180;
+// 40°, down from BP's 60° modal DriftMaxAngle — at 60° the car travels so
+// far sideways that every walled sweeper ends in the barrier
+const DRIFT_MAX_SLIP = (40 * Math.PI) / 180;
 const DRIFT_EXIT_SLIP = (7 * Math.PI) / 180; // straightened out → tyres hook up
 const DRIFT_ENTRY_TIME = 0.3; // s to reach base slip
 const DRIFT_RECOVER_TIME = 0.55; // s back to full grip — BP hooks up fast
@@ -49,12 +53,13 @@ const DRIFT_RECOVER_TIME = 0.55; // s back to full grip — BP hooks up fast
 const GRIP_CHASE = 6.5; // gripped: velocity dir chases heading (1/s) — a few °
 //                         of working slip in every corner reads as mass
 const DRIFT_CHASE = 2.4; // recovering from a slide: it lags behind (1/s)
-const DRIFT_DEEPEN = 1 / 0.35; // slip chases a deeper angle at this rate (1/s)
+const DRIFT_DEEPEN = 1 / 0.45; // slip chases a deeper angle at this rate (1/s)
+//                               (eased off 0.35 s — the angle slammed in)
 const DRIFT_RELAX = 1 / 0.28; // straightening is brisker than deepening —
 //                               the community-felt "instant hook-up"
 const DRIFT_CARVE = 1.6; // path bend per rad of slip (1/s) — a deeper drift
 //                          IS a tighter corner; that's what the angle is for
-const DRIFT_TIGHTEN = (14 * Math.PI) / 180; // mid-drift brake tap digs in deeper
+const DRIFT_TIGHTEN = (10 * Math.PI) / 180; // mid-drift brake tap digs in deeper
 const COUNTERSTEER = 1.8;
 const DRIFT_SCRUB = 3.5; // m/s² speed bleed at full slip (shallow scrubs less)
 
@@ -157,7 +162,11 @@ export class PlayerControl {
     if (_up.y < 0.5) {
       this.tippedTime += dt;
       this.speed = Math.hypot(b.velocity.x, b.velocity.z); // track reality
-      if (this.tippedTime > 1.2) {
+      const ride = player.spec?.rideHeight ?? 0.8;
+      // righting snaps the car to the road, so wait until it's actually near
+      // the road — a car tumbling mid-air would teleport down from altitude
+      const nearGround = b.position.y - heightAt(b.position.x, b.position.z) < ride + 1.5;
+      if (this.tippedTime > 1.2 && nearGround) {
         this.tippedTime = 0;
         this.speed *= 0.25;
         this.velAngle = this.heading;

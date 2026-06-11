@@ -63,6 +63,10 @@ export interface ContactContext {
    *  against its side normal — engine contact normals on segment END faces
    *  would read shallow scrapes as head-ons. */
   wallDir: { x: number; z: number } | null;
+  /** simTime until which the player's takedown wall-grace runs (see
+   *  TAKEDOWN_WALL_GRACE) — walls glance instead of wrecking, debris
+   *  doesn't destabilize. */
+  playerWallGraceUntil: number;
 }
 
 /** What the core should apply for this contact. */
@@ -122,7 +126,13 @@ export function resolveJunctionContact(ctx: ContactContext, playerCanCrash: bool
   return out;
 }
 
-/** Who is driving into whom — the harder pusher wins the encounter. */
+/** Who is driving into whom. Longitudinal hits (rear-ends): the harder
+ *  pusher along the line between the cars wins — that's the shunt. But for
+ *  DOOR-TO-DOOR contact (the line between the cars sits mostly abeam of the
+ *  pair's travel) the push comparison judges by whose racing line happened
+ *  to converge harder — which hands the AI a SLAMMED against a faster
+ *  player it merely drifted into. Burnout resolves side contests by
+ *  authority: the faster car wins. */
 export function judgeAggressor(self: Actor, other: Actor): 'self' | 'other' {
   const dx = other.body.position.x - self.body.position.x;
   const dz = other.body.position.z - self.body.position.z;
@@ -133,6 +143,16 @@ export function judgeAggressor(self: Actor, other: Actor): 'self' | 'other' {
   const ov = other.body.velocity;
   const selfPush = sv.x * nx + sv.z * nz; // how hard self drives into other
   const otherPush = -(ov.x * nx + ov.z * nz); // and vice versa
+  const sSpeed = Math.hypot(sv.x, sv.z);
+  const oSpeed = Math.hypot(ov.x, ov.z);
+  // |n · combined travel direction|: ~1 = one car behind the other, ~0 = abeam
+  const tx = sv.x + ov.x;
+  const tz = sv.z + ov.z;
+  const tl = Math.hypot(tx, tz) || 1;
+  const alongTravel = Math.abs(nx * (tx / tl) + nz * (tz / tl));
+  if (alongTravel < 0.55 && Math.abs(sSpeed - oSpeed) > 2) {
+    return sSpeed > oSpeed ? 'self' : 'other';
+  }
   return selfPush >= otherPush ? 'self' : 'other';
 }
 
@@ -147,23 +167,25 @@ export function resolveRaceContact(ctx: ContactContext): ContactOutcome {
   const out = none();
 
   if (self.isPlayer && !self.crashed) {
+    // a fresh takedown buys the player out of wrecking at the takedown site
+    const graced = ctx.simTime < ctx.playerWallGraceUntil;
     if (other?.kind === 'vehicle') {
       // judged once, from the player's side of the pair
       if (other.crashed) {
-        if (impact > 5.5) out.destabilizeSelf = 1.2; // clipping a wreck unsettles you
+        if (impact > 5.5 && !graced) out.destabilizeSelf = 1.2; // clipping a wreck unsettles you
       } else if (impact > 4) {
         if (judgeAggressor(self, other) === 'self') {
           out.destabilizeOther = 2.2; // shunt mode — they fight the slide
-          out.shoveOther = Math.min(10, 4 + impact * 0.5); // the ram's kick
+          out.shoveOther = Math.min(12, 5 + impact * 0.6); // the ram's kick (#1: stronger)
         } else {
-          out.destabilizeSelf = 1.5; // slammed — hang on
+          out.destabilizeSelf = 1.5; // slammed — hang on (steering degraded, not dead)
         }
       }
     } else if (isWall) {
       const { closing, steep } = wallApproach(self, ctx.wallDir, impact);
       if (self.destabilized > 0) {
-        if (closing > 3.5) out.wreckSelf = true; // no hands on the wheel — that's a crash
-      } else if (closing > 7 && steep > 0.45) {
+        if (closing > 3.5 && !graced) out.wreckSelf = true; // no hands on the wheel — that's a crash
+      } else if (closing > 7 && steep > 0.45 && !graced) {
         out.wreckSelf = true; // hard and frontal
       } else {
         out.wallGlance = true; // scrape: lose a little speed, carry on
@@ -176,6 +198,17 @@ export function resolveRaceContact(ctx: ContactContext): ContactOutcome {
       out.takedown = self.destabilizedByPlayer;
       out.takedownCam = self.destabilizedByPlayer;
     }
+  } else if (
+    // chain shunt (#1): rival AI is velocity-driven and would soak a sliding
+    // car's momentum dead — instead the slide knocks the blocker loose too.
+    // Player credit propagates (Game), so a chained wall wreck still pays
+    // out as a TAKEDOWN, Burnout style.
+    !self.isPlayer && self.kind === 'vehicle' && !self.crashed && self.destabilized > 0 &&
+    other?.kind === 'vehicle' && !other.isPlayer && !other.crashed && other.destabilized <= 0 &&
+    impact > 3
+  ) {
+    out.destabilizeOther = 1.4;
+    out.shoveOther = Math.min(8, 3 + impact * 0.4);
   }
   return out;
 }

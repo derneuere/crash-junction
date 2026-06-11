@@ -33,6 +33,12 @@ export class PracticeMode implements GameMode {
     return null;
   }
 
+  playerOffTrackDistance(): number {
+    return 0; // the pad is open ground
+  }
+
+  onTakedownCamOver(): void {}
+
   allowCrashbreaker(): boolean {
     return true; // unreachable anyway: the crashbreaker needs a wrecked player
   }

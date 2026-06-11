@@ -23,6 +23,8 @@ interface HudProps {
   cash: CashFloatData[];
   crashbreaker: number; // charge fraction 0..1
   race: RaceStanding | null;
+  replaying: boolean;
+  cineCam: boolean; // takedown-cam beat — letterbox outside crashtime
   onCashDone: (id: number) => void;
 }
 
@@ -30,9 +32,9 @@ interface HudProps {
  *  cash floats) with the mode-specific chips composed in. */
 export function Hud({
   state, mode, damage, goldTarget, levelId, onSelectLevel,
-  multiplier, boost, flash, report, cash, crashbreaker, race, onCashDone,
+  multiplier, boost, flash, report, cash, crashbreaker, race, replaying, cineCam, onCashDone,
 }: HudProps) {
-  const cine = state === GameState.Crash;
+  const cine = state === GameState.Crash || cineCam;
   const inRun = state !== GameState.Idle && state !== GameState.Done;
   const driving = state === GameState.Launch;
   const crashed = state === GameState.Crash || state === GameState.Settle;
@@ -54,6 +56,8 @@ export function Hud({
         <b>CRASH JUNCTION</b>
         react + three.js + cannon-es
       </div>
+
+      {replaying && <div className="replay">&#9210; REPLAY &middot; ESC EXITS</div>}
 
       {flash && (
         <div className="flash" key={flash.key}>
@@ -79,7 +83,7 @@ export function Hud({
             <div className="sub">
               &#8593; ACCELERATE &middot; &#8592;&#8594; STEER &middot; SPACE — BOOST &middot; &#8595; TAP TO DRIFT (STEER SETS THE
               ANGLE, STRAIGHTEN TO EXIT)
-              {mode === 'crash' && <> &middot; E — CRASHBREAKER</>} &middot; R — RESTART
+              {mode === 'crash' && <> &middot; E — CRASHBREAKER</>} &middot; ENTER — RESTART &middot; R — BUG REPORT
             </div>
           </div>
         </>
@@ -106,7 +110,7 @@ export function Hud({
           ) : (
             <>&#8592;&#8593;&#8595;&#8594; AFTERTOUCH</>
           )}
-          {' '}&middot; R RESTART
+          {' '}&middot; ENTER RESTART &middot; R BUG REPORT
         </div>
       )}
 

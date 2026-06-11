@@ -1,0 +1,42 @@
+[
+  {
+    "file": "boost-jump-flat-pad.json",
+    "name": "boosting straight on the flat pad must not launch the car (report 2026-06-11)",
+    "assert": { "maxAltitude": 4, "maxUpwardSpeed": 8, "maxTiltDeg": 60 },
+    "checksums": "ignore"
+  },
+  {
+    "file": "junction-main-ramp-jump.json",
+    "name": "junction: straight boost run over the main ramp into the T-bone (determinism pin)",
+    "assertMin": { "maxAltitude": 1.4 },
+    "assert": { "maxAltitude": 8, "maxUpwardSpeed": 14, "maxTiltDeg": 181 },
+    "checksums": "require"
+  },
+  {
+    "file": "takedown-self-crash.json",
+    "name": "race: a takedown must not wreck the player at the takedown site (report 2026-06-11)",
+    "assertMin": { "takedowns": 1, "takedownToPlayerCrashMin": 1.5 },
+    "checksums": "ignore"
+  },
+  {
+    "file": "takedown-cam-throw.json",
+    "name": "race: the takedown cam must not strand the player off the track (report 2026-06-11)",
+    "assertMin": { "takedowns": 1 },
+    "assert": { "finalOffTrack": 5 },
+    "checksums": "ignore"
+  },
+  {
+    "file": "slam-misjudge.json",
+    "name": "race: a faster player winning a door-to-door is a shunt, not a SLAMMED (report 2026-06-11)",
+    "assertMin": { "rivalShunts": 1 },
+    "assert": { "playerSlams": 1 },
+    "checksums": "ignore"
+  },
+  {
+    "file": "pad-jump-line.json",
+    "name": "proving ground: diagonal hit on ramp 2 gives real but sane air (determinism pin)",
+    "assertMin": { "maxAltitude": 5, "maxUpwardSpeed": 7 },
+    "assert": { "maxAltitude": 11, "maxUpwardSpeed": 12.5, "maxTiltDeg": 181 },
+    "checksums": "require"
+  }
+]

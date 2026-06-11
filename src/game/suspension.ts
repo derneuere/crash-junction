@@ -4,6 +4,7 @@ import {
   DOWNFORCE_CAP,
   FIXED_DT,
   GRAVITY,
+  RAMP_LAUNCH_VY_MAX,
   SUSP_DROOP,
   SUSP_MAX_COMP,
   WRECK_GRIP,
@@ -69,6 +70,34 @@ export function applySuspension(actors: Actor[], state: GameState, heightAt: Hei
       const v = b.velocity;
       const v2 = v.x * v.x + v.z * v.z;
       b.force.y -= Math.min(DOWNFORCE * v2, DOWNFORCE_CAP * Math.abs(GRAVITY)) * b.mass;
+    }
+
+    // kinematic ground-follow for driven cars: the spring/damper alone can't
+    // track a rising wedge at speed (the damper saturates above ~2 m/s of
+    // ascent and force caps at fmax), so a fast car would plow THROUGH a
+    // ramp instead of riding it. Hold the chassis at full stroke above the
+    // field and hand it the field's rise rate — the lip then releases it
+    // ballistically, which is what makes ramp jumps reach the rings.
+    if (!a.crashed && _sUp.y > 0.5) {
+      const ground = heightAt(b.position.x, b.position.z);
+      // the floor must also clear the chassis box off the physical ground
+      // plane (halfY > ride − stroke on every spec!) — holding the box even
+      // centimetres into the plane feeds the contact solver a sustained
+      // lever and hard landings slowly pole-vault the car into a flip
+      const minY = ground + Math.max(ride - SUSP_MAX_COMP, a.spec.halfY + 0.01);
+      if (b.position.y < minY) {
+        b.position.y = minY;
+        const v = b.velocity;
+        const ahead = heightAt(b.position.x + v.x * FIXED_DT, b.position.z + v.z * FIXED_DT);
+        const rise = (ahead - ground) / FIXED_DT;
+        if (rise > 0) {
+          // a surface can fling you no higher than ~2× its own height: full
+          // ramps launch for real, kerbs and ramp side-skirts only blip —
+          // their sub-metre blend zones read as 20+ m/s rises at speed
+          const launchCap = Math.min(RAMP_LAUNCH_VY_MAX, Math.sqrt(4 * Math.abs(GRAVITY) * ahead));
+          v.y = Math.max(v.y, Math.min(rise, launchCap));
+        }
+      }
     }
 
     // crashed cars riding on springs: tire-scrub friction from the normal load

@@ -46,6 +46,13 @@ export interface GameMode {
   /** Where the autopilot should aim while the takedown camera plays —
    *  the middle of the road ahead. null = no autopilot in this mode. */
   autopilotHeading(): number | null;
+  /** Metres the player sits beyond the drivable road (0 = on it). Modes
+   *  without a road return 0. Feeds replay stats + the cam handback check. */
+  playerOffTrackDistance(): number;
+  /** The takedown camera beat just ended — the mode may rescue the player
+   *  (race: respawn on the track at pre-takedown speed if the beat left
+   *  them beached, thrown over the barrier, or ground to a halt). */
+  onTakedownCamOver(): void;
   /** false = E does nothing (race, Burnout-style). */
   allowCrashbreaker(): boolean;
   /** Crashtime slow-mo just ramped back to 1× with the player wrecked.

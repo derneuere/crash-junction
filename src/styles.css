@@ -181,6 +181,22 @@ canvas {
 .hint .cb {
   color: #ffd34d;
 }
+.replay {
+  position: absolute;
+  top: 70px;
+  left: 50%;
+  transform: translateX(-50%) skewX(-8deg);
+  z-index: 7; /* above the cine letterbox bars */
+  padding: 7px 18px;
+  background: rgba(8, 10, 14, 0.7);
+  border: 1px solid rgba(120, 200, 255, 0.6);
+  font-size: 14px;
+  letter-spacing: 3px;
+  color: #9fd8ff;
+  box-shadow: 0 0 16px rgba(80, 170, 255, 0.35);
+  animation: pulse 1.6s ease-in-out infinite;
+}
+
 .raceChip {
   position: absolute;
   top: 64px;

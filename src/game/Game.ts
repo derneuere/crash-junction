@@ -8,14 +8,23 @@ import {
   EXPLOSION_RADIUS_BASE,
   EXPLOSION_RADIUS_PER_POWER,
   FIXED_DT,
+  LIVE_VY_GAIN_PER_STEP,
+  RAMP_LAUNCH_VY_MAX,
   SLOWMO,
   SLOWMO_HOLD,
   SUSP_MAX_COMP,
+  TAKEDOWN_WALL_GRACE,
 } from './constants';
 import { GameState, type Actor, type CollideEvent, type LevelDef } from './types';
 import type { GameEvents, ReportData } from './events';
 import { contactPointOf } from './collision';
 import { Emitter } from './emitter';
+import { rollSeed, seedSim, simRand } from './rng';
+import {
+  CHECKSUM_EVERY, Recorder, bodySnap, downloadReplay, keysFromMask, maskFromKeys, worldHash,
+  type Command, type Divergence, type ReplayFile, type ReplayResult, type ReplayStats, type Snapshot,
+} from './replay';
+import { LEVELS, type LevelId } from './levels';
 import { createMode, type GameMode, type ModeHost } from './modes/mode';
 import { createPhysics, type PhysicsContext } from './physics';
 import { buildEnvironment, makeHeightSampler } from './environment';
@@ -48,6 +57,7 @@ const _hood = new THREE.Vector3();
 const _pp = new THREE.Vector3();
 const UP = new THREE.Vector3(0, 1, 0);
 const _atF = new CANNON.Vec3();
+const NO_CMDS: Command[] = []; // shared empty — never mutated
 
 export class Game {
   readonly events = new Emitter<GameEvents>();
@@ -72,6 +82,7 @@ export class Game {
   private crashElapsed = 0;
   private settleTimer = 0;
   private simTime = 0;
+  private clock = 0; // take-local wall time (sum of recorded dts) — feeds the camera
   private accumulator = 0;
   private mode!: GameMode; // composed per level in buildActors()
   private pickups: Pickups;
@@ -85,7 +96,36 @@ export class Game {
   private deformQueue: DeformJob[] = [];
   private pairCooldown = new Map<string, number>();
   private checked = new Map<number, number>(); // bodyId → simTime of the shunt
+  private playerWallGraceUntil = 0; // takedown wall-grace (TAKEDOWN_WALL_GRACE)
   private keys: Record<string, boolean> = {};
+
+  // bug-report capture: the tape is always rolling (see replay.ts)
+  private levelId: LevelId;
+  private recorder = new Recorder();
+  private stepIndex = 0; // fixed steps since the take began
+  private pendingCmds: Command[] = []; // keydown actions, executed at frame start
+  private replay: {
+    file: ReplayFile;
+    frame: number;
+    cmdIdx: number;
+    sumIdx: number;
+    hiddenSet: Set<number>;
+    fast: boolean; // fast-forward (?verify=1): many recorded frames per tick
+    checked: number;
+    diverged: Divergence | null;
+    lastTakedownAt: number; // simTime, for the takedown→player-crash stat
+    stats: ReplayStats;
+  } | null = null;
+
+  /** Dev/diagnosis seam: called after every fixed physics step (live and
+   *  replay) — install from the console to trace per-step sim state. */
+  onStep: ((game: Game) => void) | null = null;
+
+  // canonical take-start camera pose: the camera feeds back into the sim
+  // (aftertouch is camera-relative), so every take must begin from the same
+  // pose or a replayed take sees different forces than the recorded one
+  private cam0 = { pos: new THREE.Vector3(), quat: new THREE.Quaternion() };
+  private vyBefore: number[] = []; // pre-step vy per actor (live vy-gain cap)
 
   private raf = 0;
   private rafIsTimeout = false;
@@ -112,6 +152,8 @@ export class Game {
 
     this.camera = new THREE.PerspectiveCamera(55, container.clientWidth / container.clientHeight, 0.1, 400);
     this.camera.position.set(24, 11, 24);
+    this.cam0.pos.copy(this.camera.position);
+    this.cam0.quat.copy(this.camera.quaternion);
 
     const hemi = new THREE.HemisphereLight(0xbfd6ff, 0x4a4036, 1.45);
     this.scene.add(hemi);
@@ -135,12 +177,14 @@ export class Game {
       this.director.idleHeight = 60;
       this.scene.fog = new THREE.Fog(0xb6cde6, 90, 340);
     }
+    this.levelId = ((Object.keys(LEVELS) as LevelId[]).find((id) => LEVELS[id] === level) ?? 'junction') as LevelId;
     this.heightAt = makeHeightSampler(level);
     this.phys = createPhysics();
     buildEnvironment(this.scene, this.phys, level);
     this.fx = new Effects(this.scene);
     this.pickups = new Pickups(this.scene, level.pickups);
     this.control.reset(Math.atan2(level.player.dir.x, level.player.dir.z));
+    this.beginTake();
     this.buildActors();
 
     addEventListener('keydown', this.onKeyDown);
@@ -206,7 +250,7 @@ export class Game {
       const j = (dv * body.mass) / nl;
       body.applyImpulse(
         new CANNON.Vec3(nx * j, ny * j, nz * j),
-        new CANNON.Vec3((Math.random() - 0.5) * 0.8, (Math.random() - 0.5) * 0.5, (Math.random() - 0.5) * 0.8),
+        new CANNON.Vec3((simRand() - 0.5) * 0.8, (simRand() - 0.5) * 0.5, (simRand() - 0.5) * 0.8),
       );
       return fall;
     };
@@ -220,12 +264,12 @@ export class Game {
         a.damageLvl += 12 * power * fall;
         this.deformQueue.push({ actor: a, p: p.clone(), strength: (6 + 7 * power) * fall });
         accumulatePanelDamage(a, p, (6 + 7 * power) * fall, this.detachPanel);
-        if (fall > 0.55 && a.popped < 3 && a.crashed && Math.random() < 0.5) this.popLooseWheel(a, p);
+        if (fall > 0.55 && a.popped < 3 && a.crashed && simRand() < 0.5) this.popLooseWheel(a, p);
         this.mode.score?.blastDraw(a, power, fall);
-        if (a.spec?.explosive && !a.exploded && a.fuse === null && fall > 0.2) a.fuse = 0.25 + Math.random() * 0.2;
+        if (a.spec?.explosive && !a.exploded && a.fuse === null && fall > 0.2) a.fuse = 0.25 + simRand() * 0.2;
       } else if (a.kind === 'barrel' && !a.exploded && a.fuse === null) {
         // chain reaction: farther barrels pop later — the JC2 ripple
-        a.fuse = 0.08 + (R - R * fall) * 0.05 + Math.random() * 0.15;
+        a.fuse = 0.08 + (R - R * fall) * 0.05 + simRand() * 0.15;
       }
     }
     for (const lp of this.looseParts) kick(lp.body, 1);
@@ -272,15 +316,37 @@ export class Game {
     this.simTime = 0;
     this.accumulator = 0;
     this.lastGlance = -9;
+    if (this.takedownCamT > 0) this.events.emit('cine', false);
     this.takedownCamT = 0;
     this.takedownVictim = null;
+    this.playerWallGraceUntil = 0;
     this.pickups.reset();
     this.control.reset(Math.atan2(this.level.player.dir.x, this.level.player.dir.z));
     this.director.reset();
+    this.camera.position.copy(this.cam0.pos);
+    this.camera.quaternion.copy(this.cam0.quat);
+    this.camera.fov = 55;
+    this.camera.updateProjectionMatrix();
     this.state = GameState.Idle;
+    this.beginTake();
     this.buildActors();
     this.events.emit('state', this.state);
     this.mode.score?.reset(); // resync the HUD zeros
+  }
+
+  /** Take boundary: re-seed the sim RNG and start a fresh tape. Replays
+   *  reuse the recorded seed and keep the recorder disarmed instead. */
+  private beginTake(): void {
+    this.stepIndex = 0;
+    this.clock = 0;
+    if (this.replay) {
+      seedSim(this.replay.file.seed);
+      this.recorder.disarm();
+    } else {
+      const seed = rollSeed();
+      seedSim(seed);
+      this.recorder.begin(this.levelId, seed);
+    }
   }
 
   dispose(): void {
@@ -370,29 +436,56 @@ export class Game {
   // ---------- input ----------
 
   private onKeyDown = (e: KeyboardEvent): void => {
+    if (this.replay) {
+      // the tape is driving — live input would desync it
+      if (e.code === 'Escape') this.stopReplay(true);
+      return;
+    }
     if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space'].includes(e.code)) e.preventDefault();
     this.keys[e.code] = true;
     this.audio.init();
     this.audio.resume();
-    if (e.code === 'Space') this.launch();
-    if (e.code === 'KeyR') this.reset();
-    if (e.code === 'KeyE') this.tryCrashbreaker();
+    if (e.repeat) return; // OS auto-repeat must not respawn commands/reports
+    // discrete actions go through the command queue: executed at the next
+    // frame start and recorded there, so a replay fires them on the exact
+    // same frame (key STATE rides the per-frame bitmask instead)
+    if (e.code === 'Space') this.pendingCmds.push({ t: 'launch' });
+    if (e.code === 'Enter' || e.code === 'NumpadEnter') this.reset();
+    if (e.code === 'KeyR') this.captureReport();
+    if (e.code === 'KeyE') this.pendingCmds.push({ t: 'cb' });
     if (e.code === 'KeyB') {
-      // sandbox firework: drop a test explosion near the junction center
-      this.explode(new THREE.Vector3((Math.random() - 0.5) * 8, 0.6, (Math.random() - 0.5) * 8), 1.2);
+      // sandbox firework near the junction center — the position is rolled
+      // here and recorded in the command, so replays reuse it verbatim
+      this.pendingCmds.push({ t: 'explode', x: (Math.random() - 0.5) * 8, y: 0.6, z: (Math.random() - 0.5) * 8, power: 1.2 });
     }
   };
 
   private onKeyUp = (e: KeyboardEvent): void => {
+    if (this.replay) return;
     this.keys[e.code] = false;
   };
 
   private onPointerDown = (): void => {
+    if (this.replay) return;
     this.audio.init();
     this.audio.resume();
-    if (this.state === GameState.Idle) this.launch();
+    if (this.state === GameState.Idle) this.pendingCmds.push({ t: 'launch' });
     else if (this.state === GameState.Done) this.reset();
   };
+
+  private execCommand(c: Command): void {
+    switch (c.t) {
+      case 'launch':
+        this.launch();
+        break;
+      case 'cb':
+        this.tryCrashbreaker();
+        break;
+      case 'explode':
+        this.explode(new THREE.Vector3(c.x, c.y, c.z), c.power);
+        break;
+    }
+  }
 
   private onResize(): void {
     const w = this.container.clientWidth;
@@ -432,9 +525,15 @@ export class Game {
         simTime: this.simTime,
         shuntGrace: this.checked,
         wallDir,
+        playerWallGraceUntil: this.playerWallGraceUntil,
       });
       if (out.takedown) {
         this.events.emit('flash', 'TAKEDOWN');
+        this.playerWallGraceUntil = this.simTime + TAKEDOWN_WALL_GRACE;
+        if (this.replay) {
+          this.replay.stats.takedowns++;
+          this.replay.lastTakedownAt = this.simTime;
+        }
         this.control.boostMeter = BOOST_CAP; // takedowns steal their boost
         // junction: the shunted car; race: the rival that just met the wall
         const victim = out.wreckSelf && !self.isPlayer ? self : oa;
@@ -445,28 +544,45 @@ export class Game {
           if (out.takedownCam) {
             this.takedownVictim = victim;
             this.takedownCamT = 1.7; // the autopilot drives while we watch
+            this.events.emit('cine', true); // letterbox for the beat
           }
         }
       }
       if (out.destabilizeOther > 0 && oa && !oa.crashed) {
         if (oa.destabilized <= 0 && oa.isPlayer) this.events.emit('flash', 'SLAMMED');
-        if (self.isPlayer) oa.destabilizedByPlayer = true;
+        if (self.isPlayer && this.replay) this.replay.stats.rivalShunts++;
+        // chain credit (#1): a victim knocked loose by a car the player set
+        // sliding is still the player's takedown when it finds the wall
+        if (self.isPlayer || self.destabilizedByPlayer) oa.destabilizedByPlayer = true;
         oa.destabilized = Math.max(oa.destabilized, out.destabilizeOther);
         if (out.shoveOther > 0) {
-          // the ram's kick: an extra shove down the rammer's line — strictly
-          // horizontal, nobody gets lofted off a bumper
+          // the ram's kick — strictly horizontal, nobody gets lofted off a
+          // bumper. Direction blends the rammer's line with rammer→victim,
+          // so a flank hit sends the victim sideways into the wall instead
+          // of just punting it down the road (#1: more lateral)
           const v = self.body.velocity;
           const sp = Math.hypot(v.x, v.z) || 1;
           const ob = oa.body;
-          ob.velocity.x += (v.x / sp) * out.shoveOther;
-          ob.velocity.z += (v.z / sp) * out.shoveOther;
+          const ox = ob.position.x - self.body.position.x;
+          const oz = ob.position.z - self.body.position.z;
+          const ol = Math.hypot(ox, oz) || 1;
+          let dx = v.x / sp + (ox / ol) * 0.8;
+          let dz = v.z / sp + (oz / ol) * 0.8;
+          const dl = Math.hypot(dx, dz) || 1;
+          dx /= dl;
+          dz /= dl;
+          ob.velocity.x += dx * out.shoveOther;
+          ob.velocity.z += dz * out.shoveOther;
           if (ob.velocity.y > 1.2) ob.velocity.y = 1.2;
           ob.wakeUp();
           if (v.y > 1.2) v.y = 1.2; // the rammer stays planted too
         }
       }
       if (out.destabilizeSelf > 0 && !self.crashed) {
-        if (self.destabilized <= 0 && self.isPlayer) this.events.emit('flash', 'SLAMMED');
+        if (self.destabilized <= 0 && self.isPlayer) {
+          this.events.emit('flash', 'SLAMMED');
+          if (this.replay) this.replay.stats.playerSlams++;
+        }
         if (oa?.isPlayer) self.destabilizedByPlayer = true;
         self.destabilized = Math.max(self.destabilized, out.destabilizeSelf);
       }
@@ -509,7 +625,7 @@ export class Game {
       this.fx.smoke.spawn(p, {});
     }
     if (impact > 9 && p.y < 1.6) this.fx.scorch.add(p.x, p.z);
-    if (impact > 9.5 && self.kind === 'vehicle' && self.popped < 3 && Math.random() < 0.75) this.popLooseWheel(self, p);
+    if (impact > 9.5 && self.kind === 'vehicle' && self.popped < 3 && simRand() < 0.75) this.popLooseWheel(self, p);
 
     this.audio.thump(impact, this.timeScale);
     this.director.addShake(impact * 0.045);
@@ -526,6 +642,10 @@ export class Game {
    *  crashbreaker a step, Burnout-Revenge style. */
   private markCrashed(a: Actor): void {
     if (a.crashed) return;
+    if (a.isPlayer && this.replay) {
+      const dt = this.simTime - this.replay.lastTakedownAt;
+      if (dt < this.replay.stats.takedownToPlayerCrashMin) this.replay.stats.takedownToPlayerCrashMin = +dt.toFixed(3);
+    }
     a.crashed = true;
     a.destabilized = 0; // a wreck is past losing control
     a.destabilizedByPlayer = false;
@@ -600,7 +720,9 @@ export class Game {
   /** World point → HUD pixel coords for the cash floaters. */
   private projectToScreen(p: THREE.Vector3): { x: number; y: number } | null {
     const v = p.clone().project(this.camera);
-    if (v.z > 1) return null;
+    if (v.z > 1 || !Number.isFinite(v.x) || !Number.isFinite(v.y)) return null;
+    // (the finite guard matters: one NaN reaching a cash floater's CSS is a
+    // React render error, and with no error boundary that unmounts the App)
     return {
       x: (v.x * 0.5 + 0.5) * this.container.clientWidth,
       y: (-v.y * 0.5 + 0.5) * this.container.clientHeight,
@@ -657,14 +779,37 @@ export class Game {
   // ---------- simulation ----------
 
   private stepControls(): void {
-    if (this.takedownCamT > 0) this.takedownCamT -= FIXED_DT;
+    if (this.takedownCamT > 0) {
+      this.takedownCamT -= FIXED_DT;
+      if (this.takedownCamT <= 0) {
+        this.takedownCamT = 0;
+        this.events.emit('cine', false);
+        this.mode.onTakedownCamOver(); // may rescue a beached/halted player
+      }
+    }
 
-    // shunt-mode timers: a destabilized car is physics-owned (no steering)
-    // until it recovers — or wrecks on whatever it slides into
+    // shunt-mode timers: a destabilized car is physics-owned until it
+    // recovers — or wrecks on whatever it slides into
     for (const a of this.actors) {
       if (a.destabilized <= 0) continue;
       // a shunt slide skids, it doesn't fly — keep the car planted
       if (a.body.velocity.y > 1.5) a.body.velocity.y = 1.5;
+      // SLAMMED is degraded steering, not a dead wheel (#1): the slide is
+      // physics-owned but the player can lean on it a little
+      if (a.isPlayer && !a.crashed) {
+        const steer =
+          (this.keys['ArrowRight'] || this.keys['KeyD'] ? 1 : 0) -
+          (this.keys['ArrowLeft'] || this.keys['KeyA'] ? 1 : 0);
+        if (steer) {
+          const v = a.body.velocity;
+          const sp = Math.hypot(v.x, v.z);
+          if (sp > 2) {
+            const ang = Math.atan2(v.x, v.z) - steer * 0.35 * FIXED_DT; // ~20°/s of fight
+            v.x = Math.sin(ang) * sp;
+            v.z = Math.cos(ang) * sp;
+          }
+        }
+      }
       a.destabilized -= FIXED_DT;
       if (a.destabilized > 0) continue;
       a.destabilized = 0;
@@ -848,17 +993,174 @@ export class Game {
     this.fx.sparks.spawn(p.group.localToWorld(_hood.clone()), 4, 3.5);
   }
 
+  // ---------- bug reports & replay ----------
+
+  /** R key (or dev console): serialize the take so far into a downloadable
+   *  JSON report that reproduces it exactly — see replay.ts. Saves instantly,
+   *  no dialog: window.prompt() THROWS in Electron-style shells (and blocks
+   *  the game everywhere else) — pass a note from the console if you want one.
+   *  The file also lands on window.__lastReport and (best-effort) the
+   *  clipboard, for shells that quietly swallow programmatic downloads. */
+  captureReport(note = ''): ReplayFile {
+    const file = this.recorder.export(note, this.buildSnapshot());
+    (window as unknown as { __lastReport?: ReplayFile }).__lastReport = file;
+    try {
+      downloadReplay(file);
+    } catch (err) {
+      console.error('[crash-junction] report download failed — grab window.__lastReport instead', err);
+    }
+    try {
+      navigator.clipboard?.writeText(JSON.stringify(file)).catch(() => {});
+    } catch {
+      // clipboard is a nice-to-have; the download + __lastReport remain
+    }
+    console.log('[crash-junction] physics report captured:', file);
+    this.events.emit('flash', 'REPORT SAVED');
+    return file;
+  }
+
+  /** Drive the sim from a recorded take (drag a report onto the page, or
+   *  ?replay=<url>). fast = no real-time pacing, for automated verification
+   *  (?verify=1) — the result lands in window.__replayResult either way. */
+  startReplay(file: ReplayFile, fast = false): void {
+    if (file.levelId !== this.levelId) throw new Error(`replay is for level '${file.levelId}', loaded '${this.levelId}'`);
+    this.replay = {
+      file, frame: 0, cmdIdx: 0, sumIdx: 0, hiddenSet: new Set(file.hidden), fast, checked: 0, diverged: null,
+      lastTakedownAt: -999,
+      stats: {
+        maxAltitude: 0, maxUpwardSpeed: 0, maxTiltDeg: 0,
+        takedowns: 0, takedownToPlayerCrashMin: 999, finalOffTrack: 0,
+        playerSlams: 0, rivalShunts: 0,
+      },
+    };
+    this.pendingCmds.length = 0;
+    this.keys = {};
+    this.reset(); // beginTake() sees this.replay: recorded seed, recorder disarmed
+    this.events.emit('replay', true);
+    this.events.emit('flash', fast ? 'VERIFYING REPLAY' : 'REPLAY');
+  }
+
+  private playReplayFrame(): boolean {
+    const r = this.replay!;
+    const f = r.frame;
+    if (f >= r.file.dts.length) {
+      this.stopReplay(false);
+      return false;
+    }
+    r.frame++;
+    this.keys = keysFromMask(r.file.keyMasks[f]);
+    let cmds: Command[] = NO_CMDS;
+    while (r.cmdIdx < r.file.commands.length && r.file.commands[r.cmdIdx].f === f) {
+      if (cmds === NO_CMDS) cmds = [];
+      cmds.push(r.file.commands[r.cmdIdx++].c);
+    }
+    this.advance(r.file.dts[f], r.hiddenSet.has(f), cmds);
+    return true;
+  }
+
+  private stopReplay(aborted: boolean): void {
+    const r = this.replay;
+    if (!r) return;
+    r.stats.finalOffTrack = +this.mode.playerOffTrackDistance().toFixed(1);
+    this.replay = null;
+    this.keys = {};
+    const result: ReplayResult = {
+      ok: !aborted && !r.diverged,
+      aborted,
+      framesPlayed: r.frame,
+      framesTotal: r.file.dts.length,
+      checksumsChecked: r.checked,
+      diverged: r.diverged,
+      stats: r.stats,
+    };
+    (window as unknown as { __replayResult?: ReplayResult }).__replayResult = result;
+    if (r.fast) document.title = result.ok ? 'REPLAY-OK' : 'REPLAY-FAIL'; // scrapeable verdict
+    console.log('[replay] finished:', result);
+    this.events.emit('replay', false);
+    this.events.emit('flash', aborted ? 'REPLAY STOPPED' : result.ok ? 'REPLAY VERIFIED' : 'REPLAY DIVERGED');
+  }
+
+  /** World state at report time — a diagnosis target that needs no replay. */
+  private buildSnapshot(): Snapshot {
+    return {
+      state: this.state,
+      simTime: this.simTime,
+      step: this.stepIndex,
+      timeScale: this.timeScale,
+      accumulator: this.accumulator,
+      control: {
+        heading: this.control.heading, velAngle: this.control.velAngle, speed: this.control.speed,
+        drifting: this.control.drifting, boostMeter: this.control.boostMeter,
+      },
+      actors: this.actors.map((a) => ({
+        kind: a.kind, variant: a.spec?.variant ?? null, isPlayer: a.isPlayer, crashed: a.crashed,
+        destabilized: a.destabilized, damageLvl: a.damageLvl, popped: a.popped,
+        exploded: a.exploded, fuse: a.fuse, body: bodySnap(a.body),
+      })),
+      looseParts: this.looseParts.map((lp) => bodySnap(lp.body)),
+    };
+  }
+
+  /** Track the player's physics-sanity envelope while a tape plays. */
+  private updateReplayStats(): void {
+    const p = this.player;
+    const r = this.replay;
+    if (!p || !r) return;
+    const b = p.body;
+    const alt = b.position.y - this.heightAt(b.position.x, b.position.z);
+    if (alt > r.stats.maxAltitude) r.stats.maxAltitude = alt;
+    if (b.velocity.y > r.stats.maxUpwardSpeed) r.stats.maxUpwardSpeed = b.velocity.y;
+    // body-up vs world-up: uy = 1 - 2(qx² + qz²) is the rotated Y axis' y
+    const uy = 1 - 2 * (b.quaternion.x * b.quaternion.x + b.quaternion.z * b.quaternion.z);
+    const tilt = (Math.acos(Math.max(-1, Math.min(1, uy))) * 180) / Math.PI;
+    if (tilt > r.stats.maxTiltDeg) r.stats.maxTiltDeg = tilt;
+  }
+
+  /** Record (live) or verify (replay) the world hash at checksum cadence. */
+  private onChecksumStep(): void {
+    const { h, bodies } = worldHash(this.actors, this.looseParts);
+    const r = this.replay;
+    if (!r) {
+      this.recorder.checksum(this.stepIndex, h, bodies);
+      return;
+    }
+    while (r.sumIdx < r.file.checksums.length && r.file.checksums[r.sumIdx].s < this.stepIndex) r.sumIdx++;
+    const rec = r.file.checksums[r.sumIdx];
+    if (rec && rec.s === this.stepIndex) {
+      r.sumIdx++;
+      r.checked++;
+      if (rec.h !== h && !r.diverged) {
+        // name the first body whose hash strayed — diagnosis gold
+        let body: Divergence['body'] = null;
+        const n = Math.max(rec.b?.length ?? 0, bodies.length);
+        for (let i = 0; i < n; i++) {
+          if (rec.b?.[i] !== bodies[i]) {
+            const a = this.actors[i];
+            const desc = a
+              ? `${a.kind}${a.spec ? ':' + a.spec.variant : ''}${a.isPlayer ? ' (player)' : ''}`
+              : `loosePart[${i - this.actors.length}]`;
+            body = { index: i, desc, expected: rec.b?.[i] ?? null, actual: bodies[i] ?? null };
+            break;
+          }
+        }
+        r.diverged = { step: this.stepIndex, expected: rec.h, actual: h, body };
+        console.warn(`[replay] diverged at step ${this.stepIndex} (t=${this.simTime.toFixed(2)}s)`, body);
+      }
+    }
+  }
+
   // ---------- main loop ----------
 
-  private frame = (now: number): void => {
-    if (this.disposed) return;
-    this.schedule();
-    // hidden tabs throttle timers to ~1 Hz — integrate the elapsed second
-    // in one go there, so background time still passes at real speed
-    const hidden = document.hidden;
-    const dt = Math.min((now - this.last) / 1000, hidden ? 1.2 : 0.05);
-    this.last = now;
-
+  /** One recorded-frame's worth of game time. Everything in here sees only
+   *  (dt, hidden, cmds) plus the key bitmask already in this.keys — exactly
+   *  the tuple the recorder captures per frame — so feeding a recorded tuple
+   *  back through reproduces the sim bit-for-bit. The scene-graph updates at
+   *  the bottom are here because they feed back into physics: detached
+   *  panels/wheels spawn from mesh world transforms, pickups gate the score
+   *  multiplier. Camera, audio and rendering live in frame(). */
+  private advance(dt: number, hidden: boolean, cmds: readonly Command[]): void {
+    this.clock += dt;
+    for (const c of cmds) this.execCommand(c);
     this.updateTimeScale(dt);
     const simDt = dt * this.timeScale;
     this.accumulator += simDt;
@@ -867,12 +1169,33 @@ export class Game {
     while (this.accumulator >= FIXED_DT && steps < maxSteps) {
       this.stepControls();
       applySuspension(this.actors, this.state, this.heightAt);
+      // live chassis can only gain upward speed at suspension rates — the
+      // ground-plane contact solver would otherwise pole-vault a landing
+      // car off its box corner (the controller keeps restoring horizontal
+      // velocity, so that lever arm has an infinite energy budget). Décor
+      // stays excluded, so ramp jumps remain pure suspension + ballistics.
+      for (let i = 0; i < this.actors.length; i++) {
+        const a = this.actors[i];
+        this.vyBefore[i] = a.kind === 'vehicle' && !a.crashed ? a.body.velocity.y : Infinity;
+      }
       this.phys.world.step(FIXED_DT);
-      // (no vertical-velocity clamp: live chassis ignore décor colliders, so
-      // jumps are pure suspension + ballistics off the ramp's real slope)
+      for (let i = 0; i < this.actors.length; i++) {
+        const a = this.actors[i];
+        if (a.crashed) continue; // wrecked mid-step — the collision fling is the point
+        const cap = this.vyBefore[i] + LIVE_VY_GAIN_PER_STEP;
+        if (a.body.velocity.y > cap) a.body.velocity.y = cap;
+        // absolute roof: a DRIVEN car never rises faster than the biggest
+        // designed launch — bounds anything not caught above (e.g. grinding
+        // a barrier at forced speed slowly pole-vaults off its top edge)
+        if (a.body.velocity.y > RAMP_LAUNCH_VY_MAX) a.body.velocity.y = RAMP_LAUNCH_VY_MAX;
+      }
       this.updateFuses(FIXED_DT);
       this.simTime += FIXED_DT;
       this.accumulator -= FIXED_DT;
+      this.stepIndex++;
+      if (this.stepIndex % CHECKSUM_EVERY === 0) this.onChecksumStep();
+      if (this.replay) this.updateReplayStats();
+      this.onStep?.(this);
       steps++;
     }
 
@@ -881,14 +1204,18 @@ export class Game {
     updatePanelFlap(this.actors, simDt);
     this.processDeforms();
     if (this.player) _pp.set(this.player.body.position.x, this.player.body.position.y, this.player.body.position.z);
-    this.pickups.update(simDt, now / 1000, this.player ? _pp : null, (m, pos) => this.collectMultiplier(m, pos));
+    this.pickups.update(simDt, this.simTime, this.player ? _pp : null, (m, pos) => this.collectMultiplier(m, pos));
     this.updateSkid(simDt);
     this.fx.update(simDt);
     this.updateBurning(simDt);
     this.updateBoostFlames();
+    this.updateHud(dt);
+    // the camera is part of the deterministic domain, not presentation:
+    // aftertouch pushes the wreck along camera-relative axes, so the
+    // director must see the recorded dts (and the take-local clock)
     this.director.update(
       dt,
-      now / 1000,
+      this.clock,
       this.camera,
       this.state,
       this.player,
@@ -897,7 +1224,32 @@ export class Game {
       this.aftertouchActive,
       this.takedownCamT > 0 && this.takedownVictim ? this.takedownVictim.group.position : null,
     );
-    this.updateHud(dt);
+  }
+
+  private frame = (now: number): void => {
+    if (this.disposed) return;
+    this.schedule();
+    const elapsed = (now - this.last) / 1000;
+    this.last = now;
+
+    if (this.replay) {
+      // pace the tape 1:1 with its recorded dts via the rAF cadence; fast
+      // mode instead chews through a work-budget per tick (sized so verify
+      // still finishes quickly in a timer-throttled hidden tab)
+      const deadline = performance.now() + 25;
+      do {
+        if (!this.playReplayFrame()) break;
+      } while (this.replay?.fast && performance.now() < deadline);
+    } else {
+      // hidden tabs throttle timers to ~1 Hz — integrate the elapsed second
+      // in one go there, so background time still passes at real speed
+      const hidden = document.hidden;
+      const dt = Math.min(elapsed, hidden ? 1.2 : 0.05);
+      const cmds = this.pendingCmds.length ? this.pendingCmds.splice(0) : NO_CMDS;
+      this.recorder.frame(dt, maskFromKeys(this.keys), hidden, cmds);
+      this.advance(dt, hidden, cmds);
+    }
+
     // engine note: revs saw through the gears, drop on every upshift
     const driving = this.state === GameState.Launch && this.player && !this.player.crashed;
     this.audio.engine(

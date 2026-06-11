@@ -58,10 +58,13 @@ export class Pickups {
       group.add(label);
       group.position.set(def.x, def.y, def.z);
       scene.add(group);
-      this.list.push({ def, group, taken: false, phase: Math.random() * Math.PI * 2 });
+      // deterministic phase: collection tests against the bobbing height, so
+      // a replayed take must see the rings at the exact same y
+      this.list.push({ def, group, taken: false, phase: this.list.length * 2.39996 });
     }
   }
 
+  /** `t` is SIM time, not wall time — the bob height gates collection. */
   update(
     dt: number,
     t: number,

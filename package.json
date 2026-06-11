@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test": "node tests/run-replay-tests.mjs"
   },
   "dependencies": {
     "cannon-es": "^0.20.0",
@@ -19,6 +20,7 @@
     "@types/react-dom": "^18.3.1",
     "@types/three": "^0.170.0",
     "@vitejs/plugin-react": "^4.3.4",
+    "puppeteer-core": "^25.1.0",
     "typescript": "~5.6.3",
     "vite": "^6.0.3"
   }

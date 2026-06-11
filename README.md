@@ -12,6 +12,7 @@ Needs Node 18+ (use `fnm use 22` if the system Node is older).
 npm install
 npm run dev      # vite dev server
 npm run build    # typecheck + production build into dist/
+npm test         # replay regression suite (needs installed Chrome or Edge)
 ```
 
 ## Controls
@@ -26,7 +27,9 @@ npm run build    # typecheck + production build into dist/
 | Arrow keys (after crashing) | Aftertouch — steer the wreck mid-flight |
 | **E** | **Crashbreaker** — detonate your wreck (1 charge) |
 | B | Sandbox test explosion near the junction center |
-| R | Restart |
+| Enter | Restart |
+| **R** | **Save a physics bug report** (deterministic replay JSON — see below) |
+| Esc | Exit a running replay |
 
 Driving is grounded in Burnout Paradise's AttribSys vehicle-handling data
 (steering lock curves, drift slip/countersteer behavior, boost
@@ -88,6 +91,61 @@ Two levels ship, selectable on the idle screen:
 Adding a level = adding a `LevelDef` (no engine changes): traffic spawns
 with direction/speed/`delay`, barrel and pole positions, ramps, buildings,
 medal thresholds.
+
+## Physics bug reports & deterministic replay
+
+Saw the physics do something wrong? Press **R** (any time — recording is
+always on from the last restart). A `crash-report-<level>-<timestamp>.json`
+downloads instantly that reproduces the entire take **exactly**, from the
+moment the level loaded to the moment you pressed R. The report is also
+copied to the clipboard and kept on `window.__lastReport`, in case your
+browser shell blocks programmatic downloads; to attach a note, call
+`__game.captureReport('what looked wrong')` from the console instead.
+
+To replay a report:
+
+- **drag the JSON onto the game page**, or
+- open `?replay=<url-to-json>` (drop the file in `public/` for a quick URL),
+  adding `&verify=1` to fast-forward instead of watching in real time.
+
+While replaying, the tape drives the car; Esc exits. The file carries
+world-state checksums every 30 physics steps, so the replay verifies itself:
+`REPLAY VERIFIED` / `REPLAY DIVERGED` flashes at the end and the full verdict
+lands in `window.__replayResult` (and `document.title` in verify mode, for
+scripts). Programmatic hooks: `__game.captureReport(note?)` and
+`__game.startReplay(parsedJson, fast?)`.
+
+How it stays deterministic (`game/replay.ts`, `game/rng.ts`): the sim is a
+fixed-step accumulator whose only inputs are per-frame wall `dt`, the sampled
+key bitmask, the discrete commands (launch / crashbreaker / B-explosion with
+its rolled position), and a seeded RNG stream for every random roll that
+touches physics or scoring (explosion impulses, fuse jitter, wheel pops,
+panel-detach kicks, barrel spawn yaw, damage payouts). The recorder captures
+exactly that tuple per frame; replaying it reproduces every step bit-for-bit.
+Purely visual randomness (particles, camera shake, crumple jitter) stays on
+`Math.random` and never desyncs anything. One caveat: transcendental
+functions (`Math.sin` etc.) are implementation-defined, so byte-exact
+replay is guaranteed on the same JS engine family (any V8 browser ↔ any V8
+browser); a Chrome-recorded report verified in Firefox may diverge.
+
+The report also embeds a full world snapshot at the moment R was pressed
+(every body's position/quaternion/velocities, damage, control state), so a
+bug can often be diagnosed straight from the JSON without running anything.
+
+### Replay fixtures as regression tests
+
+`npm test` (tests/run-replay-tests.mjs) drives a headless Chrome/Edge through
+every fixture in `tests/replays/` and asserts the physics-sanity envelope
+(`ReplayStats`: max altitude / upward speed / tilt) from `manifest.json`.
+Promote a bug report to a test by dropping its JSON in `tests/replays/` and
+adding a manifest entry. Two assertion styles:
+
+- **bug fixtures** (`"checksums": "ignore"`): the input tape stays valid
+  forever; assert behavior bounds. A physics fix is *supposed* to diverge
+  these from their recorded checksums.
+- **determinism pins** (`"checksums": "require"`): recorded on the current
+  sim; any divergence fails. Re-record them after deliberate physics changes
+  (`tests/record-jump-fixture.mjs`, `tests/record-padjump-fixture.mjs`).
 
 ## Explosions
 
