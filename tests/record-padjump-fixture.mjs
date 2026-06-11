@@ -18,7 +18,10 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const PORT = 5176;
 const OUT = path.join(root, 'tests', 'replays', 'pad-jump-line.json');
 
-// [ms, type, code] — the drive, tuned against the printed trace
+// [SIM ms, type, code] — the drive, tuned against the printed trace.
+// Sim-time marks, not wall clock: on a slow software renderer the sim runs
+// behind real time (the 50 ms frame clamp), so setTimeout-driven input
+// lands on different sim frames per machine.
 const TIMELINE = [
   [0, 'keydown', 'Space'],
   [0, 'keydown', 'ArrowUp'],
@@ -43,12 +46,18 @@ try {
     }
   }
   let browser;
-  for (const channel of ['chrome', 'msedge']) {
+  const candidates = [
+    { channel: 'chrome' },
+    { channel: 'msedge' },
+    { executablePath: 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe' },
+    { executablePath: 'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe' },
+  ];
+  for (const target of candidates) {
     try {
-      browser = await puppeteer.launch({ channel, headless: true, args: ['--enable-unsafe-swiftshader', '--mute-audio'] });
+      browser = await puppeteer.launch({ ...target, headless: true, args: ['--enable-unsafe-swiftshader', '--mute-audio'] });
       break;
     } catch {
-      // try the next channel
+      // try the next candidate
     }
   }
   if (!browser) throw new Error('no Chrome or Edge found');
@@ -60,17 +69,26 @@ try {
     btn.click();
   });
   await page.waitForFunction(() => !!window.__game, { timeout: 30_000 });
-  await page.evaluate((timeline) => {
+  await page.evaluate((timeline, captureAt) => {
     const k = (type, code) => window.dispatchEvent(new KeyboardEvent(type, { code }));
     window.__trace = [];
+    window.__done = false;
+    const pending = [...timeline];
+    let t0 = null;
     window.__game.onStep = (g) => {
+      if (t0 === null) t0 = g.simTime;
+      const t = (g.simTime - t0) * 1000;
+      while (pending.length && t >= pending[0][0]) {
+        const [, type, code] = pending.shift();
+        k(type, code);
+      }
+      if (t >= captureAt) window.__done = true;
       if (g.stepIndex % 30 !== 0) return;
       const b = g.player.body;
       window.__trace.push([+g.simTime.toFixed(2), +b.position.x.toFixed(1), +b.position.z.toFixed(1), +b.position.y.toFixed(2)]);
     };
-    for (const [ms, type, code] of timeline) setTimeout(() => k(type, code), ms);
-  }, TIMELINE);
-  await new Promise((r) => setTimeout(r, CAPTURE_AT));
+  }, TIMELINE, CAPTURE_AT);
+  await page.waitForFunction(() => window.__done, { timeout: 180_000, polling: 250 });
   const { file, trace } = await page.evaluate(() => {
     for (const code of ['Space', 'ArrowUp', 'ArrowLeft', 'ArrowRight']) {
       window.dispatchEvent(new KeyboardEvent('keyup', { code }));

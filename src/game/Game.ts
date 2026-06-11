@@ -28,7 +28,8 @@ import { LEVELS, type LevelId } from './levels';
 import { createMode, type GameMode, type ModeHost } from './modes/mode';
 import { createPhysics, type PhysicsContext } from './physics';
 import { buildEnvironment, makeHeightSampler } from './environment';
-import { charActor, createBarrel, createPole, createVehicle, deformActor, popWheel, repairVehicle, type LoosePart } from './vehicles';
+import { charActor, createBarrel, createPole, createVehicle, deformActor, popWheel, repairVehicle, shatterGlass, type LoosePart } from './vehicles';
+import { resetModelPicker } from './models';
 import { accumulatePanelDamage, makePanelBody, updatePanelFlap } from './panels';
 import type { PanelState } from './types';
 import { applySuspension, type HeightSampler } from './suspension';
@@ -42,10 +43,14 @@ interface DeformJob {
   actor: Actor;
   p: THREE.Vector3;
   strength: number;
+  /** World direction the hitting matter travels — folds the crumple zone
+   *  along the hit (BP-style); null falls back to core-inward shrink. */
+  dir: THREE.Vector3 | null;
 }
 
 const _impact = new THREE.Vector3();
 const _panelPos = new THREE.Vector3();
+const _sagLp = new THREE.Vector3();
 const _lean = new THREE.Euler();
 const _leanQ = new THREE.Quaternion();
 const _skidL = new THREE.Vector3();
@@ -262,8 +267,14 @@ export class Game {
       if (a.kind === 'vehicle') {
         if (!a.isPlayer || this.mode.playerCanCrash()) this.markCrashed(a); // practice: blasted, not wrecked
         a.damageLvl += 12 * power * fall;
-        this.deformQueue.push({ actor: a, p: p.clone(), strength: (6 + 7 * power) * fall });
+        // blast wave folds the near side outward-in: push along blast → car
+        const bdir = new THREE.Vector3(a.body.position.x - p.x, 0, a.body.position.z - p.z);
+        this.deformQueue.push({ actor: a, p: p.clone(), strength: (6 + 7 * power) * fall, dir: bdir.lengthSq() > 0.01 ? bdir.normalize() : null });
         accumulatePanelDamage(a, p, (6 + 7 * power) * fall, this.detachPanel);
+        if (fall > 0.45 && shatterGlass(a, p, 999) > 8) {
+          _impact.set(a.body.position.x, a.body.position.y + 0.9, a.body.position.z);
+          this.fx.glass.spawn(_impact, 26, 3 + power);
+        }
         if (fall > 0.55 && a.popped < 3 && a.crashed && simRand() < 0.5) this.popLooseWheel(a, p);
         this.mode.score?.blastDraw(a, power, fall);
         if (a.spec?.explosive && !a.exploded && a.fuse === null && fall > 0.2) a.fuse = 0.25 + simRand() * 0.2;
@@ -367,6 +378,7 @@ export class Game {
   // ---------- setup ----------
 
   private buildActors(): void {
+    resetModelPicker(); // traffic dresses in the same models every take
     const onCollide = (a: Actor, e: CollideEvent) => this.onCollide(a, e);
     this.player = createVehicle(this.scene, this.phys, onCollide, this.level.player, true);
     this.register(this.player);
@@ -612,11 +624,33 @@ export class Game {
     // a car that's still being driven trades paint, not body panels
     this.fx.sparks.spawn(p, Math.min(40, Math.round(impact * 5)), impact * 0.55);
     if (impact > 4.2 && self.deformables.length && self.crashed) {
-      this.deformQueue.push({ actor: self, p: p.clone(), strength: impact });
+      // the crumple folds along the way the hitting matter moves relative
+      // to us — a wall hit caves the nose backward, a T-bone caves the door
+      const rel = new THREE.Vector3(
+        other.velocity.x - self.body.velocity.x,
+        (other.velocity.y - self.body.velocity.y) * 0.4, // mostly a road-plane event
+        other.velocity.z - self.body.velocity.z,
+      );
+      this.deformQueue.push({ actor: self, p: p.clone(), strength: impact, dir: rel.lengthSq() > 4 ? rel.normalize() : null });
       accumulatePanelDamage(self, p, impact, this.detachPanel);
       self.damageLvl += impact;
       if (self.spec?.explosive && self.damageLvl > self.spec.explosive.fuseDamage && !self.exploded && self.fuse === null) {
         self.fuse = 0.3;
+      }
+      // windows near the hit let go in a glitter burst
+      if (impact > 5.5) {
+        const broken = shatterGlass(self, p, 0.5 + impact * 0.09);
+        if (broken > 6) this.fx.glass.spawn(p, Math.min(40, broken >> 1), impact * 0.45);
+      }
+      // axle sag: a heavy hit close to a corner bends it — that corner
+      // carries less spring load from now on, so the wreck settles leaning
+      if (impact > 7 && self.susp.length) {
+        self.group.worldToLocal(_sagLp.copy(p));
+        for (const s of self.susp) {
+          const dx = s.ax - _sagLp.x;
+          const dz = s.az - _sagLp.z;
+          if (dx * dx + dz * dz < 1.7) s.sag = Math.max(0.4, s.sag - 0.03 * (impact - 6));
+        }
       }
     }
     if (impact > 6 && !scenery) this.fx.debris.spawn(p, 4 + Math.round(impact * 0.8), impact);
@@ -899,7 +933,7 @@ export class Game {
   private processDeforms(): void {
     while (this.deformQueue.length) {
       const d = this.deformQueue.shift()!;
-      deformActor(d.actor, d.p, d.strength);
+      deformActor(d.actor, d.p, d.strength, d.dir);
     }
   }
 

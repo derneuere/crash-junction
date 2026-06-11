@@ -1,5 +1,6 @@
 import type * as THREE from 'three';
 import type * as CANNON from 'cannon-es';
+import type { VehicleModel } from './models';
 
 export enum GameState {
   Idle,
@@ -112,12 +113,18 @@ export interface SuspensionCorner {
   fmax: number;
   dist: number;
   grounded: boolean;
+  /** Crash damage scaling of preload+spring (1 = healthy). A battered
+   *  corner carries less load, so wrecks settle with a Paradise lean. */
+  sag: number;
 }
 
 export interface DeformablePart {
   mesh: THREE.Mesh;
   base: Float32Array; // undeformed vertex positions
   baseCol: Float32Array; // unscuffed vertex paint
+  /** Vertex index ranges that are window glass (model-based hulls) —
+   *  shatterGlass frosts them and spawns shard particles. */
+  glass?: [number, number][];
 }
 
 export type PanelKind = 'door' | 'bonnet' | 'boot' | 'bumper';
@@ -147,6 +154,8 @@ export interface Actor {
   body: CANNON.Body;
   group: THREE.Group;
   spec: VehicleSpec | null;
+  /** Baked Quaternius model this vehicle was dressed with (null = procedural). */
+  model: VehicleModel | null;
   wheels: THREE.Mesh[];
   susp: SuspensionCorner[];
   deformables: DeformablePart[];

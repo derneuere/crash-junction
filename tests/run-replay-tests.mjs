@@ -52,16 +52,28 @@ async function waitForServer() {
 
 async function launchBrowser() {
   const errors = [];
-  for (const channel of ['chrome', 'msedge']) {
+  const candidates = [
+    { channel: 'chrome' },
+    { channel: 'msedge' },
+    // channel lookup can fail even with Edge installed (registry quirks) —
+    // fall back to the standard Windows install paths
+    ...(process.platform === 'win32'
+      ? [
+          { executablePath: 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe' },
+          { executablePath: 'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe' },
+        ]
+      : []),
+  ];
+  for (const target of candidates) {
     try {
       return await puppeteer.launch({
-        channel,
+        ...target,
         headless: true,
         // software WebGL — headless machines have no GPU
         args: ['--enable-unsafe-swiftshader', '--mute-audio'],
       });
     } catch (e) {
-      errors.push(`${channel}: ${e.message}`);
+      errors.push(`${target.channel ?? target.executablePath}: ${e.message}`);
     }
   }
   throw new Error(`no Chrome or Edge found for puppeteer-core:\n${errors.join('\n')}`);

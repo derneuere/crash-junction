@@ -32,12 +32,18 @@ try {
     }
   }
   let browser;
-  for (const channel of ['chrome', 'msedge']) {
+  const candidates = [
+    { channel: 'chrome' },
+    { channel: 'msedge' },
+    { executablePath: 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe' },
+    { executablePath: 'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe' },
+  ];
+  for (const target of candidates) {
     try {
-      browser = await puppeteer.launch({ channel, headless: true, args: ['--enable-unsafe-swiftshader', '--mute-audio'] });
+      browser = await puppeteer.launch({ ...target, headless: true, args: ['--enable-unsafe-swiftshader', '--mute-audio'] });
       break;
     } catch {
-      // try the next channel
+      // try the next candidate
     }
   }
   if (!browser) throw new Error('no Chrome or Edge found');
@@ -46,13 +52,21 @@ try {
   await page.waitForFunction(() => !!window.__game, { timeout: 30_000 });
   await page.evaluate(() => {
     const k = (type, code) => window.dispatchEvent(new KeyboardEvent(type, { code }));
+    // capture clock runs on SIM time (slow software renderers fall behind
+    // real time, which would slide the capture point along the run)
+    window.__done = false;
+    let t0 = null;
+    window.__game.onStep = (g) => {
+      if (t0 === null) t0 = g.simTime;
+      if (g.simTime - t0 >= 5.3) window.__done = true;
+    };
     k('keydown', 'Space'); // launch + boost, held the whole run
     k('keydown', 'ArrowUp');
   });
   // spawn z=-120 → ramp at z≈-15 (~3.7 s) → ballistic over the junction →
   // capture right after the landing, before the downrange traffic (a crash
   // there would mix legitimate wreck-fling stats into the jump assertions)
-  await new Promise((r) => setTimeout(r, 5300));
+  await page.waitForFunction(() => window.__done, { timeout: 180_000, polling: 250 });
   const file = await page.evaluate(() => {
     const k = (type, code) => window.dispatchEvent(new KeyboardEvent(type, { code }));
     k('keyup', 'Space');

@@ -55,7 +55,8 @@ export function applySuspension(actors: Actor[], state: GameState, heightAt: Hei
       const comp = Math.min(ride - dist, SUSP_MAX_COMP);
       b.angularVelocity.cross(_sR, _sPv);
       _sPv.vadd(b.velocity, _sPv); // wheel-anchor velocity
-      let f = s.preload + s.k * comp - s.c * _sPv.dot(_sUp);
+      // sag < 1 = crash-bent corner carrying less load (axle sag lean)
+      let f = (s.preload + s.k * comp) * s.sag - s.c * _sPv.dot(_sUp);
       if (f <= 0) continue; // springs can't pull
       if (f > s.fmax) f = s.fmax;
       _sUp.scale(f, _sF);

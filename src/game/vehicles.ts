@@ -7,6 +7,7 @@ import { simRand } from './rng';
 import { GLASS, hullMat, makeBoxHullGeometry, makeSedanGeometry, makeTankGeometry, wheelGeometry, wheelMat } from './geometry';
 import { buildPanels } from './panels';
 import { makeBarrelTexture } from './textures';
+import { getVehicleModel, type VehicleModel } from './models';
 
 export const SPECS: Record<Variant, VehicleSpec> = {
   sedan: {
@@ -27,26 +28,48 @@ export const SPECS: Record<Variant, VehicleSpec> = {
   },
 };
 
-function registerDeformable(mesh: THREE.Mesh, deformables: DeformablePart[]): void {
+function registerDeformable(mesh: THREE.Mesh, deformables: DeformablePart[], glass?: [number, number][]): void {
   const pos = mesh.geometry.attributes.position as THREE.BufferAttribute;
   const col = mesh.geometry.attributes.color as THREE.BufferAttribute;
   deformables.push({
     mesh,
     base: Float32Array.from(pos.array as Float32Array),
     baseCol: Float32Array.from(col.array as Float32Array),
+    glass,
   });
+}
+
+/** Hull mesh from a baked Quaternius model: clone the template geometry and
+ *  repaint its body panels in the spawn color. */
+function makeModelHull(model: VehicleModel, color: number): THREE.Mesh {
+  const geo = model.body.clone();
+  const col = geo.attributes.color as THREE.BufferAttribute;
+  const c = new THREE.Color(color);
+  for (const [s, e] of model.paintRanges) {
+    for (let i = s; i < e; i++) col.setXYZ(i, c.r, c.g, c.b);
+  }
+  const mesh = new THREE.Mesh(geo, hullMat);
+  mesh.castShadow = mesh.receiveShadow = true;
+  return mesh;
 }
 
 export type CollideHandler = (actor: Actor, e: CollideEvent) => void;
 
-function buildWheels(spec: VehicleSpec, group: THREE.Group): THREE.Mesh[] {
+/** Model wheels carry tire/rim paint as vertex colors. */
+const modelWheelMat = new THREE.MeshStandardMaterial({ vertexColors: true, flatShading: true, roughness: 0.8 });
+
+function buildWheels(spec: VehicleSpec, group: THREE.Group, model?: VehicleModel | null): THREE.Mesh[] {
   const wheels: THREE.Mesh[] = [];
+  const ax = model ? model.arch.x : spec.wheelX;
+  const zf = model ? model.arch.zFront : spec.wheelZFront;
+  const zr = model ? model.arch.zRear : spec.wheelZRear;
   const corners: [number, number][] = [
-    [-spec.wheelX, spec.wheelZFront], [spec.wheelX, spec.wheelZFront],
-    [-spec.wheelX, spec.wheelZRear], [spec.wheelX, spec.wheelZRear],
+    [-ax, zf], [ax, zf],
+    [-ax, zr], [ax, zr],
   ];
   for (const [wx, wz] of corners) {
-    const wh = new THREE.Mesh(wheelGeometry(spec.wheelRadius), wheelMat);
+    const geo = model ? (wx < 0 ? model.wheelL : model.wheelR) : wheelGeometry(spec.wheelRadius);
+    const wh = new THREE.Mesh(geo, model ? modelWheelMat : wheelMat);
     wh.position.set(wx, -(spec.rideHeight - spec.wheelRadius), wz);
     wh.castShadow = true;
     group.add(wh);
@@ -64,7 +87,7 @@ function buildSuspension(spec: VehicleSpec, wheels: THREE.Mesh[], mass: number):
   const c = 2 * SUSP_ZETA * Math.sqrt(k * mw);
   return wheels.map((w) => ({
     ax: w.position.x, az: w.position.z, preload, k, c,
-    fmax: (preload + k * SUSP_MAX_COMP) * 1.5, dist: spec.rideHeight, grounded: false,
+    fmax: (preload + k * SUSP_MAX_COMP) * 1.5, dist: spec.rideHeight, grounded: false, sag: 1,
   }));
 }
 
@@ -72,7 +95,7 @@ function makeActor(
   kind: Actor['kind'], body: CANNON.Body, group: THREE.Group, valueMult: number, cashLeft: number,
 ): Actor {
   return {
-    kind, body, group, spec: null, wheels: [], susp: [], deformables: [], panels: [],
+    kind, body, group, spec: null, model: null, wheels: [], susp: [], deformables: [], panels: [],
     q0: body.quaternion.clone(), scripted: null, started: false, curSpeed: 0,
     isPlayer: false, crashed: false, destabilized: 0, destabilizedByPlayer: false,
     popped: 0, damageLvl: 0, smokeT: 0,
@@ -87,8 +110,13 @@ export function createVehicle(
   const spec = SPECS[spawn.variant];
   const group = new THREE.Group();
   const deformables: DeformablePart[] = [];
+  const model = getVehicleModel(spawn.variant, isPlayer);
 
-  if (spawn.variant === 'sedan') {
+  if (model) {
+    const hull = makeModelHull(model, spawn.color);
+    group.add(hull);
+    registerDeformable(hull, deformables, model.glassRanges);
+  } else if (spawn.variant === 'sedan') {
     const hull = new THREE.Mesh(makeSedanGeometry(spec.width, spec.height, spec.length, spawn.color, GLASS), hullMat);
     hull.position.y = spec.hullY;
     hull.castShadow = hull.receiveShadow = true;
@@ -117,7 +145,7 @@ export function createVehicle(
 
   const panels = buildPanels(group, spawn.variant, spawn.color, deformables);
 
-  if (isPlayer) {
+  if (isPlayer && !model) {
     const wing = new THREE.Mesh(
       new THREE.BoxGeometry(1.6, 0.07, 0.42),
       new THREE.MeshStandardMaterial({ color: 0x551612, roughness: 0.5, flatShading: true }),
@@ -127,7 +155,7 @@ export function createVehicle(
     group.add(wing);
   }
 
-  const wheels = buildWheels(spec, group);
+  const wheels = buildWheels(spec, group, model);
   scene.add(group);
 
   const body = new CANNON.Body({ mass: isPlayer ? spec.mass + 130 : spec.mass, material: phys.matCar });
@@ -151,6 +179,7 @@ export function createVehicle(
 
   const actor = makeActor('vehicle', body, group, spec.valueMult, spec.cashCap);
   actor.spec = spec;
+  actor.model = model;
   actor.wheels = wheels;
   actor.susp = susp;
   actor.deformables = deformables;
@@ -227,8 +256,16 @@ export function createBarrel(scene: THREE.Scene, phys: PhysicsContext, onCollide
 const _v = new THREE.Vector3();
 const _dir = new THREE.Vector3();
 const _lp = new THREE.Vector3();
+const _ldir = new THREE.Vector3();
+const _wq = new THREE.Quaternion();
 
-export function deformActor(actor: Actor, worldPoint: THREE.Vector3, strength: number): void {
+/** Crumple the hull around a world-space impact point. `impactDir` is the
+ *  world direction the hitting matter travels (relative velocity) — vertices
+ *  near the hit fold mostly along it, BP-style, so a front-left wall hit
+ *  reads as a caved front-left corner instead of a uniform shrink. Without
+ *  it (explosion-adjacent calls pass none) the fold falls back to pushing
+ *  toward the hull core. */
+export function deformActor(actor: Actor, worldPoint: THREE.Vector3, strength: number, impactDir?: THREE.Vector3 | null): void {
   if (!actor.deformables.length) return;
   actor.group.updateMatrixWorld(true);
   const R = 0.9 + strength * 0.16;
@@ -236,6 +273,13 @@ export function deformActor(actor: Actor, worldPoint: THREE.Vector3, strength: n
   for (const part of actor.deformables) {
     _lp.copy(worldPoint);
     part.mesh.worldToLocal(_lp);
+    let hasDir = false;
+    if (impactDir && impactDir.lengthSq() > 0.5) {
+      // direction into mesh space (meshes carry no scale — quaternion is enough)
+      part.mesh.getWorldQuaternion(_wq).invert();
+      _ldir.copy(impactDir).applyQuaternion(_wq).normalize();
+      hasDir = true;
+    }
     const geo = part.mesh.geometry;
     const pos = geo.attributes.position as THREE.BufferAttribute;
     const col = geo.attributes.color as THREE.BufferAttribute;
@@ -253,6 +297,7 @@ export function deformActor(actor: Actor, worldPoint: THREE.Vector3, strength: n
       _dir.set(_v.x, _v.y * 0.35, _v.z);
       if (_dir.lengthSq() < 0.001) _dir.set(0, -1, 0);
       _dir.normalize().negate(); // push toward hull core
+      if (hasDir) _dir.multiplyScalar(0.4).addScaledVector(_ldir, 0.85).normalize();
       const amt = strength * CRUSH_SCALE * f * (0.75 + Math.random() * 0.5);
       _v.addScaledVector(_dir, amt);
       _v.x += (Math.random() - 0.5) * 0.06 * f; // crumple jitter
@@ -311,12 +356,43 @@ export function repairVehicle(actor: Actor): void {
   }
   if (actor.spec && actor.wheels.length < 4) {
     for (const w of actor.wheels) actor.group.remove(w); // geometry is cached/shared — don't dispose
-    actor.wheels = buildWheels(actor.spec, actor.group);
+    actor.wheels = buildWheels(actor.spec, actor.group, actor.model);
     actor.susp = buildSuspension(actor.spec, actor.wheels, actor.body.mass);
   }
+  for (const s of actor.susp) s.sag = 1; // un-bend the axles too
   actor.popped = 0;
   actor.damageLvl = 0;
   actor.smokeT = 0;
+}
+
+/** Frost the window vertices near a hit (model hulls track their glass
+ *  ranges). Returns how many vertices broke — 0 means nothing to show, so
+ *  the caller can skip the shard burst. Color-only: the crumple deformer
+ *  owns the geometry. */
+export function shatterGlass(actor: Actor, worldPoint: THREE.Vector3, radius: number): number {
+  let broken = 0;
+  for (const part of actor.deformables) {
+    if (!part.glass) continue;
+    _lp.copy(worldPoint);
+    part.mesh.worldToLocal(_lp);
+    const geo = part.mesh.geometry;
+    const pos = geo.attributes.position as THREE.BufferAttribute;
+    const col = geo.attributes.color as THREE.BufferAttribute;
+    let touched = false;
+    for (const [s, e] of part.glass) {
+      for (let i = s; i < e; i++) {
+        _v.set(pos.getX(i), pos.getY(i), pos.getZ(i));
+        if (_v.distanceTo(_lp) > radius) continue;
+        if (col.getX(i) > 0.5) continue; // this pane already frosted
+        const tone = 0.72 + Math.random() * 0.18;
+        col.setXYZ(i, tone, tone + 0.04, tone + 0.07);
+        touched = true;
+        broken++;
+      }
+    }
+    if (touched) col.needsUpdate = true;
+  }
+  return broken;
 }
 
 /** Darken the paint after a vehicle burns/detonates. */
