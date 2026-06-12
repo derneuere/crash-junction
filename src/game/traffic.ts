@@ -1,6 +1,11 @@
+import * as CANNON from 'cannon-es';
 import { FIXED_DT } from './constants';
 import { GameState, type Actor } from './types';
 import type { HeightSampler } from './suspension';
+
+const X_AXIS = new CANNON.Vec3(1, 0, 0);
+const Z_AXIS = new CANNON.Vec3(0, 0, 1);
+const _qTilt = new CANNON.Quaternion();
 
 // Scripted traffic AI. Cars cruise their lane, brake behind anything in it,
 // yield at the junction box to crossing traffic and wrecks, and loop back
@@ -92,16 +97,31 @@ export function updateTraffic(actors: readonly Actor[], state: GameState, simTim
     if (a.curSpeed < 0) a.curSpeed = 0;
     b.velocity.set(d.x * a.curSpeed, b.velocity.y, d.z * a.curSpeed);
 
-    // on flat ground, hard-lock the heading; on a ramp or airborne, let the
-    // suspension pitch the car naturally and only pin the yaw
+    // on level road, hard-lock the heading; on a ramp or airborne, let the
+    // suspension pitch the car naturally and only pin the yaw. Like the
+    // player pin (control.ts), the test reads FEATURE slope only and the
+    // lock pins to the local road plane — so traffic on a graded road (none
+    // exists today; gantry runs no traffic) would still hold its lane
+    // instead of never re-pinning. On flat ground the differentials are
+    // exactly 0 and this is bit-identical to the old world-flat lock.
+    const baseF = heightAt.base(b.position.x + d.x * 1.6, b.position.z + d.z * 1.6);
+    const baseA = heightAt.base(b.position.x - d.x * 1.6, b.position.z - d.z * 1.6);
     const slope = Math.abs(
-      heightAt(b.position.x + d.x * 1.6, b.position.z + d.z * 1.6) -
-        heightAt(b.position.x - d.x * 1.6, b.position.z - d.z * 1.6),
+      heightAt(b.position.x + d.x * 1.6, b.position.z + d.z * 1.6) - baseF -
+        (heightAt(b.position.x - d.x * 1.6, b.position.z - d.z * 1.6) - baseA),
     );
     const grounded = a.susp.some((sp) => sp.grounded);
     if (grounded && slope < 0.02) {
       b.angularVelocity.set(0, 0, 0);
       b.quaternion.copy(a.q0);
+      const baseR = heightAt.base(b.position.x - d.z * 1.6, b.position.z + d.x * 1.6); // lane right
+      const baseL = heightAt.base(b.position.x + d.z * 1.6, b.position.z - d.x * 1.6);
+      if (baseF !== baseA || baseR !== baseL) {
+        _qTilt.setFromAxisAngle(X_AXIS, Math.atan2(baseF - baseA, 3.2));
+        b.quaternion.mult(_qTilt, b.quaternion);
+        _qTilt.setFromAxisAngle(Z_AXIS, Math.atan2(baseR - baseL, 3.2));
+        b.quaternion.mult(_qTilt, b.quaternion);
+      }
     } else {
       b.angularVelocity.y = 0;
       b.angularVelocity.x *= 0.99;

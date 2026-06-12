@@ -175,9 +175,11 @@ export const beach: ZoneDressing = {
   ],
 
   // The village hamlet inside the snake, repainted beach-town pastel — same
-  // audited 14x14 plinth rule as the dockyard warehouses (>= 27 m from every
-  // centreline). The plinth that used to sit at the motel corner moved east
-  // out of the lot's way (still >= 38 m clear of the snake and straight).
+  // audited 14x14 plinth rule as the dockyard warehouses. Re-audited after
+  // the flow pass pulled the snake's south leg ~30 m east TOWARD the
+  // hamlet: tightest plinth now sits 26.9 m off the main centreline,
+  // still clear of the 22.4 m the engine needs (half-width 11 + plinth
+  // half-diagonal 9.9 + 1.5 margin).
   buildings: [
     { x: -100, z: -155, h: 7, color: 0xe8d2b4 }, // village hamlet
     { x: -110, z: -130, h: 6, color: 0xcfe0d8 },

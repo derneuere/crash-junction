@@ -54,6 +54,8 @@ interface PlayOpts {
 
 const NEAR_MISS_DIST2 = 4.6 * 4.6;
 const NEAR_MISS_REL = 9; // m/s relative speed to count as a "whoosh"
+const TRACKSIDE_DIST2 = 6 * 6; // m — passing a post/gantry leg this close…
+const TRACKSIDE_SPEED = 30; // …at this speed earns a pass-by whoosh (A5)
 
 export class GameAudio {
   private ctx: AudioContext | null = null;
@@ -88,11 +90,23 @@ export class GameAudio {
   private crashVoices = 0;
   private nearMissAt = new Map<number, number>(); // body id → this.now of last whoosh
   private lastNearMiss = -1;
+  private trackside: XYZ[] = []; // static furniture for pass-by whooshes
+  private tracksideAt: number[] = []; // per-object this.now of last whoosh
+  private lastTrackside = -1;
 
   /** Fetch sample bytes — no AudioContext needed, call from the game
    *  constructor so clips are ready by the first gesture. */
   prefetch(): void {
     this.bank.prefetch();
+  }
+
+  /** Static near-track furniture (gantry legs, flag poles, lamp posts…) for
+   *  pass-by whooshes — the pitched one-shot fake doppler the genre actually
+   *  ships (sense-of-speed A5). Positions in, sound out: presentation only. */
+  setTrackside(points: XYZ[]): void {
+    this.trackside = points;
+    this.tracksideAt = new Array<number>(points.length).fill(-9);
+    this.lastTrackside = -1;
   }
 
   /** Call from a user gesture (autoplay policy). Safe to call repeatedly. */
@@ -254,8 +268,30 @@ export class GameAudio {
       this.lastVy = f.vy;
 
       if (f.driving && f.actors && f.player) this.scanNearMisses(f.actors, f.player);
+      if (f.driving && f.speed > TRACKSIDE_SPEED && f.player) this.scanTrackside(f.player, f.speed);
     } catch {
       /* audio is best-effort */
+    }
+  }
+
+  /** Flashing past static furniture at speed: a positioned whoosh at the
+   *  object, pitch rising with speed — passed objects are what make speed
+   *  audible, and SILVER LAKE's new flag line finally gives them to us. */
+  private scanTrackside(player: Actor, v: number): void {
+    if (this.now - this.lastTrackside < 0.5) return;
+    const pb = player.body.position;
+    for (let i = 0; i < this.trackside.length; i++) {
+      const o = this.trackside[i];
+      const dx = o.x - pb.x;
+      const dz = o.z - pb.z;
+      if (dx * dx + dz * dz > TRACKSIDE_DIST2) continue;
+      // per-object cooldown keeps a slow scrape along one gantry from
+      // machine-gunning; the global 0.5 s spaces a dense flag line
+      if (this.now - this.tracksideAt[i] < 2.5) continue;
+      this.tracksideAt[i] = this.now;
+      this.lastTrackside = this.now;
+      this.play('whoosh', { gain: 0.2, rate: 0.8 + v / 60, pos: o });
+      break;
     }
   }
 

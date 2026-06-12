@@ -1,10 +1,12 @@
 import { GameState, type ModeKind } from '../game/types';
-import type { EngineFlavor } from '../game/audio';
 import type { TimeOfDay } from '../game/daynight';
 import type { CashFloatData, RaceStanding, ReportData } from '../game/events';
-import { LEVEL_LABELS, type LevelId } from '../game/levels';
+import type { LevelId } from '../game/levels';
+import type { PlayerCarId } from '../game/models';
 import { BoostBar, CrashbreakerBar, RaceChip, RaceTagline, ScoreChip } from './chips';
+import { EventPicker } from './EventPicker';
 import { ReportPanel } from './ReportPanel';
+import type { BestMap } from './storage';
 
 export interface FlashState {
   text: string;
@@ -17,7 +19,6 @@ interface HudProps {
   damage: number;
   goldTarget: number;
   levelId: LevelId;
-  onSelectLevel: (id: LevelId) => void;
   multiplier: number;
   boost: number; // 0..1
   flash: FlashState | null;
@@ -28,18 +29,23 @@ interface HudProps {
   replaying: boolean;
   cineCam: boolean; // takedown-cam beat — letterbox outside crashtime
   timeOfDay: TimeOfDay;
-  onSetTimeOfDay: (t: TimeOfDay) => void;
-  engineSound: EngineFlavor;
-  onSetEngineSound: (f: EngineFlavor) => void;
+  variants: Record<LevelId, TimeOfDay>; // what each event card opens with
+  best: BestMap;
+  carId: PlayerCarId;
+  onSelectEvent: (id: LevelId, tod?: TimeOfDay) => void;
+  onSelectCar: (id: PlayerCarId) => void;
+  onOpenDebug: () => void;
   onCashDone: (id: number) => void;
 }
 
-/** HUD shell: the shared chrome (cine bars, flash, hints, level select,
- *  cash floats) with the mode-specific chips composed in. */
+/** HUD shell: the shared chrome (cine bars, flash, hints, cash floats) with
+ *  the mode-specific chips composed in. The idle screen is the B3-style
+ *  event picker (EventPicker) — the old level-button strip and the global
+ *  DAY/NIGHT + engine toggles folded into its cards and footer. */
 export function Hud({
-  state, mode, damage, goldTarget, levelId, onSelectLevel,
+  state, mode, damage, goldTarget, levelId,
   multiplier, boost, flash, report, cash, crashbreaker, race, replaying, cineCam,
-  timeOfDay, onSetTimeOfDay, engineSound, onSetEngineSound, onCashDone,
+  timeOfDay, variants, best, carId, onSelectEvent, onSelectCar, onOpenDebug, onCashDone,
 }: HudProps) {
   const cine = state === GameState.Crash || cineCam;
   const inRun = state !== GameState.Idle && state !== GameState.Done;
@@ -64,42 +70,6 @@ export function Hud({
         react + three.js + cannon-es
       </div>
 
-      <div className="daynight">
-        <button
-          className={timeOfDay === 'day' ? 'active' : undefined}
-          onClick={() => onSetTimeOfDay('day')}
-          title="Day"
-        >
-          &#9728; DAY
-        </button>
-        <button
-          className={timeOfDay === 'night' ? 'active' : undefined}
-          onClick={() => onSetTimeOfDay('night')}
-          title="Night"
-        >
-          &#9789; NIGHT
-        </button>
-      </div>
-
-      <div className="daynight engine">
-        {(
-          [
-            ['stock', 'STOCK', 'Stock engine sound (onboard recording)'],
-            ['v10', 'V10', 'V10 engine sound (engine-sim sample)'],
-            ['v8', 'V8', 'V8 engine sound (engine-sim sample)'],
-          ] as const
-        ).map(([f, label, title]) => (
-          <button
-            key={f}
-            className={engineSound === f ? 'active' : undefined}
-            onClick={() => onSetEngineSound(f)}
-            title={title}
-          >
-            {label}
-          </button>
-        ))}
-      </div>
-
       {replaying && <div className="replay">&#9210; REPLAY &middot; ESC EXITS</div>}
 
       {flash && (
@@ -110,24 +80,20 @@ export function Hud({
 
       {state === GameState.Idle && (
         <>
-          <div className="levels">
-            {(Object.keys(LEVEL_LABELS) as LevelId[]).map((id) => (
-              <button
-                key={id}
-                className={id === levelId ? 'active' : undefined}
-                onClick={() => onSelectLevel(id)}
-              >
-                {LEVEL_LABELS[id]}
-              </button>
-            ))}
-          </div>
-          <div className="prompt">
-            <div className="big">&#9658; CLICK OR PRESS SPACE TO LAUNCH</div>
-            <div className="sub">
-              &#8593; ACCELERATE &middot; &#8592;&#8594; STEER &middot; SPACE — BOOST &middot; &#8595; TAP TO DRIFT (STEER SETS THE
-              ANGLE, STRAIGHTEN TO EXIT)
-              {mode === 'crash' && <> &middot; E — CRASHBREAKER</>} &middot; ENTER — RESTART &middot; R — BUG REPORT
-            </div>
+          <EventPicker
+            levelId={levelId}
+            tod={timeOfDay}
+            variants={variants}
+            best={best}
+            carId={carId}
+            onSelectEvent={onSelectEvent}
+            onSelectCar={onSelectCar}
+            onOpenDebug={onOpenDebug}
+          />
+          <div className="hint">
+            &#8593; ACCELERATE &middot; &#8592;&#8594; STEER &middot; SPACE — BOOST &middot; &#8595; TAP TO DRIFT (STEER SETS THE
+            ANGLE, STRAIGHTEN TO EXIT)
+            {mode === 'crash' && <> &middot; E — CRASHBREAKER</>} &middot; ENTER — RESTART &middot; R — BUG REPORT
           </div>
         </>
       )}

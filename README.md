@@ -31,6 +31,7 @@ npm test         # replay regression suite (needs installed Chrome or Edge)
 | Enter | Restart |
 | **R** | **Save a physics bug report** (deterministic replay JSON — see below) |
 | Esc | Exit a running replay |
+| ` (Backquote) | Debug overlay — telemetry, replay save/load/verify, lighting + engine overrides, refshot camera poses (also the DEV button on the idle screen) |
 
 Driving is grounded in Burnout Paradise's AttribSys vehicle-handling data
 (steering lock curves, drift slip/countersteer behavior, boost
@@ -82,7 +83,13 @@ src/
                            raceway + gantryPoint (race circuits)
 ```
 
-Four levels ship, selectable on the idle screen:
+Four levels ship, browsable on the idle screen's event picker — a B3-style
+card strip: each card carries the event's stakes, DAY/NIGHT variant chips
+(applied live, remembered per event), your best-medal discs and a LAUNCH
+row; below it sits a four-car roster (COMPACT / WEDGE / VECTOR / PROWLER —
+a car is a body plus the engine voice it implies, and picking one remounts
+the game with the model pinned, because wheel arches become suspension
+anchors and the car choice is therefore sim state):
 
 - **CRASH JUNCTION** — the crash-mode event: ramps, traffic, the tanker,
   medals.

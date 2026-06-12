@@ -322,6 +322,9 @@ export class Game {
     // prop colliders are synchronous and must exist before the first
     // physics step (their GLB visuals stream in whenever — see props.ts)
     loadLevelProps(this.scene, this.phys, level);
+    // prop anchors double as pass-by whoosh triggers (sense-of-speed A5):
+    // presentation only — static positions in, positioned one-shots out
+    this.audio.setTrackside((level.props ?? []).map((p) => ({ x: p.x, y: 2, z: p.z })));
     this.fx = new Effects(this.scene);
     this.pickups = new Pickups(this.scene, level.pickups);
     this.control.reset(Math.atan2(level.player.dir.x, level.player.dir.z));
@@ -567,8 +570,11 @@ export class Game {
     this.player = createVehicle(this.scene, this.phys, onCollide, this.level.player, true);
     this.register(this.player);
     for (const spawn of this.level.traffic) this.register(createVehicle(this.scene, this.phys, onCollide, spawn, false));
-    for (const p of this.level.poles) this.register(createPole(this.scene, this.phys, onCollide, p.x, p.z));
-    for (const b of this.level.barrels) this.register(createBarrel(this.scene, this.phys, onCollide, b.x, b.z));
+    // furniture rides the road-grade base field (elevation.md Phase 1) —
+    // base() is literal 0 on flat levels, so only the GANTRY POINT north
+    // arc actually lifts (the LOOKOUT LEDGE mouth barrels live at +6 m)
+    for (const p of this.level.poles) this.register(createPole(this.scene, this.phys, onCollide, p.x, p.z, this.heightAt.base(p.x, p.z)));
+    for (const b of this.level.barrels) this.register(createBarrel(this.scene, this.phys, onCollide, b.x, b.z, this.heightAt.base(b.x, b.z)));
 
     // the mode is recreated, not reset — a fresh strategy (and its rivals /
     // scoreboard) every run, same as the actors above
@@ -1571,6 +1577,16 @@ export class Game {
       this.control.drifting,
       this.aftertouchActive,
       this.takedownCamT > 0 && this.takedownVictim ? this.takedownVictim.group.position : null,
+    );
+    // peripheral wind streaks (sense-of-speed A3), after the director so
+    // they track THIS frame's camera. Presentation only: reads the camera
+    // and controller speed, rolls Math.random, writes nothing the sim or
+    // worldHash can see — replays and both pins are untouched.
+    this.fx.streaks.frame(
+      simDt,
+      this.camera,
+      this.state === GameState.Launch && this.player && !this.player.crashed ? this.control.speed : 0,
+      this.control.boosting,
     );
   }
 

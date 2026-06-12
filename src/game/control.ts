@@ -4,7 +4,10 @@ import type { Actor } from './types';
 import type { HeightSampler } from './suspension';
 
 const UP_AXIS = new CANNON.Vec3(0, 1, 0);
+const X_AXIS = new CANNON.Vec3(1, 0, 0);
+const Z_AXIS = new CANNON.Vec3(0, 0, 1);
 const _up = new CANNON.Vec3();
+const _qTilt = new CANNON.Quaternion();
 
 // Arcade driving grounded in Burnout Paradise's AttribSys handling data
 // (steward's attribsys-ranges sweep of 48 retail vehicle vaults):
@@ -313,13 +316,36 @@ export class PlayerControl {
 
     // ---- write to the body ----
     b.velocity.set(Math.sin(this.velAngle) * this.speed, b.velocity.y, Math.cos(this.velAngle) * this.speed);
+    // The orientation pin judges FEATURE slope only (elevation.md): the
+    // old absolute test read any real road grade as "a ramp", so on a hill
+    // the chassis never re-pinned after a knock and its orientation
+    // drifted. Road grade is something to pin TO, not bail out over —
+    // ramps and kerbs (features) keep the free-pitching branch below.
+    const fx = Math.sin(this.heading) * 1.6;
+    const fz = Math.cos(this.heading) * 1.6;
+    const baseF = heightAt.base(b.position.x + fx, b.position.z + fz);
+    const baseA = heightAt.base(b.position.x - fx, b.position.z - fz);
     const slope = Math.abs(
-      heightAt(b.position.x + Math.sin(this.heading) * 1.6, b.position.z + Math.cos(this.heading) * 1.6) -
-        heightAt(b.position.x - Math.sin(this.heading) * 1.6, b.position.z - Math.cos(this.heading) * 1.6),
+      heightAt(b.position.x + fx, b.position.z + fz) - baseF -
+        (heightAt(b.position.x - fx, b.position.z - fz) - baseA),
     );
     if (!airborne && slope < 0.02) {
       b.angularVelocity.set(0, 0, 0);
       b.quaternion.setFromAxisAngle(UP_AXIS, this.heading + Math.PI); // hull forward is -z
+      // pin to the sampled local ROAD plane, not world-flat: pitch from the
+      // fore/aft base differential, roll from the lateral one. On flat
+      // ground both differentials are exactly 0 and this branch is the
+      // bit-identical no-op the determinism pins require.
+      const cxs = Math.cos(this.heading) * 1.6;
+      const czs = Math.sin(this.heading) * 1.6;
+      const baseR = heightAt.base(b.position.x - cxs, b.position.z + czs); // car's right
+      const baseL = heightAt.base(b.position.x + cxs, b.position.z - czs);
+      if (baseF !== baseA || baseR !== baseL) {
+        _qTilt.setFromAxisAngle(X_AXIS, Math.atan2(baseF - baseA, 3.2)); // nose up the grade
+        b.quaternion.mult(_qTilt, b.quaternion);
+        _qTilt.setFromAxisAngle(Z_AXIS, Math.atan2(baseR - baseL, 3.2)); // bank with the camber
+        b.quaternion.mult(_qTilt, b.quaternion);
+      }
     } else {
       // ramps and air: keep the suspension/ballistic pitch, only pin yaw
       b.angularVelocity.y = 0;

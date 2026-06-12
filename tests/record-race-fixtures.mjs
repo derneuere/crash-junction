@@ -153,6 +153,31 @@ const FIXTURES = [
       if (t > 30) return { done: true, ok: false, why: 'only ' + td + ' takedowns' };
     `,
   },
+  {
+    file: 'gantry-grid-uturn.json',
+    level: { button: '^GANTRY POINT$', id: 'gantry' },
+    note: 'fixture: gantry five-deep grid launch — every slot pulls away clean (re-recorded 2026-06-12 on the flow-pass + elevation geometry)',
+    // mirror the original tape: a beat of idle, launch, a dab of throttle,
+    // then watch the grid sort itself out on the (unchanged) south straight.
+    // The bug this pins: grid slots whose first gate sat BEHIND them
+    // U-turned into the barrier at launch.
+    keys: [
+      { t: 1.1, type: 'keydown', code: 'Space' },
+      { t: 1.25, type: 'keyup', code: 'Space' },
+      { t: 2.0, type: 'keydown', code: 'ArrowUp' },
+      { t: 2.45, type: 'keyup', code: 'ArrowUp' },
+    ],
+    watch: `
+      if (W.playerCrashed) return { done: true, ok: false, why: 'player wrecked on the grid' };
+      if (g.mode.director.racers.some((r) => r.a.crashed)) return { done: true, ok: false, why: 'a car wrecked off the launch' };
+      if (t >= 4.1) return { done: true, ok: true };
+    `,
+    // rivalWallHits is only counted during replay PLAYBACK (Game.ts guards
+    // on this.replay), so the live watcher above can't see it — the verify
+    // block replays the captured take in-page and holds the manifest's
+    // envelope before the tape is accepted
+    verify: { rivalWallHits: 0, playerWrecks: 0 },
+  },
 ];
 
 const vite = spawn(
@@ -188,10 +213,22 @@ try {
   const page = await browser.newPage();
   await page.goto(`http://localhost:${PORT}/`, { waitUntil: 'domcontentloaded' });
   await page.waitForFunction(() => !!window.__game, { timeout: 30_000 });
-  await page.evaluate(() => {
-    [...document.querySelectorAll('button')].find((b) => b.textContent.includes('SILVER LAKE')).click();
-  });
-  await page.waitForFunction(() => window.__game?.levelId === 'race', { timeout: 30_000 });
+
+  // mount a level through the event picker, same contract refshot.mjs uses
+  // (regex on trimmed button text); levels persist across fixtures, so only
+  // click when the wanted level differs from what's mounted
+  const mountLevel = async (level) => {
+    if ((await page.evaluate(() => window.__game?.levelId)) === level.id) return;
+    const clicked = await page.evaluate((reSrc) => {
+      const re = new RegExp(reSrc);
+      const btn = [...document.querySelectorAll('button')].find((b) => re.test(b.textContent?.trim() ?? ''));
+      if (!btn) return false;
+      btn.click();
+      return true;
+    }, level.button);
+    if (!clicked) throw new Error(`no button matching ${level.button} on the page`);
+    await page.waitForFunction((id) => window.__game?.levelId === id, { timeout: 30_000 }, level.id);
+  };
 
   // optional argv filter: re-record only the named fixtures
   const only = process.argv.slice(2);
@@ -203,6 +240,7 @@ try {
     }
   }
   for (const fixture of wanted) {
+    await mountLevel(fixture.level ?? { button: 'SILVER LAKE', id: 'race' });
     let done = false;
     // the triple-takedown brawl needs the luckiest seed of the set — give
     // every fixture the same deep retry budget, cheap takes reject fast
@@ -247,6 +285,36 @@ try {
         fixture.watch,
         fixture.note,
       );
+      if (result.ok && fixture.verify) {
+        // replay the candidate tape in-page and hold the manifest envelope —
+        // some stats (rivalWallHits) are only counted during playback, so a
+        // live take that LOOKED clean can still carry a violation
+        const fails = await page.evaluate(async (file, asserts) => {
+          delete window.__replayResult;
+          const g = window.__game;
+          g.startReplay(file, true);
+          await new Promise((resolve) => {
+            const tick = setInterval(() => {
+              if (window.__replayResult !== undefined) {
+                clearInterval(tick);
+                resolve();
+              }
+            }, 100);
+          });
+          const res = window.__replayResult;
+          const out = [];
+          if (res.framesPlayed !== res.framesTotal) out.push(`played ${res.framesPlayed}/${res.framesTotal} frames`);
+          for (const [key, limit] of Object.entries(asserts)) {
+            if (typeof res.stats?.[key] !== 'number') out.push(`stats.${key} missing`);
+            else if (res.stats[key] > limit) out.push(`stats.${key} = ${res.stats[key]} exceeds ${limit}`);
+          }
+          return out;
+        }, result.file, fixture.verify);
+        if (fails.length) {
+          console.log(`${fixture.file}: attempt ${attempt} rejected on verify (${fails.join('; ')})`);
+          continue;
+        }
+      }
       if (result.ok) {
         const out = path.join(root, 'tests', 'replays', fixture.file);
         writeFileSync(out, JSON.stringify(result.file));

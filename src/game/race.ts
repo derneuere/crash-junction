@@ -1,5 +1,5 @@
 import * as CANNON from 'cannon-es';
-import type { Actor, RaceDef } from './types';
+import type { Actor, RaceDef, RaceWaypoint } from './types';
 import { GameState } from './types';
 import type { GameEvents } from './events';
 import type { Emitter } from './emitter';
@@ -19,6 +19,11 @@ import { simRand } from './rng';
 export interface RaceSection {
   x: number;
   z: number;
+  /** Road elevation at the centre (m above the flat physics plane) — 0
+   *  everywhere on flat tracks. Fed by the waypoints' optional third
+   *  component (elevation.md Phase 1); progress, speed classes and
+   *  gate-reach stay deliberately 2D (roads never stack vertically). */
+  y: number;
   dirX: number; // unit direction toward the next section (the portal)
   dirZ: number;
   v: number; // section speed class, m/s (VERY_SLOW … VERY_FAST)
@@ -29,17 +34,23 @@ const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v
 
 /** Catmull-Rom through the waypoints, finely sampled. Closed wraps the
  *  control points around the seam; open clamps them at the ends (the
- *  standard clamped spline) and lands exactly on the last waypoint. */
-function catmullFine(waypoints: [number, number][], closed: boolean): [number, number][] {
+ *  standard clamped spline) and lands exactly on the last waypoint.
+ *  y rides the same spline weights; arc length below stays 2D, so a
+ *  profile tweak can never move a section or change a speed class. */
+function catmullFine(waypoints: RaceWaypoint[], closed: boolean): [number, number, number][] {
   const n = waypoints.length;
   const at = (i: number) => waypoints[closed ? ((i % n) + n) % n : clamp(i, 0, n - 1)];
-  const fine: [number, number][] = [];
+  const fine: [number, number, number][] = [];
   const segs = closed ? n : n - 1;
   for (let i = 0; i < segs; i++) {
     const p0 = at(i - 1);
     const p1 = at(i);
     const p2 = at(i + 1);
     const p3 = at(i + 2);
+    const y0 = p0[2] ?? 0;
+    const y1 = p1[2] ?? 0;
+    const y2 = p2[2] ?? 0;
+    const y3 = p3[2] ?? 0;
     for (let s = 0; s < 20; s++) {
       const t = s / 20;
       const t2 = t * t;
@@ -47,18 +58,19 @@ function catmullFine(waypoints: [number, number][], closed: boolean): [number, n
       fine.push([
         0.5 * (2 * p1[0] + (p2[0] - p0[0]) * t + (2 * p0[0] - 5 * p1[0] + 4 * p2[0] - p3[0]) * t2 + (3 * p1[0] - p0[0] - 3 * p2[0] + p3[0]) * t3),
         0.5 * (2 * p1[1] + (p2[1] - p0[1]) * t + (2 * p0[1] - 5 * p1[1] + 4 * p2[1] - p3[1]) * t2 + (3 * p1[1] - p0[1] - 3 * p2[1] + p3[1]) * t3),
+        0.5 * (2 * y1 + (y2 - y0) * t + (2 * y0 - 5 * y1 + 4 * y2 - y3) * t2 + (3 * y1 - y0 - 3 * y2 + y3) * t3),
       ]);
     }
   }
-  if (!closed) fine.push([waypoints[n - 1][0], waypoints[n - 1][1]]);
+  if (!closed) fine.push([waypoints[n - 1][0], waypoints[n - 1][1], waypoints[n - 1][2] ?? 0]);
   return fine;
 }
 
 /** Walk the fine polyline's arc length, dropping a point every `spacing`
  *  metres. Closed wraps back to the seam (and drops a too-close duplicate);
  *  open must END at the final waypoint — that's where the exit gate lives. */
-function resampleEvery(fine: [number, number][], spacing: number, closed: boolean): [number, number][] {
-  const pts: [number, number][] = [];
+function resampleEvery(fine: [number, number, number][], spacing: number, closed: boolean): [number, number, number][] {
+  const pts: [number, number, number][] = [];
   let acc = 0;
   let prev = fine[0];
   pts.push(prev);
@@ -91,7 +103,7 @@ function resampleEvery(fine: [number, number][], spacing: number, closed: boolea
  *  controls whether index math wraps (a loop) or clamps (an open branch) —
  *  the clamped next() makes the open brake pass a self-min no-op at the
  *  last section, so the same passes serve both shapes. */
-function finishSections(pts: [number, number][], spacing: number, closed: boolean): RaceSection[] {
+function finishSections(pts: [number, number, number][], spacing: number, closed: boolean): RaceSection[] {
   const N = pts.length;
   const next = (i: number) => (closed ? (i + 1) % N : Math.min(i + 1, N - 1));
   const secs: RaceSection[] = pts.map((p, i) => {
@@ -99,7 +111,12 @@ function finishSections(pts: [number, number][], spacing: number, closed: boolea
     const dx = q[0] - p[0];
     const dz = q[1] - p[1];
     const l = Math.hypot(dx, dz) || 1;
-    return { x: p[0], z: p[1], dirX: dx / l, dirZ: dz / l, v: 0 };
+    // max(0, y): the Catmull tangents at a flat→climb seam overshoot a few
+    // centimetres BELOW grade on the approach segment — clamping keeps the
+    // flat zones at exact 0 (the determinism contract for the flat levels)
+    // and turns the overshoot into a slightly later climb start. The clamp
+    // boundary's slope step is ~1%, far under any pin/launch threshold.
+    return { x: p[0], z: p[1], y: Math.max(0, p[2]), dirX: dx / l, dirZ: dz / l, v: 0 };
   });
   if (!closed && N >= 2) {
     // the final section has no portal of its own — keep the previous
@@ -127,14 +144,14 @@ function finishSections(pts: [number, number][], spacing: number, closed: boolea
 /** Resample a closed waypoint polygon into evenly spaced sections with
  *  curvature-derived speed classes (slow apex, fast straight), brake
  *  distance propagated backwards so the AI slows BEFORE the corner. */
-export function buildLoopSections(waypoints: [number, number][], spacing: number): RaceSection[] {
+export function buildLoopSections(waypoints: RaceWaypoint[], spacing: number): RaceSection[] {
   return finishSections(resampleEvery(catmullFine(waypoints, true), spacing, true), spacing, true);
 }
 
 /** The same resampler for an OPEN polyline (shortcut branch ribbons):
  *  clamped spline endpoints, no wrap — the final section keeps the previous
  *  section's direction so its gate still faces down the branch. */
-export function buildOpenSections(waypoints: [number, number][], spacing: number): RaceSection[] {
+export function buildOpenSections(waypoints: RaceWaypoint[], spacing: number): RaceSection[] {
   return finishSections(resampleEvery(catmullFine(waypoints, false), spacing, false), spacing, false);
 }
 
@@ -268,7 +285,7 @@ export class RaceDirector {
       const back = 7 + i * 7;
       const side = (i % 2 === 0 ? 1 : -1) * 2.6;
       const heading = Math.atan2(s0.dirX, s0.dirZ);
-      actor.body.position.set(s0.x + s0.dirX * back + px * side, actor.spec?.rideHeight ?? 0.8, s0.z + s0.dirZ * back + pz * side);
+      actor.body.position.set(s0.x + s0.dirX * back + px * side, s0.y + (actor.spec?.rideHeight ?? 0.8), s0.z + s0.dirZ * back + pz * side);
       actor.body.quaternion.setFromAxisAngle(new CANNON.Vec3(0, 1, 0), heading + Math.PI);
       actor.q0.copy(actor.body.quaternion);
       actor.body.wakeUp();
@@ -779,7 +796,11 @@ export class RaceDirector {
   private placeAt(a: Actor, idx: number): void {
     const s = this.secs[idx];
     const b = a.body;
-    b.position.set(s.x, (a.spec?.rideHeight ?? 0.8) + 0.05, s.z);
+    // s.y: reset pairs land ON the road, which carries the elevation
+    // profile on the north arc of GANTRY POINT (+0 on every flat track —
+    // bit-identical to the pre-elevation math). Respawning INTO a climb at
+    // RESET_SPEED is fine: the ground-follow picks the car up first step.
+    b.position.set(s.x, s.y + ((a.spec?.rideHeight ?? 0.8) + 0.05), s.z);
     b.quaternion.setFromAxisAngle(UP, Math.atan2(s.dirX, s.dirZ) + Math.PI);
     b.velocity.set(s.dirX * RESET_SPEED, 0, s.dirZ * RESET_SPEED);
     b.angularVelocity.set(0, 0, 0);

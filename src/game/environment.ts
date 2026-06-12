@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import * as CANNON from 'cannon-es';
-import type { CoastDef, LevelDef } from './types';
+import type { CoastDef, LevelDef, RaceWaypoint } from './types';
 import { GROUP_DECOR, type PhysicsContext } from './physics';
 import { buildOpenSections, SHORTCUT_SPACING } from './race';
 import {
@@ -22,14 +22,49 @@ import type { HeightSampler } from './suspension';
 // main race ribbon 0.012 → decals 0.014 → centre dashes / stripes 0.015.
 // New paint must keep to its slot or the junction overlaps will shimmer.
 
-/** Vertical height field for the suspension rays: flat road, ramp wedges
- *  and the 0.16 m sidewalk plinths. The chassis box ignores this décor
- *  entirely (GROUP_DECOR filtering) — the springs are the only thing that
- *  touches it, so jumps and kerb hops are pure suspension + ballistics. */
+// ---- the road-base elevation field (elevation.md Phase 1) ----
+// Full elevation holds across the corridor plus a shoulder (the walls and
+// posts at halfW+1.65 must stand on the plateau, not its slope), then an
+// embankment fade back to grade. The doc's bounds: fade ≥ 15 m at ≤ ~25%
+// slope — 6 m over 26 m ≈ 23%, gentler than ANY feature skirt today (the
+// ramp side-skirt is 220%/m). Every number here is a SIM tunable: the
+// sampler feeds physics, so retuning either repeats the determinism bill.
+const ROAD_SHOULDER = 3.5; // m past the ribbon edge at full elevation
+const EMBANKMENT_FADE = 26; // m from the shoulder back down to grade
+
+/** One straight run of elevated road centreline between two sections. */
+interface ElevSeg {
+  ax: number;
+  az: number;
+  ux: number; // unit a→b
+  uz: number;
+  len: number;
+  ay: number; // elevation at the a/b ends
+  by: number;
+  plateau: number; // halfW + shoulder for this chain
+  minX: number; // influence bounds (plateau + fade inflated)
+  maxX: number;
+  minZ: number;
+  maxZ: number;
+}
+
+/** Vertical height field for the suspension rays, decomposed per the
+ *  HeightSampler contract (suspension.ts): a smooth road-grade BASE from
+ *  the race section chains, plus launchable FEATURES — ramp wedges and the
+ *  0.16 m sidewalk plinths — stacked on top. The chassis box ignores all
+ *  of it (GROUP_DECOR filtering) — the springs are the only thing that
+ *  touches it, so jumps and kerb hops are pure suspension + ballistics.
+ *
+ *  Determinism: on a track with no elevation profile the segment list is
+ *  EMPTY, base() returns literal 0 and total degenerates to the feature
+ *  loops alone — bit-identical to the pre-elevation sampler on every flat
+ *  level (the two replay pins prove it). The field history of this engine
+ *  is one long fight against edges: the base field adds NO new edges, only
+ *  C0-continuous grades with a linear lateral fade. */
 export function makeHeightSampler(level: LevelDef): HeightSampler {
   const ramps = level.ramps;
   const slabs = level.buildings;
-  return (x, z) => {
+  const feature = (x: number, z: number): number => {
     let h = 0;
     for (const r of ramps) {
       // lateral skirt: the wedge fades out over a metre past its edge, so
@@ -48,15 +83,86 @@ export function makeHeightSampler(level: LevelDef): HeightSampler {
     }
     return h;
   };
+
+  // collect the elevated centreline segments — section pairs where either
+  // end carries height — from the main loop and every shortcut chain
+  const segs: ElevSeg[] = [];
+  const race = level.mode.kind === 'race' ? level.mode.race : null;
+  if (race) {
+    const collect = (chain: { x: number; z: number; y: number }[], halfW: number, closed: boolean): void => {
+      const plateau = halfW + ROAD_SHOULDER;
+      const reach = plateau + EMBANKMENT_FADE;
+      const last = closed ? chain.length : chain.length - 1;
+      for (let i = 0; i < last; i++) {
+        const a = chain[i];
+        const b = chain[(i + 1) % chain.length];
+        if (a.y <= 0 && b.y <= 0) continue;
+        const dx = b.x - a.x;
+        const dz = b.z - a.z;
+        const len = Math.hypot(dx, dz) || 1;
+        segs.push({
+          ax: a.x, az: a.z, ux: dx / len, uz: dz / len, len, ay: a.y, by: b.y, plateau,
+          minX: Math.min(a.x, b.x) - reach, maxX: Math.max(a.x, b.x) + reach,
+          minZ: Math.min(a.z, b.z) - reach, maxZ: Math.max(a.z, b.z) + reach,
+        });
+      }
+    };
+    collect(race.sections, race.width / 2, true);
+    for (const sc of race.shortcuts ?? []) {
+      collect(buildOpenSections(sc.waypoints, SHORTCUT_SPACING), sc.width / 2, false);
+    }
+  }
+
+  if (segs.length === 0) {
+    // flat level: total IS the feature field, base is the constant 0 —
+    // not just equivalent but the same float ops as before the decompose
+    return Object.assign((x: number, z: number) => feature(x, z), { base: () => 0, feature });
+  }
+
+  let gMinX = Infinity;
+  let gMaxX = -Infinity;
+  let gMinZ = Infinity;
+  let gMaxZ = -Infinity;
+  for (const s of segs) {
+    gMinX = Math.min(gMinX, s.minX);
+    gMaxX = Math.max(gMaxX, s.maxX);
+    gMinZ = Math.min(gMinZ, s.minZ);
+    gMaxZ = Math.max(gMaxZ, s.maxZ);
+  }
+  const base = (x: number, z: number): number => {
+    if (x < gMinX || x > gMaxX || z < gMinZ || z > gMaxZ) return 0;
+    let e = 0;
+    for (const s of segs) {
+      if (x < s.minX || x > s.maxX || z < s.minZ || z > s.maxZ) continue;
+      // nearest point on the segment; elevation lerps along it. Adjacent
+      // segments share endpoints, so the max over segments is continuous
+      // along the chain, and the end-clamp rounds the span ends radially.
+      const px = x - s.ax;
+      const pz = z - s.az;
+      let t = px * s.ux + pz * s.uz;
+      t = t < 0 ? 0 : t > s.len ? s.len : t;
+      const d = Math.hypot(px - s.ux * t, pz - s.uz * t);
+      if (d >= s.plateau + EMBANKMENT_FADE) continue;
+      const h = s.ay + ((s.by - s.ay) * t) / s.len;
+      const c = d <= s.plateau ? h : h * (1 - (d - s.plateau) / EMBANKMENT_FADE);
+      if (c > e) e = c;
+    }
+    return e;
+  };
+  return Object.assign((x: number, z: number) => base(x, z) + feature(x, z), { base, feature });
 }
 
 /** Painted ground rectangles, one InstancedMesh per color. The road dashes
  *  and checkpoint stripes are all the default off-white, so the existing
  *  call sites still cost a single draw; level decals (DecalDef) ride the
- *  same path with their own colors and a lower y slot. */
+ *  same path with their own colors and a lower y slot. Marks on the
+ *  elevated north arc carry their own y (road elevation + slot) and a
+ *  pitch about their length axis so a dash lies ON the grade instead of
+ *  spearing through it — the coplanar z-order contract above only ever
+ *  applied to the flat zones, which pass neither field and stay put. */
 function addMarkInstances(
   scene: THREE.Scene,
-  marks: { x: number; z: number; w: number; l: number; yaw: number; color?: number }[],
+  marks: { x: number; z: number; w: number; l: number; yaw: number; color?: number; y?: number; pitch?: number }[],
   y = 0.015,
 ): void {
   const groups = new Map<number, typeof marks>();
@@ -75,10 +181,10 @@ function addMarkInstances(
     const mMat = new THREE.MeshStandardMaterial({ color, roughness: 0.85 });
     const inst = new THREE.InstancedMesh(mGeo, mMat, mine.length);
     mine.forEach((mk, i) => {
-      e.set(-Math.PI / 2, mk.yaw, 0, 'YXZ');
+      e.set(-Math.PI / 2 + (mk.pitch ?? 0), mk.yaw, 0, 'YXZ');
       q.setFromEuler(e);
       s.set(mk.w, mk.l, 1);
-      m4.compose(new THREE.Vector3(mk.x, y, mk.z), q, s);
+      m4.compose(new THREE.Vector3(mk.x, mk.y ?? y, mk.z), q, s);
       inst.setMatrixAt(i, m4);
     });
     inst.instanceMatrix.needsUpdate = true;
@@ -89,10 +195,12 @@ function addMarkInstances(
 
 /** Road ribbon for a section chain: a triangle strip between the left and
  *  right edges of every section. Closed chains (the main loop) wrap the
- *  seam; open chains (shortcut branches) just end at their last section. */
+ *  seam; open chains (shortcut branches) just end at their last section.
+ *  Each row rides its section's road elevation plus the z-order slot, so
+ *  the strip IS the visual of the suspension base field's corridor. */
 function addRibbon(
   scene: THREE.Scene,
-  secs: { x: number; z: number; dirX: number; dirZ: number }[],
+  secs: { x: number; z: number; y: number; dirX: number; dirZ: number }[],
   width: number,
   y: number,
   color: number,
@@ -106,10 +214,10 @@ function addRibbon(
     const s = secs[i % N];
     const o = i * 6;
     pos[o] = s.x - s.dirZ * w2;
-    pos[o + 1] = y;
+    pos[o + 1] = s.y + y;
     pos[o + 2] = s.z + s.dirX * w2;
     pos[o + 3] = s.x + s.dirZ * w2;
-    pos[o + 4] = y;
+    pos[o + 4] = s.y + y;
     pos[o + 5] = s.z - s.dirX * w2;
   }
   const idx: number[] = [];
@@ -231,7 +339,8 @@ function buildCoast(scene: THREE.Scene, coast: CoastDef): void {
     else runs.push({ edge: o[i].edge, segs: [i] });
   }
 
-  // a simple skirt: one quad strip from the rim (y 0) down past the
+  // a simple skirt: one quad strip from the rim (y 0, or the vertex's
+  // authored rim elevation along an elevated road) down past the
   // waterline. Adjacent runs share their boundary columns bit-for-bit (same
   // mitred outward, same averaged width), so the ring stays watertight.
   const addFlatSkirt = (segs: number[], mat: THREE.Material, tile: number): void => {
@@ -247,7 +356,7 @@ function buildCoast(scene: THREE.Scene, coast: CoastDef): void {
       }
       const k = c * 6;
       pos[k] = o[vi].x;
-      pos[k + 1] = 0;
+      pos[k + 1] = o[vi].y ?? 0;
       pos[k + 2] = o[vi].z;
       pos[k + 3] = o[vi].x + vOut[vi].x * vW[vi] * botF;
       pos[k + 4] = BOT;
@@ -283,6 +392,7 @@ function buildCoast(scene: THREE.Scene, coast: CoastDef): void {
     interface Col {
       tx: number;
       tz: number;
+      ty: number; // rim elevation (lerped between vertex rim y values)
       bx: number; // bottom offset (added to top), already botF-scaled
       bz: number;
       ox: number; // outward + along directions for jitter
@@ -293,11 +403,12 @@ function buildCoast(scene: THREE.Scene, coast: CoastDef): void {
       pinned: boolean; // run boundary — no jitter
     }
     const colList: Col[] = [];
-    const pushCol = (tx: number, tz: number, bx: number, bz: number, i: number, key: number, pinned: boolean) => {
+    const pushCol = (tx: number, tz: number, ty: number, bx: number, bz: number, i: number, key: number, pinned: boolean) => {
       const l = Math.hypot(bx, bz) || 1;
       colList.push({
         tx,
         tz,
+        ty,
         bx,
         bz,
         ox: bx / l,
@@ -309,9 +420,11 @@ function buildCoast(scene: THREE.Scene, coast: CoastDef): void {
       });
     };
     const firstKey = cliffKey;
+    let rimMax = 0; // tallest rim in this run — drives the face row count
     for (let s = 0; s < segs.length; s++) {
       const i = segs[s];
       const j = (i + 1) % n;
+      rimMax = Math.max(rimMax, o[i].y ?? 0, o[j].y ?? 0);
       const len = Math.hypot(o[j].x - o[i].x, o[j].z - o[i].z);
       const sub = Math.max(1, Math.round(len / 7));
       const bA = { x: vOut[i].x * vW[i] * botF, z: vOut[i].z * vW[i] * botF };
@@ -321,6 +434,7 @@ function buildCoast(scene: THREE.Scene, coast: CoastDef): void {
         pushCol(
           o[i].x + (o[j].x - o[i].x) * t,
           o[i].z + (o[j].z - o[i].z) * t,
+          (o[i].y ?? 0) + ((o[j].y ?? 0) - (o[i].y ?? 0)) * t,
           bA.x + (bB.x - bA.x) * t,
           bA.z + (bB.z - bA.z) * t,
           i,
@@ -336,6 +450,7 @@ function buildCoast(scene: THREE.Scene, coast: CoastDef): void {
     pushCol(
       o[tv].x,
       o[tv].z,
+      o[tv].y ?? 0,
       vOut[tv].x * vW[tv] * botF,
       vOut[tv].z * vW[tv] * botF,
       tail,
@@ -343,7 +458,10 @@ function buildCoast(scene: THREE.Scene, coast: CoastDef): void {
       !closed,
     );
 
-    const ROWS = 4;
+    // an elevated rim stretches the face from ~3.4 m to 9+ — two extra
+    // jittered rows keep the rock chunky instead of stretched (Phase 0's
+    // "taller cliff skirt": more rows where the drama is)
+    const ROWS = rimMax > 1.5 ? 6 : 4;
     const cols = colList.length;
     const pos = new Float32Array(cols * ROWS * 3);
     const col = new Float32Array(cols * ROWS * 3);
@@ -355,7 +473,7 @@ function buildCoast(scene: THREE.Scene, coast: CoastDef): void {
       for (let r = 0; r < ROWS; r++) {
         const t = r / (ROWS - 1);
         let x = cc.tx + cc.bx * t;
-        let y = BOT * t;
+        let y = cc.ty + (BOT - cc.ty) * t;
         let z = cc.tz + cc.bz * t;
         if (!cc.pinned && r > 0 && r < ROWS - 1) {
           // mid rows carry the full jitter; the rim (r 0) stays glued to
@@ -459,6 +577,161 @@ function buildCoast(scene: THREE.Scene, coast: CoastDef): void {
   }
 }
 
+/** Embankment drape: the VISUAL ground for the road-base elevation field.
+ *  Without it an elevated ribbon floats over flat island grass. One quad
+ *  strip per side of every elevated chain span, columns at the sampler's
+ *  own lateral breakpoints (road edge → shoulder → fade → grade). Every
+ *  vertex takes its height, color AND normal from the FIELD ITSELF
+ *  (base(x,z) + finite-difference gradient): on the inside of bends
+ *  tighter than the fade reach the lateral fans self-intersect, and
+ *  field-sampled folds land coincident — same depth, same shading — so
+ *  the overlap is invisible where per-fan lerps drew black creases.
+ *  Textured with the SAME world-tiled drygrass the gold ground patches
+ *  use — same texture, same (x, −z) UV rule, same 8 m tile — so where
+ *  the drape surfaces through a flat patch the intersection contour is
+ *  pattern-identical and disappears. Columns that would cross the coast
+ *  outline are clipped to it, with the clip vertex on the outline's rim
+ *  line (the same lerp the skirts use), so the drape hands off to the
+ *  raised cliff skirt watertight instead of hovering over the sea.
+ *  PURE VISUAL: no bodies, build-time sampler reads only, zero
+ *  determinism cost. */
+function addEmbankments(
+  scene: THREE.Scene,
+  chains: { secs: { x: number; z: number; y: number; dirX: number; dirZ: number }[]; halfW: number; closed: boolean }[],
+  coast: CoastDef | undefined,
+  base: (x: number, z: number) => number,
+): void {
+  const LIFT = 0.004; // under every paint slot, above the y-0 island sheet
+  const o = coast?.outline;
+  const inIsland = (x: number, z: number): boolean => {
+    if (!o) return true;
+    let inside = false;
+    for (let i = 0, j = o.length - 1; i < o.length; j = i++) {
+      const a = o[i];
+      const b = o[j];
+      if (a.z > z !== b.z > z && x < a.x + ((b.x - a.x) * (z - a.z)) / (b.z - a.z)) inside = !inside;
+    }
+    return inside;
+  };
+  /** Clip the segment p→q (p inside, q outside) against the outline; returns
+   *  the intersection plus the rim elevation lerped along the crossed edge. */
+  const clipToRim = (px: number, pz: number, qx: number, qz: number): { x: number; z: number; y: number } => {
+    if (o) {
+      for (let i = 0, j = o.length - 1; i < o.length; j = i++) {
+        const a = o[j];
+        const b = o[i];
+        const rx = qx - px;
+        const rz = qz - pz;
+        const sx = b.x - a.x;
+        const sz = b.z - a.z;
+        const den = rx * sz - rz * sx;
+        if (Math.abs(den) < 1e-9) continue;
+        const t = ((a.x - px) * sz - (a.z - pz) * sx) / den;
+        const u = ((a.x - px) * rz - (a.z - pz) * rx) / den;
+        if (t >= 0 && t <= 1 && u >= 0 && u <= 1) {
+          return { x: px + rx * t, z: pz + rz * t, y: (a.y ?? 0) + ((b.y ?? 0) - (a.y ?? 0)) * u };
+        }
+      }
+    }
+    return { x: qx, z: qz, y: 0 };
+  };
+
+  const posArr: number[] = [];
+  const uvArr: number[] = [];
+  const nrmArr: number[] = [];
+  const idx: number[] = [];
+  /** Field-derived vertex: position, patch-aligned UV, gradient normal. */
+  const pushVertex = (x: number, z: number, y: number): void => {
+    posArr.push(x, y + LIFT, z);
+    uvArr.push(x, -z); // ShapeGeometry's raw shape coords — repeat does the tiling
+    const e = 0.75;
+    const nx = (base(x - e, z) - base(x + e, z)) / (2 * e);
+    const nz = (base(x, z - e) - base(x, z + e)) / (2 * e);
+    const l = Math.hypot(nx, 1, nz);
+    nrmArr.push(nx / l, 1 / l, nz / l);
+  };
+  for (const { secs, halfW, closed } of chains) {
+    const N = secs.length;
+    // elevated spans, dilated 2 sections so the strip feathers onto grade
+    const hot = secs.map((s) => s.y > 0.001);
+    const elev = secs.map((_, i) => {
+      for (let k = -2; k <= 2; k++) {
+        const j = closed ? (i + k + N) % N : i + k;
+        if (j >= 0 && j < N && hot[j]) return true;
+      }
+      return false;
+    });
+    const runs: number[][] = [];
+    let start = 0;
+    if (closed) {
+      // start at a cold section so no run straddles the array seam
+      start = elev.findIndex((e) => !e);
+      if (start < 0) start = 0;
+    }
+    let cur: number[] | null = null;
+    for (let k = 0; k < N; k++) {
+      const i = closed ? (start + k) % N : k;
+      if (elev[i]) {
+        if (!cur) runs.push((cur = []));
+        cur.push(i);
+      } else cur = null;
+    }
+    // column offsets: the sampler's lateral breakpoints plus midpoints, so
+    // the linear fade renders with its own crease lines in the right spots
+    const offs = [halfW - 0.5, halfW + ROAD_SHOULDER, 0, 0, 0];
+    offs[2] = offs[1] + EMBANKMENT_FADE / 3;
+    offs[3] = offs[1] + (2 * EMBANKMENT_FADE) / 3;
+    offs[4] = offs[1] + EMBANKMENT_FADE;
+    for (const run of runs) {
+      for (const side of [1, -1]) {
+        const rowBase = posArr.length / 3;
+        for (let r = 0; r < run.length; r++) {
+          const s = secs[run[r]];
+          let clipped: { x: number; z: number; y: number } | null = null;
+          for (let j = 0; j < offs.length; j++) {
+            let x = s.x - side * s.dirZ * offs[j];
+            let z = s.z + side * s.dirX * offs[j];
+            if (clipped) {
+              x = clipped.x;
+              z = clipped.z;
+            } else if (j > 0 && !inIsland(x, z)) {
+              const px = s.x - side * s.dirZ * offs[j - 1];
+              const pz = s.z + side * s.dirX * offs[j - 1];
+              clipped = clipToRim(px, pz, x, z);
+              x = clipped.x;
+              z = clipped.z;
+            }
+            // clipped vertices take the outline's rim lerp (watertight with
+            // the skirt top row); everything else samples the field
+            pushVertex(x, z, clipped ? clipped.y : base(x, z));
+          }
+        }
+        const C = offs.length;
+        for (let r = 0; r < run.length - 1; r++) {
+          for (let j = 0; j < C - 1; j++) {
+            const a = rowBase + r * C + j;
+            const b = rowBase + (r + 1) * C + j;
+            // wind so the up-faces face up regardless of side
+            if (side === 1) idx.push(a, b, a + 1, a + 1, b, b + 1);
+            else idx.push(a, a + 1, b, a + 1, b + 1, b);
+          }
+        }
+      }
+    }
+  }
+  if (!idx.length) return;
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(posArr), 3));
+  geo.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(uvArr), 2));
+  geo.setAttribute('normal', new THREE.BufferAttribute(new Float32Array(nrmArr), 3));
+  geo.setIndex(idx);
+  const tex = makePatchTexture('drygrass');
+  tex.repeat.setScalar(1 / 8); // the GroundPatchDef drygrass tile (TILE table)
+  const mesh = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({ map: tex, roughness: 1 }));
+  mesh.receiveShadow = true;
+  scene.add(mesh);
+}
+
 export function buildEnvironment(scene: THREE.Scene, phys: PhysicsContext, level: LevelDef): void {
   const race = level.mode.kind === 'race' ? level.mode.race : null;
 
@@ -527,19 +800,47 @@ export function buildEnvironment(scene: THREE.Scene, phys: PhysicsContext, level
     const N = secs.length;
     addRibbon(scene, secs, race.width, 0.012, 0x2e3138, true);
 
-    const marks = secs
-      .filter((_, i) => i % 2 === 0)
-      .map((s) => ({ x: s.x, z: s.z, w: 0.22, l: 2.2, yaw: Math.atan2(s.dirX, s.dirZ) }));
+    // paint pitch on a grade: a flat dash 2.2 m long would bury one end in
+    // a 6% climb and float the other — tilt it about its length axis to
+    // the local chain grade (the mark's length axis points BACKWARDS along
+    // the chain after the YXZ euler, hence the minus). 0 on flat ground.
+    const gradeAt = (chain: { x: number; z: number; y: number }[], i: number, closed: boolean): number => {
+      const n = chain.length;
+      const a = chain[closed ? (i - 1 + n) % n : Math.max(0, i - 1)];
+      const b = chain[closed ? (i + 1) % n : Math.min(n - 1, i + 1)];
+      const run = Math.hypot(b.x - a.x, b.z - a.z);
+      return run > 0 ? (b.y - a.y) / run : 0;
+    };
+    interface Mark {
+      x: number;
+      z: number;
+      w: number;
+      l: number;
+      yaw: number;
+      color?: number;
+      y?: number;
+      pitch?: number;
+    }
+    const marks: Mark[] = [];
+    secs.forEach((s, i) => {
+      if (i % 2 !== 0) return;
+      marks.push({
+        x: s.x, z: s.z, w: 0.22, l: 2.2, yaw: Math.atan2(s.dirX, s.dirZ),
+        y: s.y + 0.015, pitch: -Math.atan(gradeAt(secs, i, true)),
+      });
+    });
     marks.push({
       x: secs[0].x,
       z: secs[0].z,
       w: race.width - 2,
       l: 1.0,
       yaw: Math.atan2(secs[0].dirX, secs[0].dirZ),
+      y: secs[0].y + 0.015,
     });
 
     // checkpoints: a painted stripe + glowing gate posts every 6th section,
-    // so the racing line always has a visible next target
+    // so the racing line always has a visible next target. Posts and
+    // stripes ride the section's road elevation on the north arc.
     const postGeo = new THREE.CylinderGeometry(0.12, 0.16, 2.6, 8);
     const postMat = new THREE.MeshStandardMaterial({
       color: 0x22262c,
@@ -549,10 +850,13 @@ export function buildEnvironment(scene: THREE.Scene, phys: PhysicsContext, level
     postMat.userData.night = { intensity: 2.4, day: 1.4 };
     for (let i = 6; i < N; i += 6) {
       const s = secs[i];
-      marks.push({ x: s.x, z: s.z, w: race.width - 2, l: 0.7, yaw: Math.atan2(s.dirX, s.dirZ) });
+      marks.push({
+        x: s.x, z: s.z, w: race.width - 2, l: 0.7, yaw: Math.atan2(s.dirX, s.dirZ),
+        y: s.y + 0.015, pitch: -Math.atan(gradeAt(secs, i, true)),
+      });
       for (const side of [1, -1]) {
         const post = new THREE.Mesh(postGeo, postMat);
-        post.position.set(s.x - side * s.dirZ * (w2 + 1.1), 1.3, s.z + side * s.dirX * (w2 + 1.1));
+        post.position.set(s.x - side * s.dirZ * (w2 + 1.1), s.y + 1.3, s.z + side * s.dirX * (w2 + 1.1));
         post.castShadow = true;
         scene.add(post);
       }
@@ -569,7 +873,10 @@ export function buildEnvironment(scene: THREE.Scene, phys: PhysicsContext, level
       // to dress a branch up as the main line
       for (let i = 2; i < chain.length - 1; i += 4) {
         const s = chain[i];
-        marks.push({ x: s.x, z: s.z, w: 0.22, l: 2.2, yaw: Math.atan2(s.dirX, s.dirZ) });
+        marks.push({
+          x: s.x, z: s.z, w: 0.22, l: 2.2, yaw: Math.atan2(s.dirX, s.dirZ),
+          y: s.y + 0.015, pitch: -Math.atan(gradeAt(chain, i, false)),
+        });
       }
     }
     addMarkInstances(scene, marks);
@@ -581,7 +888,7 @@ export function buildEnvironment(scene: THREE.Scene, phys: PhysicsContext, level
     // rivals through the junction
     const gapped = new Set<string>(); // "side:segIndex"
     for (const sc of shortcuts) {
-      const mouths: [number, [number, number]][] = [
+      const mouths: [number, RaceWaypoint][] = [
         [sc.entry, sc.waypoints[0]],
         [sc.exit, sc.waypoints[sc.waypoints.length - 1]],
       ];
@@ -617,7 +924,13 @@ export function buildEnvironment(scene: THREE.Scene, phys: PhysicsContext, level
       }
       return st;
     };
-    const wallSegs: { x: number; z: number; len: number; yaw: number; style: WallKind }[] = [];
+    // Wall segments on a grade sit at their section pair's MEAN elevation —
+    // stepped seams, not pitched boxes, per elevation.md's costed tradeoff:
+    // at the profile's steepest ~7% a 9.5 m segment steps ~±0.3 m, hidden
+    // by the 0.5 m overlap, and the embankment shoulder under the wall is
+    // at full road elevation so no gap opens beneath the box. wallDirs
+    // judging stays 2D and untouched.
+    const wallSegs: { x: number; z: number; y0: number; y1: number; len: number; yaw: number; style: WallKind }[] = [];
     for (const side of [1, -1] as const) {
       for (let i = 0; i < N; i++) {
         if (gapped.has(`${side}:${i}`)) continue; // a shortcut mouth opens here
@@ -631,7 +944,7 @@ export function buildEnvironment(scene: THREE.Scene, phys: PhysicsContext, level
         const bx = b.x - side * b.dirZ * off;
         const bz = b.z + side * b.dirX * off;
         const len = Math.hypot(bx - ax, bz - az) + 0.5; // overlap hides the seams
-        wallSegs.push({ x: (ax + bx) / 2, z: (az + bz) / 2, len, yaw: Math.atan2(bx - ax, bz - az), style });
+        wallSegs.push({ x: (ax + bx) / 2, z: (az + bz) / 2, y0: a.y, y1: b.y, len, yaw: Math.atan2(bx - ax, bz - az), style });
       }
     }
     const wallGeo = new THREE.BoxGeometry(1, 1, 1);
@@ -652,7 +965,7 @@ export function buildEnvironment(scene: THREE.Scene, phys: PhysicsContext, level
       mine.forEach((sg, i) => {
         q.setFromAxisAngle(up, sg.yaw);
         sc.set(wallT, WALL_H.race, sg.len);
-        m4.compose(new THREE.Vector3(sg.x, WALL_H.race / 2, sg.z), q, sc);
+        m4.compose(new THREE.Vector3(sg.x, (sg.y0 + sg.y1) / 2 + WALL_H.race / 2, sg.z), q, sc);
         inst.setMatrixAt(i, m4);
       });
       inst.instanceMatrix.needsUpdate = true;
@@ -702,18 +1015,22 @@ export function buildEnvironment(scene: THREE.Scene, phys: PhysicsContext, level
     for (const sg of wallSegs) {
       const dx = Math.sin(sg.yaw);
       const dz = Math.cos(sg.yaw);
+      const yMid = (sg.y0 + sg.y1) / 2; // road elevation under the segment
+      // per-spot elevation along the segment — posts follow the grade
+      // smoothly even though the long boxes step at the seams
+      const yAt = (t: number) => sg.y0 + (sg.y1 - sg.y0) * (t + 0.5);
       if (sg.style === 'kerb') {
         // a plain concrete curb — hop it and pay in undercarriage scrape
-        kerbs.push({ x: sg.x, y: WALL_H.kerb / 2, z: sg.z, sx: wallT, sy: WALL_H.kerb, sz: sg.len, yaw: sg.yaw });
+        kerbs.push({ x: sg.x, y: yMid + WALL_H.kerb / 2, z: sg.z, sx: wallT, sy: WALL_H.kerb, sz: sg.len, yaw: sg.yaw });
       } else if (sg.style === 'guardrail') {
         // coastal highway: weathered wood posts carrying a grey W-rail
-        rails.push({ x: sg.x, y: 0.58, z: sg.z, sx: 0.09, sy: 0.3, sz: sg.len, yaw: sg.yaw });
+        rails.push({ x: sg.x, y: yMid + 0.58, z: sg.z, sx: 0.09, sy: 0.3, sz: sg.len, yaw: sg.yaw });
         const cnt = Math.max(2, Math.round(sg.len / 2.4));
         for (let k = 0; k < cnt; k++) {
           const t = (k + 0.5) / cnt - 0.5; // interior spots only — no seam doubles
           woodPosts.push({
             x: sg.x + dx * sg.len * t,
-            y: 0.36,
+            y: yAt(t) + 0.36,
             z: sg.z + dz * sg.len * t,
             sx: 0.16,
             sy: 0.72,
@@ -727,7 +1044,7 @@ export function buildEnvironment(scene: THREE.Scene, phys: PhysicsContext, level
           const t = (k + 0.5) / cnt - 0.5;
           fencePosts.push({
             x: sg.x + dx * sg.len * t,
-            y: WALL_H.fence / 2,
+            y: yAt(t) + WALL_H.fence / 2,
             z: sg.z + dz * sg.len * t,
             sx: 0.09,
             sy: WALL_H.fence,
@@ -735,15 +1052,17 @@ export function buildEnvironment(scene: THREE.Scene, phys: PhysicsContext, level
             yaw: sg.yaw,
           });
         }
-        // one vertical quad per segment, u in metres so the mesh tiles
+        // one vertical quad per segment, u in metres so the mesh tiles;
+        // the corners carry their end's road elevation, so the chain-link
+        // (unlike the boxes) follows a grade without stepping
         const hx = (dx * sg.len) / 2;
         const hz = (dz * sg.len) / 2;
         const base = fPos.length / 3;
         fPos.push(
-          sg.x - hx, 0, sg.z - hz,
-          sg.x + hx, 0, sg.z + hz,
-          sg.x + hx, WALL_H.fence, sg.z + hz,
-          sg.x - hx, WALL_H.fence, sg.z - hz,
+          sg.x - hx, sg.y0, sg.z - hz,
+          sg.x + hx, sg.y1, sg.z + hz,
+          sg.x + hx, sg.y1 + WALL_H.fence, sg.z + hz,
+          sg.x - hx, sg.y0 + WALL_H.fence, sg.z - hz,
         );
         fUv.push(0, 0, sg.len, 0, sg.len, WALL_H.fence, 0, WALL_H.fence);
         fIdx.push(base, base + 1, base + 2, base, base + 2, base + 3);
@@ -776,15 +1095,35 @@ export function buildEnvironment(scene: THREE.Scene, phys: PhysicsContext, level
 
     // physics: one static box per segment regardless of dressing — only the
     // height varies by style. Same chain, same wallDirs judging as always.
+    // On a grade the box rides the segment's mean road elevation (stepped,
+    // like the visual): the shoulder under it is at full elevation, so the
+    // worst seam mismatch is ~0.3 m of box bottom against solid embankment.
     for (const sg of wallSegs) {
       const h = WALL_H[sg.style];
       const wb = new CANNON.Body({ mass: 0, material: phys.matGround });
       wb.addShape(new CANNON.Box(new CANNON.Vec3(wallT / 2, h / 2, sg.len / 2)));
-      wb.position.set(sg.x, h / 2, sg.z);
+      wb.position.set(sg.x, (sg.y0 + sg.y1) / 2 + h / 2, sg.z);
       wb.quaternion.setFromAxisAngle(new CANNON.Vec3(0, 1, 0), sg.yaw);
       phys.world.addBody(wb);
       phys.wallDirs.set(wb.id, { x: Math.sin(sg.yaw), z: Math.cos(sg.yaw) });
     }
+
+    // the visual ground under every elevated span (no-op on flat tracks);
+    // a fresh sampler instance keeps this builder self-contained — same
+    // plain-number inputs, same field, build-time only
+    addEmbankments(
+      scene,
+      [
+        { secs, halfW: w2, closed: true },
+        ...shortcuts.map((sc) => ({
+          secs: buildOpenSections(sc.waypoints, SHORTCUT_SPACING),
+          halfW: sc.width / 2,
+          closed: false,
+        })),
+      ],
+      level.coast,
+      makeHeightSampler(level).base,
+    );
   }
 
   if (level.ground === 'pad') {

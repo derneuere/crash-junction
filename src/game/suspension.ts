@@ -12,7 +12,7 @@ import {
 import { GameState, type Actor } from './types';
 
 // Four virtual wheel rays per car, solved analytically against the level's
-// height field (flat road + ramps). Each applies
+// height field (road-base elevation + ramp/kerb features). Each applies
 // F = preload + k·compression − c·railVelocity along the chassis-up axis at
 // the wheel anchor (clamped to [0, fmax] so hard landings can't trampoline).
 // Flipped cars get no suspension — their rays point away from the road — so
@@ -27,7 +27,25 @@ const _sPv = new CANNON.Vec3();
 const _sF = new CANNON.Vec3();
 const Y_AXIS = new CANNON.Vec3(0, 1, 0);
 
-export type HeightSampler = (x: number, z: number) => number;
+/** The driving surface, decomposed (elevation.md Phase 1):
+ *    total(x, z)  = base(x, z) + feature(x, z)   — what the wheels ride
+ *    base(x, z)   — the smooth road-grade elevation field. FOLLOW it,
+ *                   never fling off it: profile slopes are design-bounded
+ *                   (metres over tens of metres), so its rise rate passes
+ *                   to the car uncapped (the absolute roof still applies).
+ *    feature(x,z) — ramps, kerb plinths, ramp side-skirts. LAUNCHABLE,
+ *                   capped by the feature's own height above the road.
+ *  The split exists because the per-surface launch cap must read FEATURE
+ *  height, not absolute height: at +6 m of base elevation a 0.16 m kerb
+ *  read as a 6.16 m surface and flung cars at the 12 m/s roof — the same
+ *  edge-launch bug class the constants.ts scar comments document, with a
+ *  new trigger. On flat levels base() is exactly 0 and every output of
+ *  this contract is bit-identical to the pre-elevation sampler. */
+export interface HeightSampler {
+  (x: number, z: number): number;
+  base(x: number, z: number): number;
+  feature(x: number, z: number): number;
+}
 
 export function applySuspension(actors: Actor[], state: GameState, heightAt: HeightSampler): void {
   for (const a of actors) {
@@ -89,14 +107,26 @@ export function applySuspension(actors: Actor[], state: GameState, heightAt: Hei
       if (b.position.y < minY) {
         b.position.y = minY;
         const v = b.velocity;
-        const ahead = heightAt(b.position.x + v.x * FIXED_DT, b.position.z + v.z * FIXED_DT);
+        const ax = b.position.x + v.x * FIXED_DT;
+        const az = b.position.z + v.z * FIXED_DT;
+        const ahead = heightAt(ax, az);
         const rise = (ahead - ground) / FIXED_DT;
         if (rise > 0) {
-          // a surface can fling you no higher than ~2× its own height: full
+          // a FEATURE can fling you no higher than ~2× its own height: full
           // ramps launch for real, kerbs and ramp side-skirts only blip —
-          // their sub-metre blend zones read as 20+ m/s rises at speed
-          const launchCap = Math.min(RAMP_LAUNCH_VY_MAX, Math.sqrt(4 * Math.abs(GRAVITY) * ahead));
-          v.y = Math.max(v.y, Math.min(rise, launchCap));
+          // their sub-metre blend zones read as 20+ m/s rises at speed.
+          // The cap measures the feature ABOVE the local road base, never
+          // absolute height (elevation.md: a kerb at +6 m of road elevation
+          // must still blip at √(4·g·0.16) ≈ 2.7 m/s, not fling at the
+          // roof). The base-grade share of the rise passes through uncapped
+          // — profile slopes are gentle by design — under the absolute
+          // RAMP_LAUNCH_VY_MAX roof. On flat ground base ≡ 0, so baseRise
+          // is exactly 0 and this is bit-for-bit the old per-surface cap.
+          const featAhead = heightAt.feature(ax, az);
+          const featRise = (featAhead - heightAt.feature(b.position.x, b.position.z)) / FIXED_DT;
+          const baseRise = Math.max(0, rise - featRise);
+          const featCap = Math.sqrt(4 * Math.abs(GRAVITY) * featAhead);
+          v.y = Math.max(v.y, Math.min(rise, baseRise + featCap, RAMP_LAUNCH_VY_MAX));
         }
       }
     }

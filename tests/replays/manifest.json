@@ -69,7 +69,7 @@
   },
   {
     "file": "gantry-grid-uturn.json",
-    "name": "race: every grid slot's first gate must lie AHEAD of it — gantry's five-deep grid out-reached section 1's radius and the front slots U-turned into the barrier (report 2026-06-12)",
+    "name": "race: every grid slot's first gate must lie AHEAD of it — gantry's five-deep grid out-reached section 1's radius and the front slots U-turned into the barrier (report 2026-06-12, re-recorded same day on the flow-pass + elevation geometry)",
     "assert": { "rivalWallHits": 0, "playerWrecks": 0 },
     "checksums": "ignore"
   }

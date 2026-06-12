@@ -4,6 +4,13 @@
 // level's waypoint tables, then reports each candidate's distance to the
 // fine-sampled main chain, every branch chain, the wall band and the solid
 // props. Run: fnm exec --using=22 -- node tools/audit-gantry-dressing.mjs
+//
+// STALE since the flow-pass reprofile (2026-06-12): the waypoint tables
+// below are hand-copied from the PRE-reprofile gantryPoint.ts (42 points /
+// 220 sections; the live track is 44 / 215). For current placement truth
+// use tools/audit-merge-gantry.mjs — it bundles the REAL level module and
+// now carries the knockable-band, signature-coverage and fork-attachment
+// checks that used to live only here.
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 
 function catmullFine(waypoints, closed) {

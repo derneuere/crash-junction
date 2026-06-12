@@ -240,7 +240,11 @@ poleHeadMat.userData.night = { intensity: 2.2, day: 0.9 };
 const poleGeo = new THREE.CylinderGeometry(0.09, 0.12, 4.8, 8);
 const poleHeadGeo = new THREE.BoxGeometry(0.34, 0.8, 0.3);
 
-export function createPole(scene: THREE.Scene, phys: PhysicsContext, onCollide: CollideHandler, x: number, z: number): Actor {
+/** `baseY` is the road-grade elevation under the pole (elevation.md Phase 1:
+ *  furniture learns a y). Flat levels pass the sampler's literal-0 base, so
+ *  the spawn position stays bit-identical there — only furniture seated on
+ *  the GANTRY POINT north arc actually lifts. */
+export function createPole(scene: THREE.Scene, phys: PhysicsContext, onCollide: CollideHandler, x: number, z: number, baseY = 0): Actor {
   const group = new THREE.Group();
   const pole = new THREE.Mesh(poleGeo, poleMat);
   pole.castShadow = true;
@@ -259,7 +263,7 @@ export function createPole(scene: THREE.Scene, phys: PhysicsContext, onCollide: 
 
   const body = new CANNON.Body({ mass: 90, material: phys.matCar });
   body.addShape(new CANNON.Box(new CANNON.Vec3(0.13, 2.4, 0.13)));
-  body.position.set(x, 2.4, z);
+  body.position.set(x, baseY + 2.4, z);
   body.quaternion.setFromAxisAngle(new CANNON.Vec3(0, 1, 0), Math.atan2(-x, -z)); // signal faces the junction
   body.linearDamping = 0.05;
   body.angularDamping = 0.2;
@@ -278,7 +282,9 @@ export function createPole(scene: THREE.Scene, phys: PhysicsContext, onCollide: 
 let barrelTex: THREE.CanvasTexture | null = null;
 const barrelGeo = new THREE.CylinderGeometry(0.32, 0.32, 0.85, 12);
 
-export function createBarrel(scene: THREE.Scene, phys: PhysicsContext, onCollide: CollideHandler, x: number, z: number): Actor {
+/** `baseY` as in createPole — barrels at the LOOKOUT LEDGE mouth sit on a
+ *  +6 m embankment; without the lift they spawn buried inside it, inert. */
+export function createBarrel(scene: THREE.Scene, phys: PhysicsContext, onCollide: CollideHandler, x: number, z: number, baseY = 0): Actor {
   if (!barrelTex) barrelTex = makeBarrelTexture();
   const group = new THREE.Group();
   const mesh = new THREE.Mesh(barrelGeo, new THREE.MeshStandardMaterial({ map: barrelTex, roughness: 0.55, metalness: 0.25 }));
@@ -288,7 +294,7 @@ export function createBarrel(scene: THREE.Scene, phys: PhysicsContext, onCollide
 
   const body = new CANNON.Body({ mass: 55, material: phys.matCar });
   body.addShape(new CANNON.Cylinder(0.32, 0.32, 0.85, 10));
-  body.position.set(x, 0.425, z);
+  body.position.set(x, baseY + 0.425, z);
   body.quaternion.setFromAxisAngle(new CANNON.Vec3(0, 1, 0), simRand() * Math.PI);
   body.linearDamping = 0.1;
   body.angularDamping = 0.2;

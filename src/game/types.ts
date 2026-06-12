@@ -62,6 +62,15 @@ export interface PickupDef {
   mult: number;
 }
 
+/** A race waypoint: [x, z] on flat ground, or [x, z, y] where the road
+ *  carries an elevation profile (docs/research/elevation.md Phase 1). y is
+ *  metres above the flat physics ground plane; the Catmull resampler in
+ *  race.ts interpolates it along the chain (arc length stays 2D, so adding
+ *  y to a waypoint never moves a section) and clamps the result at 0 —
+ *  the spline's tangent overshoot near a flat→climb seam would otherwise
+ *  dip the road a few centimetres under the island grass. */
+export type RaceWaypoint = [number, number] | [number, number, number];
+
 /** A branch ribbon off the main loop — Burnout's risk-vs-reward cut. An
  *  OPEN polyline the player can run instead of the main sections between
  *  entry and exit; rivals never take it (the AI owns the main line).
@@ -69,12 +78,16 @@ export interface PickupDef {
  *  CONTRACT: entry < exit, and both lie at least 4 sections from the lap
  *  line (entry >= 4, exit <= N-4), so a shortcut never wraps section 0.
  *  RaceDirector leans on this when it snaps playerTarget past the exit:
- *  the snap can never cross the line, so lap counting stays untouched. */
+ *  the snap can never cross the line, so lap counting stays untouched.
+ *  Elevation contract: endpoint y must match the main loop's y at the
+ *  entry/exit sections (the mouths share driving surface with the main
+ *  road, so a height step there would be a launch edge — the composer's
+ *  shortcut() helper asserts it at module load). */
 export interface ShortcutDef {
   name: string;
   entry: number; // main-loop section index where the branch forks off
   exit: number; // main-loop section index where it rejoins
-  waypoints: [number, number][]; // open polyline, [x, z], entry → exit
+  waypoints: RaceWaypoint[]; // open polyline, entry → exit
   width: number; // branch ribbon width (m) — narrower than the main road
   surface: 'dirt' | 'asphalt'; // cosmetic in v1: tint only, no grip change
 }
@@ -135,7 +148,11 @@ export interface WallStyleDef {
 export interface RaceDef {
   laps: number;
   width: number; // track ribbon width (m)
-  sections: { x: number; z: number; dirX: number; dirZ: number; v: number }[];
+  /** y is the road elevation at the section centre (0 on flat tracks) —
+   *  carried by the race.ts resamplers from the waypoints' optional third
+   *  component. The suspension height field, ribbon, walls and respawns
+   *  all read it; speed classes and progress stay 2D by design. */
+  sections: { x: number; z: number; y: number; dirX: number; dirZ: number; v: number }[];
   /** skill = corner-speed multiplier <1 (what makes them beatable);
    *  aggression = appetite for shunts and slams, 0 (clean) … 1 (B3 bully). */
   rivals: { color: number; skill: number; aggression: number }[];
@@ -172,7 +189,12 @@ export type ModeKind = ModeDef['kind'];
  *  at the cliff, shallow enough that the beach slope stays believable. */
 export interface CoastDef {
   seaLevel: number;
-  outline: { x: number; z: number; edge: 'beach' | 'wall' | 'cliff' | 'bank' }[];
+  /** y (optional, default 0) raises a vertex's RIM — the skirt's top row —
+   *  above grade, for coast arcs that run beside an elevated road
+   *  (elevation.md: the cliff arc's raised rim is what finally sells
+   *  cliff.png). Visual only, like everything else here: author it to
+   *  match the road-base field so the embankment drape meets the skirt. */
+  outline: { x: number; z: number; edge: 'beach' | 'wall' | 'cliff' | 'bank'; y?: number }[];
 }
 
 /** A textured ground polygon — the dockyard's concrete apron, the beach's
@@ -187,7 +209,9 @@ export interface GroundPatchDef {
 
 /** A painted rectangle on the ground — lane markings, hatched aprons, bay
  *  stripes. The same instanced quads as the road dashes, generalized with a
- *  color (default the dashes' off-white). w/l in metres, yaw like a car's. */
+ *  color (default the dashes' off-white). w/l in metres, yaw like a car's.
+ *  y (optional) is an ABSOLUTE height for paint riding elevated terrain —
+ *  include the usual 0.014 decal slot in it; omitted = the flat slot. */
 export interface DecalDef {
   x: number;
   z: number;
@@ -195,6 +219,7 @@ export interface DecalDef {
   l: number;
   yaw: number;
   color?: number;
+  y?: number;
 }
 
 export interface LevelDef {

@@ -7,6 +7,10 @@
 //      (required = ribbon half-width + collider half-diagonal + 1.5)
 //   4. ramp landing corridors prop-free
 //   5. final per-segment wall style after last-wins resolution
+//   6. knockable furniture (barrels/poles) off every driving line — with
+//      the documented ROADBLOCK outer-band exception
+//   7. signature circles actually covering their corners
+//   8. shortcut polylines touching the main ribbon at both forks
 // Run: fnm exec --using=22 -- node tools/audit-merge-gantry.mjs
 import { build } from 'esbuild';
 import { rm } from 'node:fs/promises';
@@ -225,6 +229,61 @@ for (const side of [1, -1]) {
     }
   }
   console.log(`  ${side === 1 ? 'left ' : 'right'}: ${out.join('  ')}`);
+}
+
+// ---- 6. knockable furniture vs the live chains ----
+// Design rule (gantryPoint.ts): knockables never sit ON a ribbon's driving
+// line — mouth barrels stand outside their branch ribbon's edge in the fork
+// wedges. The one documented exception is the ROADBLOCK cluster: the chicane
+// is walled on both sides, so its run-off IS the corridor's outer band —
+// those pieces may sit inside the main ribbon but must stay >= 8 m off the
+// centreline (the outer ~3 m of the 11 m half-width) and inside the
+// ROADBLOCK signature circle.
+const roadblock = race.signatures.find((s) => s.name === 'ROADBLOCK');
+const knockables = [
+  ...level.barrels.map((b) => ({ ...b, kind: 'barrel' })),
+  ...level.poles.map((p) => ({ ...p, kind: 'pole' })),
+];
+console.log('\nknockable band audit (off every driving line; ROADBLOCK outer band exempt):');
+let tightestKnock = { margin: Infinity };
+for (const k of knockables) {
+  const inRoadblock = roadblock && Math.hypot(k.x - roadblock.x, k.z - roadblock.z) < roadblock.r;
+  const dMain = distToChain([k.x, k.z], mainFine, true);
+  if (inRoadblock) {
+    // outer band: off the racing core, never further out than the wall line
+    if (dMain < 8.0) fail(`ROADBLOCK ${k.kind} (${k.x},${k.z}) on the racing core: ${dMain.toFixed(1)} m off main centreline (< 8.0)`);
+    continue;
+  }
+  const checks = [{ name: 'MAIN', halfW: race.width / 2, fine: mainFine, closed: true }, ...branches];
+  for (const c of checks) {
+    const d = distToChain([k.x, k.z], c.fine, c.closed ?? false);
+    const margin = d - (c.halfW + 0.35); // 0.35 ~ barrel radius: not on the driven surface
+    if (margin < tightestKnock.margin) tightestKnock = { margin, kind: k.kind, at: `(${k.x},${k.z})`, chain: c.name, d };
+    if (margin < 0) fail(`${k.kind} (${k.x},${k.z}) inside ${c.name} ribbon: ${d.toFixed(1)} < ${(c.halfW + 0.35).toFixed(1)}`);
+  }
+}
+console.log(`  tightest (non-ROADBLOCK): ${tightestKnock.kind} ${tightestKnock.at} vs ${tightestKnock.chain}: ${tightestKnock.d?.toFixed(1)} (margin +${tightestKnock.margin.toFixed(1)})`);
+
+// ---- 7. signature circles cover their corners ----
+// A takedown theatre that drifted off its corner scores nothing: the main
+// chain must pass well inside each circle, not graze the rim.
+console.log('\nsignature coverage (main centreline must run inside each circle):');
+for (const s of race.signatures ?? []) {
+  const d = distToChain([s.x, s.z], mainFine, true);
+  console.log(`  ${s.name} (${s.x},${s.z}) r=${s.r}: centreline ${d.toFixed(1)} m from centre`);
+  if (d > s.r - 4) fail(`${s.name} circle no longer covers its corner: centreline ${d.toFixed(1)} m out (need <= ${(s.r - 4).toFixed(1)})`);
+}
+
+// ---- 8. shortcut polylines touch their forks ----
+// The wall-gap side inference and rejoin gates key off the endpoint
+// sections — a mouth that floats off the main ribbon strands the branch.
+console.log('\nshortcut fork attachment (endpoints must lie on the main ribbon):');
+for (const sc of race.shortcuts ?? []) {
+  for (const [wp, end] of [[sc.waypoints[0], 'entry'], [sc.waypoints[sc.waypoints.length - 1], 'exit']]) {
+    const d = distToChain([wp[0], wp[1]], mainFine, true);
+    if (d > race.width / 2) fail(`${sc.name} ${end} (${wp[0]},${wp[1]}) floats ${d.toFixed(1)} m off the main centreline (> ${race.width / 2})`);
+  }
+  console.log(`  ${sc.name}: ${sc.entry}->${sc.exit} attached`);
 }
 
 console.log(failures ? `\n${failures} FAILURE(S)` : '\nALL CHECKS PASS');

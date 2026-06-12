@@ -26,6 +26,12 @@ export class CameraDirector {
   private q = new THREE.Quaternion();
   private camYaw = 0;
   private camYawLive = false; // false → snap to the nose next chase frame
+  // FOV state (sense-of-speed A1/A2). PRESENTATION, not sim: camera.fov
+  // only feeds the projection matrix — never getWorldDirection, so never
+  // the aftertouch axes — and worldHash (replay.ts) hashes dynamic bodies
+  // only. The determinism pins cannot see any of this.
+  private fovKick = 0; // boost-ignite overshoot, degrees above the steady 74
+  private fovWasBoosting = false;
 
   addShake(amount: number): void {
     this.shakeMag = Math.min(1.8, this.shakeMag + amount);
@@ -41,6 +47,8 @@ export class CameraDirector {
     this.orbitA = 0;
     this.shakeMag = 0;
     this.camYawLive = false;
+    this.fovKick = 0;
+    this.fovWasBoosting = false;
   }
 
   update(
@@ -55,6 +63,7 @@ export class CameraDirector {
     takedownFocus: THREE.Vector3 | null = null,
   ): void {
     let fovTarget = 55;
+    let fovRate = 3; // base FOV lerp; boost attacks faster (A2 in/out asymmetry)
     let chaseRate = 3.5; // how hard the camera position clings to `desired`
     const pv = player?.body.velocity;
     const wreckSpeed = player?.crashed && pv ? Math.hypot(pv.x, pv.z) : 0;
@@ -99,7 +108,20 @@ export class CameraDirector {
       const height = boosting ? 2.8 : 2.35;
       this.desired.set(p.x - this.fwd.x * dist, p.y + height, p.z - this.fwd.z * dist);
       this.look.set(p.x + this.fwd.x * 8, p.y + 1.2, p.z + this.fwd.z * 8);
-      fovTarget = boosting ? 71 : drifting ? 65 : 62;
+      // FOV is the Burnout 3 speed lever (sense-of-speed A1/A2): perceived
+      // speed scales ~linearly with FOV, so the old state buckets (62 chase /
+      // 65 drift / 71 boost) made 39 m/s flat-out look like a 20 m/s cruise.
+      // A1: a speed² curve under the state targets — 62° at ≤18 m/s rising
+      // to ~70° at 39 — keeps cruising calm and makes the last 10 m/s count.
+      // A2: boost targets a 74° steady with a +4° ignite kick that decays at
+      // dt·4 (~78° for ~0.3 s), attacked at dt·8 and released at the normal
+      // dt·3 — in-fast/out-slow is the Walley "feels 50% faster" overshoot.
+      const v = pv ? Math.hypot(pv.x, pv.z) : 0;
+      const st = Math.min(1, Math.max(0, (v - 18) / 21));
+      const fovCurve = 62 + 8 * st * st;
+      if (boosting && !this.fovWasBoosting) this.fovKick = 4; // ignite edge
+      fovTarget = boosting ? 74 + this.fovKick : drifting ? Math.max(fovCurve, 65) : fovCurve;
+      if (boosting) fovRate = 8;
       chaseRate = 9;
     } else if (player && player.crashed && state !== GameState.Done && wreckSpeed > 3.5 && aftertouch) {
       // only follow the flying wreck while the player is actively steering
@@ -141,7 +163,11 @@ export class CameraDirector {
     this.look.addScaledVector(this.shakeVec, 1.5);
     camera.lookAt(this.look);
 
-    camera.fov += (fovTarget - camera.fov) * Math.min(1, dt * 3);
+    // the ignite kick decays whatever the state — a boost that ends mid-kick
+    // must not bank the overshoot for the next burn
+    this.fovKick *= Math.exp(-4 * dt);
+    this.fovWasBoosting = boosting;
+    camera.fov += (fovTarget - camera.fov) * Math.min(1, dt * fovRate);
     camera.updateProjectionMatrix();
   }
 }

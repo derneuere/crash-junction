@@ -79,20 +79,167 @@ canvas {
   letter-spacing: 5px;
 }
 
-.daynight {
+/* ---------- event picker (B3 Crash Nav strip) ---------- */
+/* container is click-transparent: a click BESIDE the cards still falls
+   through to the canvas and launches, the pre-picker idle behavior */
+.picker {
   position: absolute;
-  top: 16px;
-  left: 50%;
-  transform: translateX(-50%);
+  left: 0;
+  right: 0;
+  bottom: 9%;
   display: flex;
-  gap: 6px;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  pointer-events: none;
 }
-.daynight button {
+.picker button {
   pointer-events: auto;
   cursor: pointer;
-  padding: 6px 14px;
   font-family: inherit;
+}
+.picker .region {
   font-size: 12px;
+  letter-spacing: 7px;
+  color: #ffb46b;
+  transform: skewX(-8deg);
+  text-shadow: 0 2px 0 rgba(0, 0, 0, 0.55);
+}
+.cards {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 14px;
+  max-width: 96vw;
+}
+.card {
+  width: 205px;
+  padding-bottom: 10px;
+  text-align: center;
+  pointer-events: auto;
+  cursor: pointer;
+  background: rgba(8, 10, 14, 0.78);
+  border: 1px solid rgba(255, 160, 60, 0.35);
+  transform: skewX(-8deg);
+  transition: border-color 0.15s, box-shadow 0.15s, transform 0.15s;
+}
+.card:hover {
+  border-color: rgba(255, 160, 60, 0.7);
+}
+.card.focused {
+  border-color: rgba(255, 180, 70, 0.95);
+  box-shadow: 0 0 18px rgba(255, 140, 40, 0.35);
+  transform: skewX(-8deg) scale(1.05);
+}
+.card .thumb {
+  height: 62px;
+  overflow: hidden;
+  border-bottom: 1px solid rgba(255, 160, 60, 0.25);
+  opacity: 0.75;
+}
+.card.focused .thumb {
+  opacity: 1;
+}
+.card .thumb svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+.card .modeRow {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 7px 10px 0;
+  font-size: 10px;
+  letter-spacing: 2px;
+  color: #ffb46b;
+}
+.card .modeKind svg {
+  vertical-align: -2px;
+  margin-right: 3px;
+}
+.card .evName {
+  display: block;
+  margin: 2px auto 0;
+  padding: 2px 8px;
+  background: none;
+  border: none;
+  font-size: 17px;
+  letter-spacing: 2px;
+  color: rgba(255, 255, 255, 0.85);
+}
+.card .evName:hover {
+  color: #fff;
+}
+.card.focused .evName {
+  background: linear-gradient(180deg, #ffd34d, #ff7a18 55%, #ff3b1f);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  filter: drop-shadow(0 2px 0 rgba(0, 0, 0, 0.5));
+}
+.card .tagline {
+  font-size: 9px;
+  letter-spacing: 2px;
+  color: rgba(255, 255, 255, 0.4);
+}
+.card .modeLine {
+  margin-top: 5px;
+  font-size: 10px;
+  letter-spacing: 1.5px;
+  color: rgba(255, 255, 255, 0.6);
+}
+.variants {
+  display: flex;
+  justify-content: center;
+  gap: 6px;
+  margin-top: 8px;
+}
+.chip {
+  padding: 4px 9px;
+  font-size: 10px;
+  letter-spacing: 1.5px;
+  color: rgba(255, 255, 255, 0.55);
+  background: rgba(8, 10, 14, 0.6);
+  border: 1px solid rgba(255, 160, 60, 0.3);
+  transition: color 0.15s, border-color 0.15s, box-shadow 0.15s;
+}
+.chip:hover {
+  color: #fff;
+  border-color: rgba(255, 160, 60, 0.7);
+}
+.chip.active {
+  color: #ffd34d;
+  border-color: rgba(255, 180, 70, 0.95);
+  box-shadow: 0 0 14px rgba(255, 140, 40, 0.3);
+}
+.launchRow {
+  display: block;
+  margin: 10px auto 0;
+  padding: 2px 10px;
+  background: none;
+  border: none;
+  font-size: 15px;
+  letter-spacing: 3px;
+  color: #fff;
+  animation: pulse 1.2s ease-in-out infinite;
+  text-shadow: 0 0 18px rgba(255, 120, 30, 0.55), 0 2px 0 rgba(0, 0, 0, 0.6);
+}
+.carRow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.carRow .carLbl {
+  font-size: 11px;
+  letter-spacing: 4px;
+  color: #ffb46b;
+  margin-right: 4px;
+  transform: skewX(-8deg);
+}
+.carRow button {
+  padding: 5px 12px;
+  font-size: 11px;
   letter-spacing: 2px;
   color: rgba(255, 255, 255, 0.55);
   background: rgba(8, 10, 14, 0.6);
@@ -100,70 +247,47 @@ canvas {
   transform: skewX(-8deg);
   transition: color 0.15s, border-color 0.15s, box-shadow 0.15s;
 }
-.daynight button:hover {
+.carRow button:hover {
   color: #fff;
   border-color: rgba(255, 160, 60, 0.7);
 }
-.daynight button.active {
+.carRow button.active {
   color: #ffd34d;
   border-color: rgba(255, 180, 70, 0.95);
   box-shadow: 0 0 14px rgba(255, 140, 40, 0.3);
 }
-.daynight.engine {
-  top: 54px;
+.carRow .devBtn {
+  margin-left: 10px;
+  color: rgba(159, 216, 255, 0.6);
+  border-color: rgba(120, 200, 255, 0.35);
+}
+.carRow .devBtn:hover {
+  color: #9fd8ff;
+  border-color: rgba(120, 200, 255, 0.7);
+}
+.medalDisc {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  vertical-align: -1px;
+  border: 1px solid rgba(0, 0, 0, 0.4);
+}
+.medalDisc.gold {
+  background: #ffd34d;
+  box-shadow: 0 0 6px rgba(255, 211, 77, 0.7);
+}
+.medalDisc.silver {
+  background: #cdd6e0;
+}
+.medalDisc.bronze {
+  background: #d8854f;
+}
+.medalDisc.none {
+  background: transparent;
+  border-color: rgba(255, 255, 255, 0.25);
 }
 
-.prompt {
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: 17%;
-  text-align: center;
-}
-
-.levels {
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: 29%;
-  text-align: center;
-}
-.levels button {
-  pointer-events: auto;
-  cursor: pointer;
-  margin: 0 7px;
-  padding: 9px 22px;
-  font-family: inherit;
-  font-size: 15px;
-  letter-spacing: 3px;
-  color: rgba(255, 255, 255, 0.65);
-  background: rgba(8, 10, 14, 0.6);
-  border: 1px solid rgba(255, 160, 60, 0.35);
-  transform: skewX(-8deg);
-  transition: color 0.15s, border-color 0.15s, box-shadow 0.15s;
-}
-.levels button:hover {
-  color: #fff;
-  border-color: rgba(255, 160, 60, 0.7);
-}
-.levels button.active {
-  color: #ffd34d;
-  border-color: rgba(255, 180, 70, 0.95);
-  box-shadow: 0 0 18px rgba(255, 140, 40, 0.35);
-}
-.prompt .big {
-  font-size: 30px;
-  letter-spacing: 3px;
-  color: #fff;
-  animation: pulse 1.2s ease-in-out infinite;
-  text-shadow: 0 0 18px rgba(255, 120, 30, 0.55), 0 2px 0 rgba(0, 0, 0, 0.6);
-}
-.prompt .sub {
-  margin-top: 9px;
-  font-size: 13px;
-  letter-spacing: 2px;
-  color: rgba(255, 255, 255, 0.55);
-}
 @keyframes pulse {
   0%,
   100% {
@@ -404,8 +528,105 @@ canvas {
   color: rgba(255, 255, 255, 0.5);
 }
 
+/* ---------- debug overlay (Backquote) ---------- */
+/* right-anchored so it never covers the action; the canvas and the window
+   key handlers keep working underneath */
+.debug {
+  position: fixed;
+  top: 70px;
+  right: 16px;
+  width: 300px;
+  max-height: calc(100vh - 110px);
+  overflow-y: auto;
+  z-index: 8;
+  padding: 10px 12px 14px;
+  background: rgba(8, 10, 14, 0.88);
+  border: 1px solid rgba(255, 160, 60, 0.4);
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.55);
+  font-family: Impact, Haettenschweiler, 'Arial Narrow Bold', 'Arial Black', sans-serif;
+  user-select: none;
+}
+.debug .dbgHead {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  letter-spacing: 4px;
+  color: #ffd34d;
+}
+.debug .dbgHead .dbgKey {
+  flex: 1;
+  font-size: 9px;
+  letter-spacing: 2px;
+  color: rgba(255, 255, 255, 0.35);
+}
+.debug .dbgSection {
+  margin-top: 12px;
+  font-size: 10px;
+  letter-spacing: 3px;
+  color: #ffb46b;
+}
+.debug .dbgNote {
+  margin-top: 3px;
+  font-size: 9px;
+  letter-spacing: 1px;
+  color: rgba(255, 255, 255, 0.4);
+}
+.debug .dbgRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 6px;
+  align-items: center;
+}
+.debug button {
+  cursor: pointer;
+  padding: 5px 10px;
+  font-family: inherit;
+  font-size: 11px;
+  letter-spacing: 1.5px;
+  color: rgba(255, 255, 255, 0.6);
+  background: rgba(8, 10, 14, 0.6);
+  border: 1px solid rgba(255, 160, 60, 0.3);
+  transform: skewX(-8deg);
+  transition: color 0.15s, border-color 0.15s, box-shadow 0.15s;
+}
+.debug button:hover:not(:disabled) {
+  color: #fff;
+  border-color: rgba(255, 160, 60, 0.7);
+}
+.debug button.active {
+  color: #ffd34d;
+  border-color: rgba(255, 180, 70, 0.95);
+  box-shadow: 0 0 14px rgba(255, 140, 40, 0.3);
+}
+.debug button:disabled {
+  cursor: default;
+  opacity: 0.35;
+}
+.debug .dbgHead button {
+  padding: 1px 8px;
+  font-size: 13px;
+}
+.debug .dbgCheck {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10px;
+  letter-spacing: 1.5px;
+  color: rgba(255, 255, 255, 0.6);
+  cursor: pointer;
+}
+.debug .dbgTele {
+  margin-top: 6px;
+  font-size: 11px;
+  letter-spacing: 1px;
+  line-height: 1.7;
+  color: rgba(255, 255, 255, 0.7);
+}
+
 @media (prefers-reduced-motion: reduce) {
-  .prompt .big {
+  .launchRow {
     animation: none;
   }
   .bar,

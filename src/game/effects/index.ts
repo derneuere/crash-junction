@@ -6,6 +6,7 @@ import { Scorch } from './scorch';
 import { Skidmarks } from './skidmarks';
 import { ExplosionFX } from './explosion';
 import { GlassFX } from './glass';
+import { Streaks } from './streaks';
 
 /** All pooled visual effects behind one update/reset. */
 export class Effects {
@@ -16,6 +17,7 @@ export class Effects {
   readonly skid: Skidmarks;
   readonly explosion: ExplosionFX;
   readonly glass: GlassFX;
+  readonly streaks: Streaks;
 
   constructor(scene: THREE.Scene) {
     this.sparks = new Sparks(scene);
@@ -25,6 +27,7 @@ export class Effects {
     this.skid = new Skidmarks(scene);
     this.explosion = new ExplosionFX(scene, this.smoke);
     this.glass = new GlassFX(scene);
+    this.streaks = new Streaks(scene);
   }
 
   update(dt: number): void {
@@ -34,6 +37,8 @@ export class Effects {
     this.skid.update(dt);
     this.explosion.update(dt);
     this.glass.update(dt);
+    // streaks tick via their own frame() — they need the camera + player
+    // speed, which the Game passes after the camera director has run
   }
 
   reset(): void {
@@ -44,5 +49,6 @@ export class Effects {
     this.skid.reset();
     this.explosion.reset();
     this.glass.reset();
+    this.streaks.reset();
   }
 }

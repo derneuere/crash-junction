@@ -45,23 +45,28 @@ export const shared: ZoneDressing = {
 
     // --- NW sweepers: sparse — the corner IS the feature ---
     // (kept here, not in cliff, despite z >= 185: they dress the shared NW
-    // connector arc, per the composer's distribution note)
-    decor(`${NATURE}/tree_pineTallA_detailed.glb`, -216, 228, 2.4, 7),
-    decor(`${NATURE}/tree_pineTallC_detailed.glb`, -252, 180, 0.9, 7),
-    decor(`${NATURE}/stone_largeC.glb`, -258, 140, 0.3, 3),
-    decor(`${NATURE}/plant_bushDetailed.glb`, -206, 232, 0, 3),
+    // connector arc, per the composer's distribution note). y: measured
+    // seats on the downhill run's embankment (elevation.md — the sweepers
+    // now descend 6→0, and this verge carries its fade).
+    decor(`${NATURE}/tree_pineTallA_detailed.glb`, -216, 228, 2.4, 7, { y: 1.5 }),
+    decor(`${NATURE}/tree_pineTallC_detailed.glb`, -252, 180, 0.9, 7, { y: 0.6 }),
+    decor(`${NATURE}/stone_largeC.glb`, -258, 140, 0.3, 3, { y: 0.4 }),
+    decor(`${NATURE}/plant_bushDetailed.glb`, -206, 232, 0, 3, { y: 2.1 }),
 
     // --- ROADBLOCK: barricade clusters on the verge outside the middle
     // flicks (decor: the red/white wall is the wrecking surface; these just
-    // make shoving someone wide READ as smashing them through a roadblock) ---
+    // make shoving someone wide READ as smashing them through a roadblock).
+    // The flow pass moved flick 3's centreline ~11 m west, so its east-side
+    // cluster follows the wall — a barricade stranded 16 m out in the grass
+    // stops reading as the thing you get smashed through. ---
     decor(`${RACE}/barrierWall.glb`, -258, 46, 2.19, 6, { cx: 0.15, cz: -0.71 }),
     decor(`${RACE}/barrierRed.glb`, -260, 38, 2.4, 6, { cx: -0.225, cz: -0.71 }),
     decor(`${RACE}/barrierWhite.glb`, -256, 28, 2.0, 6, { cx: -0.225, cz: -0.71 }),
     decor(`${FACT}/warning-orange.glb`, -254, 52, 0, 1.2),
-    decor(`${RACE}/barrierWall.glb`, -203, 6, 0.97, 6, { cx: 0.15, cz: -0.71 }),
-    decor(`${RACE}/barrierRed.glb`, -202, -6, 1.1, 6, { cx: -0.225, cz: -0.71 }),
-    decor(`${FACT}/warning-traffic.glb`, -205, 14, 0, 1.2),
-    decor(`${RACE}/pylon.glb`, -206, -14, 0, 6, PYLON),
+    decor(`${RACE}/barrierWall.glb`, -214, 6, 0.97, 6, { cx: 0.15, cz: -0.71 }),
+    decor(`${RACE}/barrierRed.glb`, -213, -6, 1.1, 6, { cx: -0.225, cz: -0.71 }),
+    decor(`${FACT}/warning-traffic.glb`, -216, 14, 0, 1.2),
+    decor(`${RACE}/pylon.glb`, -217, -14, 0, 6, PYLON),
     decor(`${RACE}/pylon.glb`, -252, 60, 0, 6, PYLON),
 
     // --- merge-pass seam masks: the coast skirt swaps type mid-segment at
@@ -78,8 +83,9 @@ export const shared: ZoneDressing = {
 
     // the harbor concept's lone grass-infield lamp — the infield is shared
     // turf (x < 246), so the quay zone flagged it for the merge pass; arm
-    // east over the kerb like the quay line (local +z → yaw π/2)
-    decor('builtin:lamp-post', 230, 146, Math.PI / 2, 1.15),
+    // east over the kerb like the quay line (local +z → yaw π/2). y: the
+    // quay climb's inland embankment runs under it now (measured seat).
+    decor('builtin:lamp-post', 230, 146, Math.PI / 2, 1.15, { y: 1.5 }),
   ],
 
   // Merge-pass blending: the named zones repainted their ground wall-to-wall,
@@ -144,15 +150,18 @@ export const sharedSouthArc: CoastVertex[] = [
 ];
 
 /** West side + NW corner, south→north: the roadblock chicane's seaward
- *  verge and the sweeper headland, all grass bank. */
+ *  verge and the sweeper headland, all grass bank. The last four vertices
+ *  carry rim y (road-base field sampled at the vertex, elevation.md):
+ *  the downhill sweepers' embankment reaches the shore here, so the bank
+ *  rises toward the cliff-arc seam instead of stepping at it. */
 export const sharedNorthwestArc: CoastVertex[] = [
   { x: -292, z: -40, edge: 'bank' },
   { x: -288, z: 2, edge: 'bank' },
   { x: -294, z: 44, edge: 'bank' },
   { x: -286, z: 86, edge: 'bank' },
   { x: -282, z: 122, edge: 'bank' },
-  { x: -270, z: 158, edge: 'bank' },
-  { x: -250, z: 196, edge: 'bank' },
-  { x: -226, z: 226, edge: 'bank' },
-  { x: -192, z: 250, edge: 'bank' }, // hands off to the cliff arc
+  { x: -270, z: 158, edge: 'bank', y: 0.2 },
+  { x: -250, z: 196, edge: 'bank', y: 0.5 },
+  { x: -226, z: 226, edge: 'bank', y: 0.8 },
+  { x: -192, z: 250, edge: 'bank', y: 1.8 }, // hands off to the cliff arc
 ];
