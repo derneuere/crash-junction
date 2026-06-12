@@ -22,9 +22,14 @@ export class PlayerReflections {
   }
 
   /** Re-capture the world from the player's position. `hide` lists scene
-   *  objects that must not appear in the capture: the player's own meshes
-   *  (a car can't reflect itself) and screen-space dressing like the lens
-   *  flare. Loose detached panels are world objects and stay visible. */
+   *  subtrees whose MESHES must not appear in the capture: the player's own
+   *  bodywork (a car can't reflect itself) and screen-space dressing like
+   *  the lens flare. Lights inside those subtrees stay visible — the
+   *  capture must keep the exact visible-light count of the main render,
+   *  because the light count keys every shader program and a second
+   *  signature would lazily compile a parallel program set (and the paint
+   *  should reflect the headlights' road glow anyway). Loose detached
+   *  panels are world objects and stay visible. */
   update(
     renderer: THREE.WebGLRenderer,
     scene: THREE.Scene,
@@ -33,11 +38,15 @@ export class PlayerReflections {
   ): void {
     if (document.hidden) return; // rAF-starved hidden tabs render garbage
     const restore: THREE.Object3D[] = [];
-    for (const o of hide) {
-      if (o.visible) {
-        o.visible = false;
-        restore.push(o);
-      }
+    for (const root of hide) {
+      root.traverse((o) => {
+        const m = o as THREE.Mesh;
+        if (!m.isMesh && !(o as unknown as THREE.Sprite).isSprite && !(o as unknown as THREE.Points).isPoints) return;
+        if (o.visible) {
+          o.visible = false;
+          restore.push(o);
+        }
+      });
     }
     // reuse this frame's shadow map — six extra shadow passes would more
     // than double the capture cost for no visible gain

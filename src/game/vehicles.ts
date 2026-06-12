@@ -70,10 +70,11 @@ const modelWheelMat = new THREE.MeshStandardMaterial({ vertexColors: true, flatS
 // ---------- night vehicle lights ----------
 // Real dynamic lights, three.js forward-renderer budget permitting: one
 // shadowless headlight SpotLight painting the road ahead and one red brake
-// PointLight per vehicle. They exist only at night (Game flips visibility,
-// so the day/CI render path never pays for them) and the brake fires via
-// INTENSITY, not visibility — toggling a light in and out of the render
-// list would churn shader programs every brake tap.
+// PointLight per vehicle. Visibility follows time of day ONLY (the day/CI
+// render path never pays for them); everything that changes during play —
+// brake taps, wreck/explosion shutoff — drives INTENSITY, because the
+// visible-light count keys every shader program: one light leaving the
+// render list recompiles the whole scene.
 export const HEADLIGHT_INTENSITY = 80; // candela (physical falloff)
 export const BRAKE_INTENSITY = 22;
 

@@ -30,13 +30,14 @@ import { createMode, type GameMode, type ModeHost } from './modes/mode';
 import { GROUP_DECOR, createPhysics, type PhysicsContext } from './physics';
 import { buildEnvironment, makeHeightSampler } from './environment';
 import { loadLevelProps } from './props';
-import { BRAKE_INTENSITY, charActor, createBarrel, createPole, createVehicle, deformActor, popWheel, repairVehicle, shatterGlass, type LoosePart } from './vehicles';
+import { BRAKE_INTENSITY, HEADLIGHT_INTENSITY, charActor, createBarrel, createPole, createVehicle, deformActor, popWheel, repairVehicle, shatterGlass, type LoosePart } from './vehicles';
 import { applyCarEnvScale, setCarEnvMap, setPlayerEnvMap } from './geometry';
 import { applyTimeOfDay, type TimeOfDay } from './daynight';
 import { SKY_PRESETS, SkyRig, SunFlare } from './skyenv';
 import { PlayerReflections } from './reflections';
 import { Postfx } from './postfx';
 import { makeGlowTexture } from './textures';
+import { Perf, type PerfReport } from './perf';
 import { resetModelPicker } from './models';
 import { accumulatePanelDamage, makePanelBody, updatePanelFlap } from './panels';
 import type { PanelState } from './types';
@@ -211,10 +212,14 @@ export class Game {
   private gfx: GfxMode = 'cine';
   // verify replays run headless on swiftshader — never pay for cine pixels
   private readonly forceFast = new URLSearchParams(location.search).get('verify') === '1';
+  // never drawn into — exists so the warmup compile sees the render-target
+  // program key (linear output, no tone mapping)
+  private warmupRT = new THREE.WebGLRenderTarget(1, 1);
   private sunDirUnit = new THREE.Vector3(); // toward the sun/moon, unit
   private camera: THREE.PerspectiveCamera;
   private phys: PhysicsContext;
   private fx: Effects;
+  private perf: Perf;
   private audio = new GameAudio();
   private director = new CameraDirector();
   private heightAt: HeightSampler;
@@ -300,6 +305,16 @@ export class Game {
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
     this.renderer.toneMappingExposure = 1.05;
     container.appendChild(this.renderer.domElement);
+
+    this.perf = new Perf(this.renderer, this.scene, () => ({
+      tod: this.timeOfDay,
+      gfx: this.gfx,
+      cine: this.cineActive(),
+      level: this.levelId,
+      state: GameState[this.state],
+      actors: this.actors.length,
+      replaying: !!this.replay,
+    }));
 
     // Burnout-3 gloss: every car material reflects a PMREM capture of a
     // purpose-built world — a bright showroom by day, lamp glints and lit
@@ -422,6 +437,7 @@ export class Game {
    *  emissive sweep. Pure visuals — the sim, and so replay determinism,
    *  never sees it. */
   setTimeOfDay(t: TimeOfDay): void {
+    this.perf.tag(`tod:${t}`);
     this.timeOfDay = t;
     const night = t === 'night';
     const p = TOD_PRESETS[t];
@@ -459,12 +475,40 @@ export class Game {
     applyCarEnvScale(night ? 1.15 : 1);
     this.refreshPlayerEnv();
     applyTimeOfDay(this.scene, t);
+
+    // flip the vehicle/lamp lights for the new tod NOW (syncMeshes drives
+    // them per frame) so the warmup below compiles against the real light
+    // count, not last frame's
+    const lightsOn = t !== 'day';
+    for (const a of this.actors) {
+      const nl = a.nightLights;
+      if (!nl) continue;
+      if (nl.lamp) nl.lamp.visible = lightsOn;
+      if (nl.head) nl.head.visible = lightsOn;
+      if (nl.brake) nl.brake.visible = lightsOn;
+    }
+    // warmup: pre-compile every material — including the pooled, still
+    // invisible explosion/debris/glass sprites — under the new light
+    // signature, so the first explosion never stalls on first-use shader
+    // compiles. Programs are keyed on the bound render target too
+    // (toneMapping + output color space), so compile both variants: the
+    // screen one (fast tier) and the render-target one (cine composer
+    // buffer and the reflection cube share that key). The relight already
+    // churns programs; this rides it. Skipped under ?verify=1: headless
+    // replays render pixels nobody sees.
+    if (!this.forceFast) {
+      this.renderer.compile(this.scene, this.camera);
+      this.renderer.setRenderTarget(this.warmupRT);
+      this.renderer.compile(this.scene, this.camera);
+      this.renderer.setRenderTarget(null);
+    }
   }
 
   /** Presentation tier (see GfxMode). Swaps the player between the live
    *  cube map and the showroom fallback, sizes the shadow budget, and
    *  hands tone mapping to the chain or the renderer. */
   setGfx(g: GfxMode): void {
+    this.perf.tag(`gfx:${g}`);
     this.gfx = g;
     const cine = this.cineActive();
     // with the composer, the renderer draws into an HDR buffer — ACES then
@@ -529,6 +573,7 @@ export class Game {
 
   /** Detonate at a world position. power ≈ 1 is a barrel, ~2.4 a tanker. */
   explode(p: THREE.Vector3, power: number): void {
+    this.perf.tag('explosion');
     this.fx.explosion.spawn(p, power);
     this.fx.sparks.spawn(p, 70, 8 + 5 * power);
     this.fx.debris.spawn(p, 14 + Math.round(6 * power), 9 * power);
@@ -679,6 +724,7 @@ export class Game {
     this.container.removeEventListener('pointerdown', this.onPointerDown);
     this.resizeObserver.disconnect();
     this.postfx.dispose();
+    this.warmupRT.dispose();
     this.reflections.dispose();
     this.skyRig.dispose();
     this.sunFlare.dispose();
@@ -1068,6 +1114,7 @@ export class Game {
    *  crashbreaker a step, Burnout-Revenge style. */
   private markCrashed(a: Actor): void {
     if (a.crashed) return;
+    this.perf.tag('wreck');
     if (a.isPlayer && this.replay) {
       this.replay.stats.playerWrecks++;
       const dt = this.simTime - this.replay.lastTakedownAt;
@@ -1126,6 +1173,7 @@ export class Game {
   private popLooseWheel(actor: Actor, p: THREE.Vector3): void {
     const part = popWheel(actor, p, this.scene, this.phys.world, this.phys.matCar);
     if (part) {
+      this.perf.tag('wheel-pop');
       this.looseParts.push(part);
       this.audio.wheelPop(p);
     }
@@ -1133,6 +1181,7 @@ export class Game {
 
   /** A panel crossed its detach threshold: door/bonnet/boot flies off. */
   private detachPanel = (actor: Actor, panel: PanelState): void => {
+    this.perf.tag('panel-detach');
     this.scene.attach(panel.mesh); // keep the flapped world transform
     const body = makePanelBody(actor, panel, this.phys.matCar);
     this.phys.world.addBody(body);
@@ -1348,9 +1397,17 @@ export class Game {
         // streetlamps just follow the night — even lying on their side
         if (nl.lamp) nl.lamp.visible = night;
         if (nl.head && nl.brake) {
+          // a wreck dims its lights to zero, it never leaves the render
+          // list: the visible-light COUNT keys every shader program, so one
+          // flip recompiles the whole scene (at night a pileup fired
+          // multi-second recompile storms right before the tanker blew).
+          // Day keeps visible=false — that path stays at zero light cost,
+          // and the tod toggle's one-time churn rides the full relight.
           const alive = night && !a.crashed && !a.exploded;
-          nl.head.visible = alive;
-          nl.brake.visible = alive;
+          if ((nl.head.intensity > 0) !== alive) this.perf.tag(alive ? 'vlight-on' : 'vlight-off');
+          nl.head.visible = night;
+          nl.brake.visible = night;
+          nl.head.intensity = alive ? HEADLIGHT_INTENSITY : 0;
           // brake detection: the player's actual brake input; traffic by
           // measured deceleration, latched briefly so it doesn't flicker
           const sp = Math.hypot(a.body.velocity.x, a.body.velocity.z);
@@ -1711,6 +1768,8 @@ export class Game {
     this.schedule();
     const elapsed = (now - this.last) / 1000;
     this.last = now;
+    this.perf.beginFrame();
+    const tSim = performance.now();
 
     if (this.replay) {
       // pace the tape 1:1 with its recorded dts via the rAF cadence; fast
@@ -1731,6 +1790,7 @@ export class Game {
       this.simKeys = keysFromMask(mask);
       this.advance(dt, hidden, cmds);
     }
+    this.perf.simMs = performance.now() - tSim;
 
     // audio: one sim readout per rendered frame — engine/skid/boost/wind
     // loops, the slow-mo warp, landing thumps and near-miss whooshes all
@@ -1763,13 +1823,27 @@ export class Game {
       if (p) {
         // the world sweeps through the player's paint: re-capture the cube
         // map (the car must not reflect itself; the flare is screen dressing)
+        const tCube = performance.now();
         this.reflections.update(this.renderer, this.scene, p.group.position, [p.group, this.sunFlare.group]);
+        this.perf.cubeMs = performance.now() - tCube;
       }
+      const tPost = performance.now();
       this.postfx.render(af.dt);
+      this.perf.postMs = performance.now() - tPost;
     } else {
+      const tPost = performance.now();
       this.renderer.render(this.scene, this.camera);
+      this.perf.postMs = performance.now() - tPost;
     }
+    this.perf.endFrame(elapsed * 1000);
   };
+
+  /** Lag-spike tracker readout (see perf.ts): the frame ring, the rolling
+   *  median and every captured spike report. window.__lagSpikes holds the
+   *  same spike list live. */
+  perfReport(): PerfReport {
+    return this.perf.report();
+  }
 
   /** One physics ray camera → sun: is something chunky in the way? The
    *  player's own body is ignored — at dusk the sun sits dead ahead and the
