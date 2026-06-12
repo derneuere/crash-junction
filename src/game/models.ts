@@ -3,6 +3,7 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import type { VehicleSpec, Variant } from './types';
 import { panelDefs, type PanelDef } from './panels';
+import { applyUniformColor } from './geometry';
 
 // Quaternius CC0 vehicle models (public/models/*/glb), converted from FBX by
 // tools/convert-models.mjs. The game's whole damage pipeline — crumple,
@@ -42,6 +43,9 @@ export interface VehicleModel {
   /** Real bodywork cut from the hull, aligned with panelDefs(spec, model).
    *  null slots cut to slivers and keep the colored-box fallback. */
   panelCuts: (PanelCut | null)[];
+  /** Dark blocker masses inside the body (engine bay / cabin / trunk) —
+   *  wounds reveal these instead of daylight through the one-sided shell. */
+  interior: THREE.BufferGeometry | null;
 }
 
 /** A panel's actual bodywork, carved out of the baked hull at bake time.
@@ -318,6 +322,7 @@ function bakeModel(gltf: { scene: THREE.Group }, cfg: ModelConfig, spec: Vehicle
     zRear: (rawZRear - center.z) * sz,
   };
 
+  const metrics = measurePanelMetrics(merged, arch, spec, glassRanges);
   const model: VehicleModel = {
     body: merged,
     paintRanges,
@@ -326,8 +331,10 @@ function bakeModel(gltf: { scene: THREE.Group }, cfg: ModelConfig, spec: Vehicle
     wheelR,
     arch,
     wheelY,
-    panelMetrics: measurePanelMetrics(merged, arch, spec, glassRanges),
+    panelMetrics: metrics,
     panelCuts: [],
+    // built BEFORE the panel cuts, so width probes still see the door skin
+    interior: buildInterior(metrics, arch, spec, merged),
   };
   model.panelCuts = cutPanelTemplates(model, panelDefs(spec, model));
   return model;
@@ -597,6 +604,88 @@ function cutPanelTemplates(model: VehicleModel, defs: PanelDef[]): (PanelCut | n
 }
 
 const _cv = new THREE.Vector3();
+
+// ---------- interior blocks ----------
+// The hull is a one-sided shell, so every wound — torn bonnet, missing
+// bumper, blown-out window — used to show daylight straight through the
+// car. Bake a few dark blocker masses inside each model: engine bay under
+// the bonnet, cabin in the greenhouse, trunk under the boot (one big cabin
+// for the bus). They ride the deformable list like the hull, so they
+// crumple and char with the body.
+
+const ENGINE_TINT = 0x201d1a; // warm dark — machinery
+const CABIN_TINT = 0x15171a;
+const TRUNK_TINT = 0x17191c;
+
+type BlockOrNull = THREE.BufferGeometry | null;
+
+function buildInterior(
+  m: PanelMetrics,
+  arch: { x: number; zFront: number; zRear: number },
+  spec: VehicleSpec,
+  hull: THREE.BufferGeometry,
+): THREE.BufferGeometry | null {
+  // boxes vs curved bodywork: any guessed width pokes through SOME model,
+  // so each block measures its own safe half-width with inward rays
+  // against the hull over its (y, z) face
+  const mesh = new THREE.Mesh(hull);
+  const ray = new THREE.Raycaster();
+  const origin = new THREE.Vector3();
+  const inward = new THREE.Vector3(-1, 0, 0);
+  const safeHalfW = (y0: number, y1: number, z0: number, z1: number): number => {
+    let w = Infinity;
+    for (let iy = 0; iy < 4; iy++) {
+      for (let iz = 0; iz < 7; iz++) {
+        const y = y0 + ((iy + 0.5) / 4) * (y1 - y0);
+        const z = z0 + ((iz + 0.5) / 7) * (z1 - z0);
+        ray.set(origin.set(3, y, z), inward);
+        const hit = ray.intersectObject(mesh, false)[0];
+        // a miss or a far-side hit means the ray flew through an opening
+        // (wheel arch) — that sample can't bound the width
+        if (!hit || hit.point.x < 0.05) continue;
+        w = Math.min(w, hit.point.x - 0.07);
+      }
+    }
+    return w;
+  };
+  const block = (y0: number, y1: number, z0: number, z1: number, tint: number): BlockOrNull => {
+    const halfW = safeHalfW(y0, y1, z0, z1);
+    if (!isFinite(halfW) || halfW < 0.15 || y1 - y0 < 0.12 || z1 - z0 < 0.12) return null;
+    const g = stripToPosNormal(new THREE.BoxGeometry(halfW * 2, y1 - y0, z1 - z0));
+    applyUniformColor(g, tint);
+    g.translate(0, (y0 + y1) / 2, (z0 + z1) / 2);
+    return g;
+  };
+
+  const blocks: BlockOrNull[] = [];
+  const sill = m.door.sillY + 0.04;
+  const waist = m.door.waistY;
+  if (spec.variant === 'bus') {
+    // slab sides and a near-vertical windshield — one box does
+    blocks.push(block(sill, waist + 0.45 * (m.maxY - waist), m.noseZ + 0.5, m.tailZ - 0.5, CABIN_TINT));
+  } else {
+    const r = spec.wheelRadius;
+    // engine/trunk tops stay under the LOW end of each sloped lid line —
+    // and the lines are chords, so the rounded nose/tail dip below them:
+    // generous z insets + an extra drop keep the blocks inside the shell
+    const bonnetZ1 = arch.zFront + r;
+    const bonnetLow = m.bonnet.y - (Math.abs(m.bonnet.slope) * (bonnetZ1 - m.noseZ - FACE_DEPTH)) / 2;
+    const bootZ1 = m.tailZ - FACE_DEPTH;
+    const bootLow = m.boot.y - (Math.abs(m.boot.slope) * (bootZ1 - arch.zRear)) / 2;
+    blocks.push(block(sill, bonnetLow - 0.09, m.noseZ + 0.18, bonnetZ1 - 0.05, ENGINE_TINT));
+    blocks.push(block(sill, bootLow - 0.09, arch.zRear + 0.1, m.tailZ - 0.18, TRUNK_TINT));
+    // cabin: a dash-height slab the full door band, plus a taller "seats"
+    // mass set back where the greenhouse is high — a single tall box would
+    // punch through the raked windshield (and the rear glass)
+    const len = m.door.z1 - m.door.z0;
+    blocks.push(block(sill, waist - 0.05, m.door.z0 + 0.05, m.door.z1 - 0.05, CABIN_TINT));
+    blocks.push(block(waist - 0.05, waist + 0.45 * (m.maxY - waist), m.door.z0 + 0.42 * len, m.door.z1 - 0.26 * len, CABIN_TINT));
+  }
+  const real = blocks.filter((b): b is THREE.BufferGeometry => b !== null);
+  const merged = real.length ? mergeGeometries(real, false) : null;
+  for (const b of real) b.dispose();
+  return merged;
+}
 
 /** Drop UVs/colors/tangents so primitives merge; we rebuild color ourselves. */
 function stripToPosNormal(g: THREE.BufferGeometry): THREE.BufferGeometry {

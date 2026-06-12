@@ -116,6 +116,12 @@ export function createVehicle(
     const hull = makeModelHull(model, spawn.color);
     group.add(hull);
     registerDeformable(hull, deformables, model.glassRanges);
+    if (model.interior) {
+      // dark engine-bay/cabin/trunk masses — wounds show these, not daylight
+      const inner = new THREE.Mesh(model.interior.clone(), hullMat);
+      group.add(inner);
+      registerDeformable(inner, deformables);
+    }
   } else if (spawn.variant === 'sedan') {
     const hull = new THREE.Mesh(makeSedanGeometry(spec.width, spec.height, spec.length, spawn.color, GLASS), hullMat);
     hull.position.y = spec.hullY;
@@ -263,13 +269,16 @@ const _wq = new THREE.Quaternion();
  *  grid). The baked models are flat-shaded, so each corner exists as 2–7
  *  copies with split normals — the player hull has 2984 slots on 740
  *  positions. The crumple's per-vertex randomness must move those copies as
- *  one, or every shared edge tears and a hard wreck shreds into confetti. */
-function buildWeld(base: Float32Array): Uint32Array {
+ *  one, or every shared edge tears and a hard wreck shreds into confetti.
+ *  Glass and body never weld together: glass sits out the crumple, and a
+ *  body corner with a glass representative would be frozen with it. */
+function buildWeld(base: Float32Array, glassMask?: Uint8Array): Uint32Array {
   const n = base.length / 3;
   const weld = new Uint32Array(n);
   const seen = new Map<string, number>();
   for (let i = 0; i < n; i++) {
-    const key = `${Math.round(base[i * 3] * 1000)}|${Math.round(base[i * 3 + 1] * 1000)}|${Math.round(base[i * 3 + 2] * 1000)}`;
+    const g = glassMask ? glassMask[i] : 0;
+    const key = `${g}|${Math.round(base[i * 3] * 1000)}|${Math.round(base[i * 3 + 1] * 1000)}|${Math.round(base[i * 3 + 2] * 1000)}`;
     const rep = seen.get(key);
     if (rep === undefined) {
       seen.set(key, i);
@@ -279,6 +288,13 @@ function buildWeld(base: Float32Array): Uint32Array {
     }
   }
   return weld;
+}
+
+function buildGlassMask(part: DeformablePart): Uint8Array | undefined {
+  if (!part.glass?.length) return undefined;
+  const mask = new Uint8Array(part.base.length / 3);
+  for (const [s, e] of part.glass) mask.fill(1, s, e);
+  return mask;
 }
 
 /** Crumple the hull around a world-space impact point. `impactDir` is the
@@ -306,10 +322,16 @@ export function deformActor(actor: Actor, worldPoint: THREE.Vector3, strength: n
     const pos = geo.attributes.position as THREE.BufferAttribute;
     const col = geo.attributes.color as THREE.BufferAttribute;
     const base = part.base;
-    const weld = part.weld ?? (part.weld = buildWeld(base));
+    if (!part.weld) {
+      part.glassMask = buildGlassMask(part);
+      part.weld = buildWeld(base, part.glassMask);
+    }
+    const weld = part.weld;
+    const glassMask = part.glassMask;
     let touched = false;
 
     for (let i = 0; i < pos.count; i++) {
+      if (glassMask && glassMask[i]) continue; // glass doesn't bend — it shatters
       _v.set(pos.getX(i), pos.getY(i), pos.getZ(i));
       const d = _v.distanceTo(_lp);
       if (d > R) continue;
@@ -373,6 +395,7 @@ export function repairVehicle(actor: Actor): void {
     const col = geo.attributes.color as THREE.BufferAttribute;
     (col.array as Float32Array).set(part.baseCol);
     col.needsUpdate = true;
+    if (part.baseIndex) geo.setIndex(new THREE.BufferAttribute(part.baseIndex.slice(), 1)); // reglaze
     geo.computeVertexNormals();
   }
   for (const p of actor.panels) {
@@ -397,10 +420,15 @@ export function repairVehicle(actor: Actor): void {
   actor.smokeT = 0;
 }
 
-/** Frost the window vertices near a hit (model hulls track their glass
- *  ranges). Returns how many vertices broke — 0 means nothing to show, so
- *  the caller can skip the shard burst. Color-only: the crumple deformer
- *  owns the geometry. */
+/** Glass breaks in two stages, BP-style: a hit FROSTS virgin panes (the
+ *  crack-web recolor), and a hit on already-frosted glass BLOWS THE PANE
+ *  OUT — its triangles leave the hull index (same index-only surgery as
+ *  the panel cuts), so the window becomes a hole onto the interior blocks.
+ *  Any real wreck lands several impacts, so windshields naturally frost on
+ *  the first hit and burst during the tumble. The crumple deformer skips
+ *  glass entirely (it doesn't bend), so this owns all glass damage.
+ *  Returns how many vertices frosted or blew — 0 means nothing to show,
+ *  so the caller can skip the shard burst. */
 export function shatterGlass(actor: Actor, worldPoint: THREE.Vector3, radius: number): number {
   let broken = 0;
   for (const part of actor.deformables) {
@@ -411,11 +439,16 @@ export function shatterGlass(actor: Actor, worldPoint: THREE.Vector3, radius: nu
     const pos = geo.attributes.position as THREE.BufferAttribute;
     const col = geo.attributes.color as THREE.BufferAttribute;
     let touched = false;
+    let blow: Set<number> | null = null;
     for (const [s, e] of part.glass) {
       for (let i = s; i < e; i++) {
         _v.set(pos.getX(i), pos.getY(i), pos.getZ(i));
         if (_v.distanceTo(_lp) > radius) continue;
-        if (col.getX(i) > 0.5) continue; // this pane already frosted
+        if (col.getX(i) > 0.5) {
+          (blow ??= new Set()).add(i); // frosted already — the pane lets go
+          broken++;
+          continue;
+        }
         const tone = 0.72 + Math.random() * 0.18;
         col.setXYZ(i, tone, tone + 0.04, tone + 0.07);
         touched = true;
@@ -423,6 +456,20 @@ export function shatterGlass(actor: Actor, worldPoint: THREE.Vector3, radius: nu
       }
     }
     if (touched) col.needsUpdate = true;
+    if (blow && geo.index) {
+      // stash the pristine index once — repairVehicle reglazes from it
+      part.baseIndex ??= (geo.index.array as Uint16Array | Uint32Array).slice();
+      const idx = geo.index;
+      const keep: number[] = [];
+      for (let t = 0; t < idx.count; t += 3) {
+        const a = idx.getX(t);
+        const b = idx.getX(t + 1);
+        const c = idx.getX(t + 2);
+        if (blow.has(a) || blow.has(b) || blow.has(c)) continue;
+        keep.push(a, b, c);
+      }
+      geo.setIndex(keep);
+    }
   }
   return broken;
 }

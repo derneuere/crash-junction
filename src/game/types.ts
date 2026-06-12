@@ -130,6 +130,12 @@ export interface DeformablePart {
    *  (split normals), so the deformer must weld displacement across the
    *  copies or the skin tears into loose triangles. */
   weld?: Uint32Array;
+  /** Per-slot glass flag (built with weld) — the crumple deformer skips
+   *  glass entirely: glass doesn't bend, it shatters (shatterGlass). */
+  glassMask?: Uint8Array;
+  /** Pristine triangle index, stashed the first time shatterGlass blows a
+   *  pane out of the hull — repairVehicle reglazes from it. */
+  baseIndex?: Uint16Array | Uint32Array;
 }
 
 export type PanelKind = 'door' | 'bonnet' | 'boot' | 'bumper';
