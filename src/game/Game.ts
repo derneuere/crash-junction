@@ -29,7 +29,9 @@ import { createMode, type GameMode, type ModeHost } from './modes/mode';
 import { createPhysics, type PhysicsContext } from './physics';
 import { buildEnvironment, makeHeightSampler } from './environment';
 import { charActor, createBarrel, createPole, createVehicle, deformActor, popWheel, repairVehicle, shatterGlass, type LoosePart } from './vehicles';
-import { setCarEnvMap } from './geometry';
+import { applyCarEnvScale, setCarEnvMap } from './geometry';
+import { applyTimeOfDay, type TimeOfDay } from './daynight';
+import { makeGlowTexture } from './textures';
 import { resetModelPicker } from './models';
 import { accumulatePanelDamage, makePanelBody, updatePanelFlap } from './panels';
 import type { PanelState } from './types';
@@ -98,11 +100,23 @@ function makeCarEnvScene(): THREE.Scene {
   return scene;
 }
 
+/** A camera-facing glow disk pinned in the sky (fog must not eat it). */
+function makeSkySprite(tex: THREE.Texture, scale: number): THREE.Sprite {
+  const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, fog: false, transparent: true, depthWrite: false }));
+  s.scale.set(scale, scale, 1);
+  return s;
+}
+
 export class Game {
   readonly events = new Emitter<GameEvents>();
 
   private renderer: THREE.WebGLRenderer;
   private scene = new THREE.Scene();
+  private hemi!: THREE.HemisphereLight;
+  private sun!: THREE.DirectionalLight;
+  private sunSprite!: THREE.Sprite;
+  private moonSprite!: THREE.Sprite;
+  private timeOfDay: TimeOfDay = 'day';
   private camera: THREE.PerspectiveCamera;
   private phys: PhysicsContext;
   private fx: Effects;
@@ -209,8 +223,8 @@ export class Game {
     this.cam0.pos.copy(this.camera.position);
     this.cam0.quat.copy(this.camera.quaternion);
 
-    const hemi = new THREE.HemisphereLight(0xbfd6ff, 0x4a4036, 1.45);
-    this.scene.add(hemi);
+    this.hemi = new THREE.HemisphereLight(0xbfd6ff, 0x4a4036, 1.45);
+    this.scene.add(this.hemi);
     const sun = new THREE.DirectionalLight(0xfff0dd, 2.2);
     sun.position.set(34, 44, 20);
     sun.castShadow = true;
@@ -222,6 +236,15 @@ export class Game {
     sun.shadow.camera.far = 120;
     sun.shadow.bias = -0.0008;
     this.scene.add(sun);
+    this.sun = sun;
+
+    // the visible sun / moon disks, pinned along the key-light directions
+    this.sunSprite = makeSkySprite(makeGlowTexture('rgba(255,246,220,1)', 'rgba(255,212,130,0.5)'), 60);
+    this.sunSprite.position.set(170, 220, 100);
+    this.scene.add(this.sunSprite);
+    this.moonSprite = makeSkySprite(makeGlowTexture('rgba(228,236,255,1)', 'rgba(170,190,235,0.35)'), 30);
+    this.moonSprite.position.set(-150, 220, -120);
+    this.scene.add(this.moonSprite);
 
     if (level.mode.kind === 'race') {
       // the circuit is far bigger than the junction — orbit high and wide
@@ -247,10 +270,36 @@ export class Game {
     this.resizeObserver = new ResizeObserver(() => this.onResize());
     this.resizeObserver.observe(container);
 
+    this.setTimeOfDay(this.timeOfDay); // sweep the freshly built scene
+
     this.schedule();
 
     // dev console handle: window.__game.explode(...), inspect state, etc.
     (window as unknown as { __game: Game }).__game = this;
+  }
+
+  /** Day/night toggle: relights the scene, swaps sun ↔ moon, lights the
+   *  building windows, streetlights and car lenses (the daynight emissive
+   *  sweep), and dims the showroom reflections under a dark sky. Pure
+   *  visuals — the sim, and so replay determinism, never sees it. */
+  setTimeOfDay(t: TimeOfDay): void {
+    this.timeOfDay = t;
+    const night = t === 'night';
+    const sky = night ? 0x0a0f1d : 0xb6cde6;
+    (this.scene.background as THREE.Color).setHex(sky);
+    (this.scene.fog as THREE.Fog).color.setHex(sky);
+    this.hemi.color.setHex(night ? 0x33415c : 0xbfd6ff);
+    this.hemi.groundColor.setHex(night ? 0x12141c : 0x4a4036);
+    this.hemi.intensity = night ? 0.6 : 1.45;
+    this.sun.color.setHex(night ? 0x9db6e8 : 0xfff0dd);
+    this.sun.intensity = night ? 0.55 : 2.2;
+    // keep |position| shadow-camera sized; the sky disks sit much further out
+    if (night) this.sun.position.set(-30, 48, -24);
+    else this.sun.position.set(34, 44, 20);
+    this.sunSprite.visible = !night;
+    this.moonSprite.visible = night;
+    applyCarEnvScale(night ? 0.45 : 1);
+    applyTimeOfDay(this.scene, t);
   }
 
   /** rAF normally; setTimeout when the tab is hidden (rAF stops firing

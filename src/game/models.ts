@@ -35,6 +35,8 @@ export interface VehicleModel {
   body: THREE.BufferGeometry;
   paintRanges: [number, number][]; // vertex ranges painted in spawn color
   glassRanges: [number, number][];
+  headRanges: [number, number][]; // headlight lenses (bus: its light strip)
+  tailRanges: [number, number][];
   wheelL: THREE.BufferGeometry; // centered, radius = spec.wheelRadius
   wheelR: THREE.BufferGeometry;
   arch: { x: number; zFront: number; zRear: number }; // wheel centers, group space
@@ -210,6 +212,8 @@ function bakeModel(gltf: { scene: THREE.Group }, cfg: ModelConfig, spec: Vehicle
   const isPaint = (p: BodyPrim) =>
     cfg.paint.includes('*biggest*') ? p === biggest : cfg.paint.includes(p.matName);
   const isGlass = (p: BodyPrim) => GLASS_MATS.some((g) => p.matName.toLowerCase().includes(g));
+  const isHead = (p: BodyPrim) => p.matName.toLowerCase().includes('headlight') || p.matName === 'Lights';
+  const isTail = (p: BodyPrim) => p.matName.toLowerCase().includes('taillight');
 
   // merge primitives → one deformable geometry + role vertex ranges
   const merged = mergeGeometries(bodyPrims.map((p) => p.geo), false);
@@ -218,6 +222,8 @@ function bakeModel(gltf: { scene: THREE.Group }, cfg: ModelConfig, spec: Vehicle
   const colors = new Float32Array(total * 3);
   const paintRanges: [number, number][] = [];
   const glassRanges: [number, number][] = [];
+  const headRanges: [number, number][] = [];
+  const tailRanges: [number, number][] = [];
   let cursor = 0;
   for (const p of bodyPrims) {
     for (let i = cursor; i < cursor + p.verts; i++) {
@@ -227,6 +233,8 @@ function bakeModel(gltf: { scene: THREE.Group }, cfg: ModelConfig, spec: Vehicle
     }
     if (isPaint(p)) paintRanges.push([cursor, cursor + p.verts]);
     if (isGlass(p)) glassRanges.push([cursor, cursor + p.verts]);
+    if (isHead(p)) headRanges.push([cursor, cursor + p.verts]);
+    else if (isTail(p)) tailRanges.push([cursor, cursor + p.verts]);
     cursor += p.verts;
     p.geo.dispose();
   }
@@ -334,6 +342,8 @@ function bakeModel(gltf: { scene: THREE.Group }, cfg: ModelConfig, spec: Vehicle
     body: merged,
     paintRanges,
     glassRanges,
+    headRanges,
+    tailRanges,
     wheelL,
     wheelR,
     arch,
@@ -344,23 +354,29 @@ function bakeModel(gltf: { scene: THREE.Group }, cfg: ModelConfig, spec: Vehicle
     interior: buildInterior(metrics, arch, spec, merged),
   };
   model.panelCuts = cutPanelTemplates(model, panelDefs(spec, model));
-  applyGlassGroups(merged, glassRanges); // after the cuts replace the index
+  applyHullGroups(merged, glassRanges, headRanges, tailRanges); // after the cuts replace the index
   return model;
 }
 
-/** Split the hull's index into body/glass material groups so one mesh can
- *  wear glossy paint AND mirror glass ([hullMat, glassMat]). Must rerun
- *  after any index surgery — panel cuts, pane blowouts, repair reglaze —
- *  because groups address index positions, not vertices. */
-export function applyGlassGroups(geo: THREE.BufferGeometry, glassRanges: [number, number][]): void {
+/** Split the hull's index into material groups so one mesh can wear paint,
+ *  mirror glass and light lenses at once ([hullMat, glassMat, headlightMat,
+ *  taillightMat]). Must rerun after any index surgery — panel cuts, pane
+ *  blowouts, repair reglaze — because groups address index positions. */
+export function applyHullGroups(
+  geo: THREE.BufferGeometry,
+  glass: [number, number][],
+  head: [number, number][],
+  tail: [number, number][],
+): void {
   const idx = geo.index;
-  if (!idx || !idx.count || !glassRanges.length) return;
-  const isGlass = (v: number) => glassRanges.some(([s, e]) => v >= s && v < e);
+  if (!idx || !idx.count || (!glass.length && !head.length && !tail.length)) return;
+  const within = (v: number, ranges: [number, number][]) => ranges.some(([s, e]) => v >= s && v < e);
+  const slot = (v: number) => (within(v, glass) ? 1 : within(v, head) ? 2 : within(v, tail) ? 3 : 0);
   geo.clearGroups();
   let runStart = 0;
-  let runMat = isGlass(idx.getX(0)) ? 1 : 0;
+  let runMat = slot(idx.getX(0));
   for (let t = 3; t <= idx.count; t += 3) {
-    const mat = t === idx.count ? -1 : isGlass(idx.getX(t)) ? 1 : 0;
+    const mat = t === idx.count ? -1 : slot(idx.getX(t));
     if (mat !== runMat) {
       geo.addGroup(runStart, t - runStart, runMat);
       runStart = t;

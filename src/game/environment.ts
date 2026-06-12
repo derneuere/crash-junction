@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import * as CANNON from 'cannon-es';
 import type { LevelDef } from './types';
 import { GROUP_DECOR, type PhysicsContext } from './physics';
-import { makeChevronTexture, makeWindowTexture } from './textures';
+import { makeChevronTexture, makeWindowTextures } from './textures';
 import type { HeightSampler } from './suspension';
 
 /** Vertical height field for the suspension rays: flat road, ramp wedges
@@ -120,6 +120,7 @@ export function buildEnvironment(scene: THREE.Scene, phys: PhysicsContext, level
       emissive: 0xffb327,
       emissiveIntensity: 1.4,
     });
+    postMat.userData.night = { intensity: 2.4, day: 1.4 };
     for (let i = 6; i < N; i += 6) {
       const s = secs[i];
       marks.push({ x: s.x, z: s.z, w: race.width - 2, l: 0.7, yaw: Math.atan2(s.dirX, s.dirZ) });
@@ -239,7 +240,7 @@ export function buildEnvironment(scene: THREE.Scene, phys: PhysicsContext, level
   }
 
   // corner blocks: sidewalk slabs + buildings (static colliders → pinball walls)
-  const winTex = makeWindowTexture();
+  const winTex = makeWindowTextures();
   for (const { x: cx, z: cz, h, color } of level.buildings) {
     const walk = new THREE.Mesh(
       new THREE.BoxGeometry(14, 0.16, 14),
@@ -255,13 +256,23 @@ export function buildEnvironment(scene: THREE.Scene, phys: PhysicsContext, level
     phys.world.addBody(wb);
     phys.noCrashIds.add(wb.id); // curbs scuff, they don't wreck
 
-    const tex = winTex.clone();
+    const tex = winTex.map.clone();
     tex.needsUpdate = true;
     tex.repeat.set(3, Math.max(2, Math.round(h / 3)));
-    const bld = new THREE.Mesh(
-      new THREE.BoxGeometry(11, h, 11),
-      new THREE.MeshStandardMaterial({ color, roughness: 0.9, map: tex }),
-    );
+    const lit = winTex.lit.clone();
+    lit.needsUpdate = true;
+    lit.repeat.copy(tex.repeat);
+    // at night the warm windows glow (daynight.ts sweeps the intensity)
+    const bldMat = new THREE.MeshStandardMaterial({
+      color,
+      roughness: 0.9,
+      map: tex,
+      emissive: 0xffffff,
+      emissiveMap: lit,
+      emissiveIntensity: 0,
+    });
+    bldMat.userData.night = { intensity: 2.6 };
+    const bld = new THREE.Mesh(new THREE.BoxGeometry(11, h, 11), bldMat);
     bld.position.set(cx, h / 2 + 0.16, cz);
     bld.castShadow = bld.receiveShadow = true;
     scene.add(bld);

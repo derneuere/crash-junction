@@ -33,6 +33,30 @@ export const glassMat = new THREE.MeshPhysicalMaterial({
   clearcoatRoughness: 0.04,
 });
 
+/** Headlights (and the bus light strip): clearcoated lenses that switch
+ *  on at night via the daynight emissive sweep. */
+export const headlightMat = new THREE.MeshPhysicalMaterial({
+  vertexColors: true,
+  roughness: 0.25,
+  metalness: 0.1,
+  clearcoat: 1,
+  clearcoatRoughness: 0.05,
+  emissive: 0xffe9bb,
+  emissiveIntensity: 0,
+});
+headlightMat.userData.night = { intensity: 2.6 };
+
+export const taillightMat = new THREE.MeshPhysicalMaterial({
+  vertexColors: true,
+  roughness: 0.25,
+  metalness: 0.1,
+  clearcoat: 1,
+  clearcoatRoughness: 0.05,
+  emissive: 0xff2014,
+  emissiveIntensity: 0,
+});
+taillightMat.userData.night = { intensity: 1.9 };
+
 /** Bare-chassis metal — interior platform, engine bay, trunk. */
 export const metalMat = new THREE.MeshStandardMaterial({
   vertexColors: true,
@@ -52,21 +76,24 @@ export const cabinMat = new THREE.MeshStandardMaterial({
 // Gloss needs something to reflect. The Game hands every car material the
 // same PMREM environment texture once the renderer exists; materials created
 // later (clones) join via registerCarMaterial.
-const carMats: THREE.MeshStandardMaterial[] = [hullMat, glassMat, metalMat, cabinMat];
+const carMats: THREE.MeshStandardMaterial[] = [hullMat, glassMat, headlightMat, taillightMat, metalMat, cabinMat];
 const ENV_INTENSITY = new Map<THREE.MeshStandardMaterial, number>([
   [hullMat, 0.75],
   [glassMat, 1.0],
+  [headlightMat, 0.9],
+  [taillightMat, 0.9],
   [metalMat, 0.8],
   [cabinMat, 0.25],
 ]);
 let carEnv: THREE.Texture | null = null;
+let envScale = 1; // night dims the showroom reflections — the sky is dark
 
 export function registerCarMaterial(mat: THREE.MeshStandardMaterial, intensity: number): void {
   carMats.push(mat);
   ENV_INTENSITY.set(mat, intensity);
   if (carEnv) {
     mat.envMap = carEnv;
-    mat.envMapIntensity = intensity;
+    mat.envMapIntensity = intensity * envScale;
     mat.needsUpdate = true;
   }
 }
@@ -75,9 +102,14 @@ export function setCarEnvMap(tex: THREE.Texture): void {
   carEnv = tex;
   for (const m of carMats) {
     m.envMap = tex;
-    m.envMapIntensity = ENV_INTENSITY.get(m) ?? 0.5;
+    m.envMapIntensity = (ENV_INTENSITY.get(m) ?? 0.5) * envScale;
     m.needsUpdate = true;
   }
+}
+
+export function applyCarEnvScale(scale: number): void {
+  envScale = scale;
+  for (const m of carMats) m.envMapIntensity = (ENV_INTENSITY.get(m) ?? 0.5) * scale;
 }
 
 export const wheelMat = new THREE.MeshStandardMaterial({ color: 0x191b1f, roughness: 0.85 });

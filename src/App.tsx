@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Game } from './game/Game';
+import type { TimeOfDay } from './game/daynight';
 import { LEVELS, type LevelId } from './game/levels';
 import { GameState } from './game/types';
 import { parseReplayFile, type ReplayFile } from './game/replay';
@@ -24,9 +25,21 @@ export default function App() {
   const [race, setRace] = useState<RaceStanding | null>(null);
   const [replaying, setReplaying] = useState(false);
   const [cineCam, setCineCam] = useState(false);
+  const [timeOfDay, setTimeOfDayState] = useState<TimeOfDay>(() =>
+    localStorage.getItem('cj-tod') === 'night' ? 'night' : 'day',
+  );
+  const todRef = useRef(timeOfDay); // the remount effect reads the live value
+
+  const setTimeOfDay = useCallback((t: TimeOfDay) => {
+    setTimeOfDayState(t);
+    todRef.current = t;
+    localStorage.setItem('cj-tod', t);
+    gameRef.current?.setTimeOfDay(t);
+  }, []);
 
   useEffect(() => {
     const game = new Game(containerRef.current!, LEVELS[levelId]);
+    game.setTimeOfDay(todRef.current);
     gameRef.current = game;
     levelRef.current = levelId;
     // a new engine instance always starts idle — resync the HUD
@@ -148,6 +161,8 @@ export default function App() {
         race={level.mode.kind === 'race' ? race : null}
         replaying={replaying}
         cineCam={cineCam}
+        timeOfDay={timeOfDay}
+        onSetTimeOfDay={setTimeOfDay}
         onCashDone={(id) => setCash((list) => list.filter((c) => c.id !== id))}
       />
     </>

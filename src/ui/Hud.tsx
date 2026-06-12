@@ -1,4 +1,5 @@
 import { GameState, type ModeKind } from '../game/types';
+import type { TimeOfDay } from '../game/daynight';
 import type { CashFloatData, RaceStanding, ReportData } from '../game/events';
 import { LEVEL_LABELS, type LevelId } from '../game/levels';
 import { BoostBar, CrashbreakerBar, RaceChip, RaceTagline, ScoreChip } from './chips';
@@ -25,6 +26,8 @@ interface HudProps {
   race: RaceStanding | null;
   replaying: boolean;
   cineCam: boolean; // takedown-cam beat — letterbox outside crashtime
+  timeOfDay: TimeOfDay;
+  onSetTimeOfDay: (t: TimeOfDay) => void;
   onCashDone: (id: number) => void;
 }
 
@@ -32,7 +35,8 @@ interface HudProps {
  *  cash floats) with the mode-specific chips composed in. */
 export function Hud({
   state, mode, damage, goldTarget, levelId, onSelectLevel,
-  multiplier, boost, flash, report, cash, crashbreaker, race, replaying, cineCam, onCashDone,
+  multiplier, boost, flash, report, cash, crashbreaker, race, replaying, cineCam,
+  timeOfDay, onSetTimeOfDay, onCashDone,
 }: HudProps) {
   const cine = state === GameState.Crash || cineCam;
   const inRun = state !== GameState.Idle && state !== GameState.Done;
@@ -55,6 +59,23 @@ export function Hud({
       <div className="tag">
         <b>CRASH JUNCTION</b>
         react + three.js + cannon-es
+      </div>
+
+      <div className="daynight">
+        <button
+          className={timeOfDay === 'day' ? 'active' : undefined}
+          onClick={() => onSetTimeOfDay('day')}
+          title="Day"
+        >
+          &#9728; DAY
+        </button>
+        <button
+          className={timeOfDay === 'night' ? 'active' : undefined}
+          onClick={() => onSetTimeOfDay('night')}
+          title="Night"
+        >
+          &#9789; NIGHT
+        </button>
       </div>
 
       {replaying && <div className="replay">&#9210; REPLAY &middot; ESC EXITS</div>}
