@@ -126,6 +126,7 @@ export class RaceDirector {
     rivals: { actor: Actor; skill: number }[],
     private events: Emitter<GameEvents>,
     private onFinish: (position: number) => void,
+    private repair: (a: Actor) => void,
   ) {
     this.laps = race.laps;
     this.secs = race.sections;
@@ -188,6 +189,7 @@ export class RaceDirector {
         r.a.destabilizedByPlayer = false;
         r.loose = false;
         r.a.body.collisionFilterMask = ~GROUP_DECOR;
+        this.repair(r.a); // a taken-down rival comes back good as new
       }
       return;
     }

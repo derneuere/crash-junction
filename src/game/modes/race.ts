@@ -21,7 +21,11 @@ export class RaceMode implements GameMode {
       a.body.wakeUp();
       return { actor: a, skill: r.skill };
     });
-    this.director = new RaceDirector(def, host.player, rivals, host.events, (pos) => this.onRaceFinish(pos));
+    this.director = new RaceDirector(
+      def, host.player, rivals, host.events,
+      (pos) => this.onRaceFinish(pos),
+      (a) => host.repairActor(a), // taken-down rivals respawn good as new
+    );
   }
 
   fixedStep(dt: number, state: GameState): void {
@@ -59,7 +63,7 @@ export class RaceMode implements GameMode {
     const sp = Math.hypot(v.x, v.z);
     if (this.director.playerOffTrackDistance() > 0 || sp < 8) {
       this.director.respawnPlayer(this.host.control, Math.min(Math.max(this.handbackSpeed, 10), LAUNCH_SPEED));
-      this.host.repairPlayer();
+      this.host.repairActor(this.host.player);
     }
   }
 
@@ -71,7 +75,7 @@ export class RaceMode implements GameMode {
     // the crash cam is just a beat — reset-pair respawn back onto the
     // track, good as new, and keep racing
     this.director.respawnPlayer(this.host.control);
-    this.host.repairPlayer();
+    this.host.repairActor(this.host.player);
     return 'resume';
   }
 

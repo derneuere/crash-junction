@@ -84,6 +84,9 @@ export interface ContactOutcome {
   /** Extra horizontal shove (m/s) down the rammer's line, on top of the
    *  physics impulse — the Burnout shunt kick. Never vertical. */
   shoveOther: number;
+  /** The mirrored kick when SELF is the one slammed — the sideways force
+   *  that makes a slam felt without scripting a wreck. */
+  shoveSelf: number;
   /** Shallow wall touch: scrub a little speed, reroute along the wall. */
   wallGlance: boolean;
 }
@@ -97,6 +100,7 @@ const none = (): ContactOutcome => ({
   destabilizeSelf: 0,
   destabilizeOther: 0,
   shoveOther: 0,
+  shoveSelf: 0,
   wallGlance: false,
 });
 
@@ -178,13 +182,20 @@ export function resolveRaceContact(ctx: ContactContext): ContactOutcome {
           out.destabilizeOther = 2.2; // shunt mode — they fight the slide
           out.shoveOther = Math.min(12, 5 + impact * 0.6); // the ram's kick (#1: stronger)
         } else {
-          out.destabilizeSelf = 1.5; // slammed — hang on (steering degraded, not dead)
+          // slammed: a sideways kick + a fragile beat — never a scripted
+          // wreck. Whether it becomes a crash is up to what you hit next.
+          out.destabilizeSelf = 1.5;
+          out.shoveSelf = Math.min(9, 4 + impact * 0.4);
         }
       }
     } else if (isWall) {
       const { closing, steep } = wallApproach(self, ctx.wallDir, impact);
       if (self.destabilized > 0) {
-        if (closing > 3.5 && !graced) out.wreckSelf = true; // no hands on the wheel — that's a crash
+        // fragile, not doomed: the old any-angle 3.5 turned every wall kiss
+        // during a slide into a wreck + respawn beat. It still takes a
+        // reasonably square hit — just much less than a clean one.
+        if (closing > 4.5 && steep > 0.3 && !graced) out.wreckSelf = true;
+        else out.wallGlance = true;
       } else if (closing > 7 && steep > 0.45 && !graced) {
         out.wreckSelf = true; // hard and frontal
       } else {

@@ -22,9 +22,9 @@ export interface ModeHost {
   /** Spawn an extra vehicle wired into the core collision pipeline —
    *  rivals MUST go through this or they'd be judged as walls. */
   spawnVehicle(spawn: VehicleSpawn): Actor;
-  /** Fully repair the player's car (un-crumple, re-hang panels, refit
-   *  wheels) — used by race respawns. */
-  repairPlayer(): void;
+  /** Fully repair a vehicle (un-crumple, re-hang panels, refit wheels) —
+   *  race respawns body-shop the player and taken-down rivals alike. */
+  repairActor(a: Actor): void;
   /** End the run: sets GameState.Done, emits 'state' then 'report'. */
   finish(report: ReportData): void;
 }

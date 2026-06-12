@@ -564,23 +564,26 @@ export class Game {
         this.register(a);
         return a;
       },
-      repairPlayer: () => this.repairPlayer(),
+      repairActor: (a) => this.repairActor(a),
       finish: (report) => this.finishRun(report),
     };
   }
 
-  /** Body-shop the player: reclaim the loose parts that are this car's torn
-   *  panels (they share meshes), then restore the car itself. */
-  private repairPlayer(): void {
-    const p = this.player;
-    if (!p) return;
-    const panelMeshes = new Set(p.panels.filter((pl) => pl.detached).map((pl) => pl.mesh));
+  /** Body-shop a vehicle: reclaim the loose parts that are its torn panels
+   *  (they share meshes), then restore the car itself. Race respawns use
+   *  this for the player AND for taken-down rivals. */
+  private repairActor(a: Actor): void {
+    const panelMeshes = new Set(a.panels.filter((pl) => pl.detached).map((pl) => pl.mesh));
     this.looseParts = this.looseParts.filter((lp) => {
       if (!panelMeshes.has(lp.mesh as THREE.Mesh)) return true;
       this.phys.world.removeBody(lp.body);
       return false;
     });
-    repairVehicle(p);
+    repairVehicle(a);
+  }
+
+  private repairPlayer(): void {
+    if (this.player) this.repairActor(this.player);
   }
 
   private register(a: Actor): void {
@@ -751,6 +754,26 @@ export class Game {
         }
         if (oa?.isPlayer) self.destabilizedByPlayer = true;
         self.destabilized = Math.max(self.destabilized, out.destabilizeSelf);
+        if (out.shoveSelf > 0 && oa) {
+          // the slam's kick, shoveOther mirrored: oa is the shover, self the
+          // victim — blended toward shover→victim so it reads as a sideways
+          // barge, still strictly horizontal
+          const v = oa.body.velocity;
+          const sp = Math.hypot(v.x, v.z) || 1;
+          const sb = self.body;
+          const ox = sb.position.x - oa.body.position.x;
+          const oz = sb.position.z - oa.body.position.z;
+          const ol = Math.hypot(ox, oz) || 1;
+          let dx = v.x / sp + (ox / ol) * 0.8;
+          let dz = v.z / sp + (oz / ol) * 0.8;
+          const dl = Math.hypot(dx, dz) || 1;
+          dx /= dl;
+          dz /= dl;
+          sb.velocity.x += dx * out.shoveSelf;
+          sb.velocity.z += dz * out.shoveSelf;
+          if (sb.velocity.y > 1.2) sb.velocity.y = 1.2;
+          sb.wakeUp();
+        }
       }
       if (out.wreckOther && oa) this.markCrashed(oa);
       if (out.wreckSelf) {
