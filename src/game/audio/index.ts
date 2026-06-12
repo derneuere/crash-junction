@@ -225,7 +225,7 @@ export class GameAudio {
 
       // continuous layers
       const vol = f.driving ? (f.boosting ? 0.16 : f.throttle ? 0.125 : 0.07) : 0;
-      this.engine!.update(f.speed, vol, f.driving && (f.throttle || f.boosting), this.warp);
+      this.engine!.update(f.speed, vol, f.driving && (f.throttle || f.boosting), this.warp, f.dt);
       // squeal continuity: drift chains pass through zero slip and curbs
       // flick the suspension airborne for a frame — neither should chop the
       // squeal. A floor while drifting + a coyote window over ground gaps

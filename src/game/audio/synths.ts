@@ -62,6 +62,18 @@ const RUMBLE_H = [0, 1, 0.45, 0.18, 0.07];
 // cadence while the sim keeps its quick torque steps.
 const VGEAR_TOPS = [11, 22, 34, 48]; // m/s ceiling per heard gear
 
+// …and its own ACCELERATION. Mapping the bands onto the raw sim speed
+// still machine-gunned every launch — the car is flat-out in under 3 s
+// (1.5 s on boost), so all three audible upshifts landed in the first
+// couple of seconds. The note instead follows a rate-limited copy of the
+// sim speed: it pulls up through the bands at HEARD_ACCEL, each gear
+// holding a real rev window, and the last gear only arrives once the car
+// has genuinely been flat-out for a while. Downward it chases faster than
+// the hardest brake (26 m/s²) so slowing never sounds laggy. Presentation
+// only — the sim speed itself is untouched.
+const HEARD_ACCEL = 6.5; // m/s² — heard climb 0→top ~6 s, 0→boost-top ~7.4 s
+const HEARD_DECEL = 30; // m/s²
+
 /** Engine firing frequency across a virtual-gear band (Hz, before slow-mo
  *  warp). Deliberately low — the fundamental lives at 45..160 Hz and the
  *  character comes from the harmonics, not a screaming root note. */
@@ -339,6 +351,7 @@ export class EngineSound {
   private synth: EngineSynth;
   private built = false;
   private flavor: EngineFlavor = 'stock';
+  private heardSpeed = 0; // rate-limited copy of the sim speed (HEARD_ACCEL)
   private layers: { src: AudioBufferSourceNode; gain: GainNode; norm: number }[] = [];
   private lp: BiquadFilterNode | null = null;
   private gain: GainNode | null = null;
@@ -442,18 +455,24 @@ export class EngineSound {
     return true;
   }
 
-  update(speed: number, vol: number, throttle: boolean, warp: number): void {
+  update(speed: number, vol: number, throttle: boolean, warp: number, dt: number): void {
+    // the heard gearbox pulls, it doesn't teleport: chase the sim speed
+    // under the rate limits, and feed the result to whichever voice plays
+    const d = speed - this.heardSpeed;
+    this.heardSpeed += Math.max(-HEARD_DECEL * dt, Math.min(HEARD_ACCEL * dt, d));
+    const heard = this.heardSpeed;
+
     if (!this.built && (vol <= 0 || !this.tryBuild())) {
-      this.synth.update(speed, vol, throttle, warp);
+      this.synth.update(heard, vol, throttle, warp);
       return;
     }
     // sampler active — if the synth fallback ever sounded, this fades it out
-    this.synth.update(speed, 0, false, warp);
+    this.synth.update(heard, 0, false, warp);
 
     let g = 0;
-    while (g < VGEAR_TOPS.length - 1 && speed > VGEAR_TOPS[g]) g++;
+    while (g < VGEAR_TOPS.length - 1 && heard > VGEAR_TOPS[g]) g++;
     const lo = g === 0 ? 0 : VGEAR_TOPS[g - 1];
-    const vrpm = Math.max(0.25, Math.min(1, 0.25 + (0.75 * (speed - lo)) / (VGEAR_TOPS[g] - lo)));
+    const vrpm = Math.max(0.25, Math.min(1, 0.25 + (0.75 * (heard - lo)) / (VGEAR_TOPS[g] - lo)));
 
     const t = this.ctx.currentTime;
     const spec = ENGINE_FLAVORS[this.flavor];
