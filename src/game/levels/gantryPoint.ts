@@ -211,13 +211,17 @@ export const gantryPoint: LevelDef = {
       width: 22, // four Burnout lanes, same as SILVER LAKE RING — room for combat
       sections: SECTIONS,
       // the GDD's full five-car grid (§2): a deeper pack than SILVER LAKE so
-      // the slow pockets concertina — "takedowns everywhere" needs targets
+      // the slow pockets concertina — "takedowns everywhere" needs targets.
+      // Personalities mirror SILVER LAKE's spread (pacesetter / headhunter /
+      // cruiser / bully) plus a mid-temper scrapper: the quickest car races
+      // mostly clean at the sharp end while the hunters live in the pack,
+      // where the dock pockets concertina the field into reach.
       rivals: [
-        { color: 0x2266dd, skill: 0.97 },
-        { color: 0xeeaa22, skill: 0.94 },
-        { color: 0x22bb55, skill: 0.92 },
-        { color: 0x8844cc, skill: 0.9 },
-        { color: 0xd4408a, skill: 0.87 },
+        { color: 0x2266dd, skill: 0.97, aggression: 0.5 }, // the pacesetter — wins on pace, scraps only when crowded
+        { color: 0xeeaa22, skill: 0.94, aggression: 0.85 }, // the headhunter — hunts the player through the pockets
+        { color: 0x22bb55, skill: 0.92, aggression: 0.3 }, // the cruiser — minds its racing line
+        { color: 0x8844cc, skill: 0.9, aggression: 0.95 }, // the bully — lives for the slam
+        { color: 0xd4408a, skill: 0.87, aggression: 0.6 }, // the scrapper — slow, but trades paint to hold the spot
       ],
       shortcuts: SHORTCUTS,
       signatures: SIGNATURES,

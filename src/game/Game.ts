@@ -773,6 +773,7 @@ export class Game {
         // sliding is still the player's takedown when it finds the wall
         if (self.isPlayer || self.destabilizedByPlayer) oa.destabilizedByPlayer = true;
         oa.destabilized = Math.max(oa.destabilized, out.destabilizeOther);
+        oa.destabilizedBy = self.body.id;
         if (out.shoveOther > 0) {
           // the ram's kick — strictly horizontal, nobody gets lofted off a
           // bumper. Direction blends the rammer's line with rammer→victim,
@@ -803,6 +804,7 @@ export class Game {
         }
         if (oa?.isPlayer) self.destabilizedByPlayer = true;
         self.destabilized = Math.max(self.destabilized, out.destabilizeSelf);
+        if (oa) self.destabilizedBy = oa.body.id;
         if (out.shoveSelf > 0 && oa) {
           // the slam's kick, shoveOther mirrored: oa is the shover, self the
           // victim — blended toward shover→victim so it reads as a sideways
@@ -936,6 +938,7 @@ export class Game {
     a.crashed = true;
     a.destabilized = 0; // a wreck is past losing control
     a.destabilizedByPlayer = false;
+    a.destabilizedBy = 0;
     a.body.collisionFilterMask = -1;
     if (!a.isPlayer && a.kind === 'vehicle') this.mode.score?.chargeCrashbreaker();
   }
@@ -1106,6 +1109,7 @@ export class Game {
       if (a.destabilized > 0) continue;
       a.destabilized = 0;
       a.destabilizedByPlayer = false;
+      a.destabilizedBy = 0;
       if (a.isPlayer && !a.crashed) {
         // hand the wheel back pointing the way we're sliding
         const v = a.body.velocity;

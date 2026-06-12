@@ -43,10 +43,13 @@ export const raceway: LevelDef = {
       laps: 3,
       width: 22, // four generous lanes — Burnout roads, room for combat
       sections: SECTIONS,
+      // personalities, B3-style: skill is honest pace, aggression is how
+      // often they go for the shunt/slam when somebody's in reach
       rivals: [
-        { color: 0x2266dd, skill: 0.97 },
-        { color: 0xeeaa22, skill: 0.93 },
-        { color: 0x22bb55, skill: 0.89 },
+        { color: 0x2266dd, skill: 0.97, aggression: 0.55 }, // the pacesetter — quick, scraps when crowded
+        { color: 0xeeaa22, skill: 0.93, aggression: 0.8 }, // the headhunter
+        { color: 0x22bb55, skill: 0.89, aggression: 0.25 }, // the cruiser — mostly racing clean
+        { color: 0x9933cc, skill: 0.91, aggression: 0.95 }, // the bully — lives for the slam
       ],
     },
   },

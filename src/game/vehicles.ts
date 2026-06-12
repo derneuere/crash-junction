@@ -132,7 +132,7 @@ function makeActor(
     kind, body, group, spec: null, model: null, wheels: [], susp: [], deformables: [], panels: [],
     nightLights: null, lastSpeed: 0, brakeT: 0,
     q0: body.quaternion.clone(), scripted: null, started: false, curSpeed: 0,
-    isPlayer: false, crashed: false, destabilized: 0, destabilizedByPlayer: false,
+    isPlayer: false, crashed: false, destabilized: 0, destabilizedByPlayer: false, destabilizedBy: 0,
     popped: 0, damageLvl: 0, smokeT: 0,
     exploded: false, fuse: null, valueMult, cashLeft,
   };
