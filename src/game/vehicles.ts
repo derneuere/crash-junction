@@ -259,6 +259,28 @@ const _lp = new THREE.Vector3();
 const _ldir = new THREE.Vector3();
 const _wq = new THREE.Quaternion();
 
+/** Map every vertex slot to the first slot sharing its base position (1 mm
+ *  grid). The baked models are flat-shaded, so each corner exists as 2–7
+ *  copies with split normals — the player hull has 2984 slots on 740
+ *  positions. The crumple's per-vertex randomness must move those copies as
+ *  one, or every shared edge tears and a hard wreck shreds into confetti. */
+function buildWeld(base: Float32Array): Uint32Array {
+  const n = base.length / 3;
+  const weld = new Uint32Array(n);
+  const seen = new Map<string, number>();
+  for (let i = 0; i < n; i++) {
+    const key = `${Math.round(base[i * 3] * 1000)}|${Math.round(base[i * 3 + 1] * 1000)}|${Math.round(base[i * 3 + 2] * 1000)}`;
+    const rep = seen.get(key);
+    if (rep === undefined) {
+      seen.set(key, i);
+      weld[i] = i;
+    } else {
+      weld[i] = rep;
+    }
+  }
+  return weld;
+}
+
 /** Crumple the hull around a world-space impact point. `impactDir` is the
  *  world direction the hitting matter travels (relative velocity) — vertices
  *  near the hit fold mostly along it, BP-style, so a front-left wall hit
@@ -284,6 +306,7 @@ export function deformActor(actor: Actor, worldPoint: THREE.Vector3, strength: n
     const pos = geo.attributes.position as THREE.BufferAttribute;
     const col = geo.attributes.color as THREE.BufferAttribute;
     const base = part.base;
+    const weld = part.weld ?? (part.weld = buildWeld(base));
     let touched = false;
 
     for (let i = 0; i < pos.count; i++) {
@@ -294,28 +317,37 @@ export function deformActor(actor: Actor, worldPoint: THREE.Vector3, strength: n
       let f = 1 - d / R;
       f *= f;
 
-      _dir.set(_v.x, _v.y * 0.35, _v.z);
-      if (_dir.lengthSq() < 0.001) _dir.set(0, -1, 0);
-      _dir.normalize().negate(); // push toward hull core
-      if (hasDir) _dir.multiplyScalar(0.4).addScaledVector(_ldir, 0.85).normalize();
-      const amt = strength * CRUSH_SCALE * f * (0.75 + Math.random() * 0.5);
-      _v.addScaledVector(_dir, amt);
-      _v.x += (Math.random() - 0.5) * 0.06 * f; // crumple jitter
-      _v.y += (Math.random() - 0.5) * 0.06 * f;
-      _v.z += (Math.random() - 0.5) * 0.06 * f;
+      const rep = weld[i];
+      if (rep !== i) {
+        // a flat-shading copy of an earlier corner (rep < i, so it has been
+        // displaced this pass): take its position verbatim to keep shared
+        // edges stitched. Paint scuffs per slot — copies can belong to
+        // differently-colored prims.
+        pos.setXYZ(i, pos.getX(rep), pos.getY(rep), pos.getZ(rep));
+      } else {
+        _dir.set(_v.x, _v.y * 0.35, _v.z);
+        if (_dir.lengthSq() < 0.001) _dir.set(0, -1, 0);
+        _dir.normalize().negate(); // push toward hull core
+        if (hasDir) _dir.multiplyScalar(0.4).addScaledVector(_ldir, 0.85).normalize();
+        const amt = strength * CRUSH_SCALE * f * (0.75 + Math.random() * 0.5);
+        _v.addScaledVector(_dir, amt);
+        _v.x += (Math.random() - 0.5) * 0.06 * f; // crumple jitter
+        _v.y += (Math.random() - 0.5) * 0.06 * f;
+        _v.z += (Math.random() - 0.5) * 0.06 * f;
 
-      const bx = base[i * 3];
-      const by = base[i * 3 + 1];
-      const bz = base[i * 3 + 2];
-      const dx = _v.x - bx;
-      const dy = _v.y - by;
-      const dz = _v.z - bz;
-      const dl = Math.sqrt(dx * dx + dy * dy + dz * dz);
-      if (dl > CRUSH_MAX) {
-        const s = CRUSH_MAX / dl;
-        _v.set(bx + dx * s, by + dy * s, bz + dz * s);
+        const bx = base[i * 3];
+        const by = base[i * 3 + 1];
+        const bz = base[i * 3 + 2];
+        const dx = _v.x - bx;
+        const dy = _v.y - by;
+        const dz = _v.z - bz;
+        const dl = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        if (dl > CRUSH_MAX) {
+          const s = CRUSH_MAX / dl;
+          _v.set(bx + dx * s, by + dy * s, bz + dz * s);
+        }
+        pos.setXYZ(i, _v.x, _v.y, _v.z);
       }
-      pos.setXYZ(i, _v.x, _v.y, _v.z);
 
       const k = Math.max(0.35, 1 - 0.45 * f); // scuffed paint
       col.setXYZ(i, col.getX(i) * k + 0.05 * f, col.getY(i) * k + 0.045 * f, col.getZ(i) * k + 0.04 * f);
