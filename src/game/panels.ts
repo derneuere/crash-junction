@@ -1,7 +1,8 @@
 import * as THREE from 'three';
 import * as CANNON from 'cannon-es';
 import { CRUSH_SCALE } from './constants';
-import type { Actor, DeformablePart, PanelKind, PanelState, Variant } from './types';
+import type { Actor, DeformablePart, PanelKind, PanelState, Variant, VehicleSpec } from './types';
+import type { PanelFace, VehicleModel } from './models';
 import { simRand } from './rng';
 import { hullMat, makeColoredBox } from './geometry';
 
@@ -30,6 +31,8 @@ interface PanelDef {
   outward: [number, number, number];
   maxAngle: number;
   threshold: number;
+  /** Rest rotation about the hinge axis — lays a lid on the hood slope. */
+  tilt?: number;
 }
 
 const DOOR_ANGLE = 1.047; // 60° — BP mfMaxJointAngle for doors/bonnet/boot
@@ -71,14 +74,92 @@ const LAYOUTS: Record<Variant, () => PanelDef[]> = {
   tanker: tankerPanels,
 };
 
+// ---------- model-fitted layouts ----------
+// Same panel sets and BP-derived hinge/threshold behavior as the tables
+// above, but the boxes are rigged to the baked model's measured landmarks
+// (models.ts PanelMetrics) so they hug each model's actual bodywork — the
+// five sedan-pool models, the player's SportsCar2 and the transport bus all
+// have different proportions. The tables remain the procedural-hull fallback.
+
+const PANEL_T = 0.05; // door/lid skin thickness
+const BUMPER_D = 0.12;
+const EDGE = 0.08; // breathing room between a panel edge and its neighbors
+
+function fittedBumper(face: PanelFace, z: number, sign: -1 | 1, threshold: number): PanelDef {
+  // wrap the measured face, hugging its lower edge (tall faces — the bus
+  // front — keep a bumper-sized strip rather than armoring the whole slab)
+  const h = Math.min(Math.max(face.y1 - face.y0, 0.14), 0.24);
+  return {
+    kind: 'bumper',
+    size: [face.halfW * 2 * 0.9, h, BUMPER_D],
+    center: [0, face.y0 + h / 2 + 0.04, z],
+    hingeOffset: [0, h / 2, 0],
+    axis: [1, 0, 0],
+    flapDir: -sign,
+    outward: [0, 0, sign],
+    maxAngle: BUMPER_ANGLE,
+    threshold,
+  };
+}
+
+function fittedSedanPanels(model: VehicleModel, spec: VehicleSpec): PanelDef[] {
+  const m = model.panelMetrics;
+  const r = spec.wheelRadius;
+
+  // doors: the side shell between the arches, hung from the window line
+  const dz0 = m.door.z0 + EDGE;
+  const dz1 = m.door.z1 - EDGE;
+  const doorLen = dz1 - dz0;
+  const doorH = Math.min(m.door.waistY - m.door.sillY, 0.62 * (m.maxY - m.minY));
+  const doorY = m.door.waistY - doorH / 2;
+
+  // bonnet: bumper face → windshield base (≈ over the front arch); boot:
+  // rear arch → bumper face. Both lie on their probed surface lines.
+  const bz1 = model.arch.zFront + r;
+  const bonnetLen = bz1 - (m.noseZ + BUMPER_D + EDGE);
+  const tz0 = model.arch.zRear;
+  const bootLen = m.tailZ - BUMPER_D - EDGE - tz0;
+  const lidW = m.door.x * 2 * 0.66; // bonnet/boot stop short of the fenders
+
+  return [
+    { kind: 'door', size: [PANEL_T, doorH, doorLen], center: [-m.door.x, doorY, (dz0 + dz1) / 2], hingeOffset: [0, 0, -doorLen / 2], axis: [0, 1, 0], flapDir: -1, outward: [-1, 0, 0], maxAngle: DOOR_ANGLE, threshold: 0.22 },
+    { kind: 'door', size: [PANEL_T, doorH, doorLen], center: [m.door.x, doorY, (dz0 + dz1) / 2], hingeOffset: [0, 0, -doorLen / 2], axis: [0, 1, 0], flapDir: 1, outward: [1, 0, 0], maxAngle: DOOR_ANGLE, threshold: 0.22 },
+    { kind: 'bonnet', size: [lidW, PANEL_T, bonnetLen], center: [0, m.bonnet.y, bz1 - bonnetLen / 2], hingeOffset: [0, 0, bonnetLen / 2], axis: [1, 0, 0], flapDir: 1, outward: [0, 1, 0], maxAngle: DOOR_ANGLE, threshold: 0.3, tilt: -Math.atan(m.bonnet.slope) },
+    { kind: 'boot', size: [lidW, PANEL_T, bootLen], center: [0, m.boot.y, tz0 + bootLen / 2], hingeOffset: [0, 0, -bootLen / 2], axis: [1, 0, 0], flapDir: -1, outward: [0, 1, 0], maxAngle: DOOR_ANGLE, threshold: 0.2, tilt: -Math.atan(m.boot.slope) },
+    fittedBumper(m.nose, m.noseZ, -1, 0.16),
+    fittedBumper(m.tail, m.tailZ, 1, 0.16),
+  ];
+}
+
+function fittedBusPanels(model: VehicleModel): PanelDef[] {
+  const m = model.panelMetrics;
+  // single curbside door — the measured band runs nose → front arch
+  const dz0 = m.door.z0 + EDGE;
+  const dz1 = m.door.z1 - EDGE;
+  const len = Math.max(dz1 - dz0, 0.6);
+  const doorH = Math.min(m.door.waistY - m.door.sillY, 0.62 * (m.maxY - m.minY));
+  return [
+    { kind: 'door', size: [PANEL_T, doorH, len], center: [m.door.x, m.door.waistY - doorH / 2, dz0 + len / 2], hingeOffset: [0, 0, -len / 2], axis: [0, 1, 0], flapDir: 1, outward: [1, 0, 0], maxAngle: DOOR_ANGLE, threshold: 0.22 * TRUCK },
+    fittedBumper(m.nose, m.noseZ, -1, 0.16 * TRUCK),
+    fittedBumper(m.tail, m.tailZ, 1, 0.16 * TRUCK),
+  ];
+}
+
+function panelDefs(spec: VehicleSpec, model: VehicleModel | null): PanelDef[] {
+  if (model && spec.variant === 'sedan') return fittedSedanPanels(model, spec);
+  if (model && spec.variant === 'bus') return fittedBusPanels(model);
+  return LAYOUTS[spec.variant]();
+}
+
 export function buildPanels(
   group: THREE.Group,
-  variant: Variant,
+  spec: VehicleSpec,
   color: number,
   deformables: DeformablePart[],
+  model: VehicleModel | null,
 ): PanelState[] {
   const out: PanelState[] = [];
-  for (const def of LAYOUTS[variant]()) {
+  for (const def of panelDefs(spec, model)) {
     const mesh = new THREE.Mesh(makeColoredBox(...def.size, color), hullMat);
     mesh.castShadow = true;
     const pivot = new THREE.Group();
@@ -88,6 +169,7 @@ export function buildPanels(
       def.center[2] + def.hingeOffset[2],
     );
     mesh.position.set(-def.hingeOffset[0], -def.hingeOffset[1], -def.hingeOffset[2]);
+    if (def.tilt) mesh.quaternion.setFromAxisAngle(new THREE.Vector3(...def.axis), def.tilt);
     pivot.add(mesh);
     group.add(pivot);
     const pos = mesh.geometry.attributes.position as THREE.BufferAttribute;
@@ -108,6 +190,7 @@ export function buildPanels(
       outward: new THREE.Vector3(...def.outward),
       threshold: def.threshold,
       home: mesh.position.clone(),
+      homeQ: mesh.quaternion.clone(),
       damage: 0,
       angle: 0,
       detached: false,

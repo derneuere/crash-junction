@@ -143,7 +143,7 @@ export function createVehicle(
     registerDeformable(tank, deformables);
   }
 
-  const panels = buildPanels(group, spawn.variant, spawn.color, deformables);
+  const panels = buildPanels(group, spec, spawn.color, deformables, model);
 
   if (isPlayer && !model) {
     const wing = new THREE.Mesh(
@@ -347,7 +347,7 @@ export function repairVehicle(actor: Actor): void {
     if (p.detached) {
       p.pivot.add(p.mesh); // re-parent from the scene back onto the hinge
       p.mesh.position.copy(p.home);
-      p.mesh.quaternion.set(0, 0, 0, 1);
+      p.mesh.quaternion.copy(p.homeQ);
     }
     p.detached = false;
     p.damage = 0;

@@ -142,6 +142,7 @@ export interface PanelState {
   outward: THREE.Vector3; // group-local outward normal (detach kick direction)
   threshold: number; // accumulated crumple (m) to detach — BP detach thresholds
   home: THREE.Vector3; // pivot-local rest position (for repairs)
+  homeQ: THREE.Quaternion; // pivot-local rest orientation (lid tilt)
   damage: number;
   angle: number;
   detached: boolean;
