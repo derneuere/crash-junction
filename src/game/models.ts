@@ -337,7 +337,29 @@ function bakeModel(gltf: { scene: THREE.Group }, cfg: ModelConfig, spec: Vehicle
     interior: buildInterior(metrics, arch, spec, merged),
   };
   model.panelCuts = cutPanelTemplates(model, panelDefs(spec, model));
+  applyGlassGroups(merged, glassRanges); // after the cuts replace the index
   return model;
+}
+
+/** Split the hull's index into body/glass material groups so one mesh can
+ *  wear glossy paint AND mirror glass ([hullMat, glassMat]). Must rerun
+ *  after any index surgery — panel cuts, pane blowouts, repair reglaze —
+ *  because groups address index positions, not vertices. */
+export function applyGlassGroups(geo: THREE.BufferGeometry, glassRanges: [number, number][]): void {
+  const idx = geo.index;
+  if (!idx || !idx.count || !glassRanges.length) return;
+  const isGlass = (v: number) => glassRanges.some(([s, e]) => v >= s && v < e);
+  geo.clearGroups();
+  let runStart = 0;
+  let runMat = isGlass(idx.getX(0)) ? 1 : 0;
+  for (let t = 3; t <= idx.count; t += 3) {
+    const mat = t === idx.count ? -1 : isGlass(idx.getX(t)) ? 1 : 0;
+    if (mat !== runMat) {
+      geo.addGroup(runStart, t - runStart, runMat);
+      runStart = t;
+      runMat = mat;
+    }
+  }
 }
 
 const FACE_DEPTH = 0.2; // how deep a slice of the nose/tail is "the bumper face"
@@ -605,17 +627,21 @@ function cutPanelTemplates(model: VehicleModel, defs: PanelDef[]): (PanelCut | n
 
 const _cv = new THREE.Vector3();
 
-// ---------- interior blocks ----------
+// ---------- interior ----------
 // The hull is a one-sided shell, so every wound — torn bonnet, missing
 // bumper, blown-out window — used to show daylight straight through the
-// car. Bake a few dark blocker masses inside each model: engine bay under
-// the bonnet, cabin in the greenhouse, trunk under the boot (one big cabin
-// for the bus). They ride the deformable list like the hull, so they
-// crumple and char with the body.
+// car. Bake a stripped-chassis interior instead, like a car with its
+// bodywork pulled: a bare-metal floor platform, engine bay and trunk
+// masses (metal group → metalMat), and dash, seats and a steering wheel
+// (cabin group → cabinMat). Everything rides the deformable list, so it
+// crumples and chars with the body.
 
-const ENGINE_TINT = 0x201d1a; // warm dark — machinery
-const CABIN_TINT = 0x15171a;
-const TRUNK_TINT = 0x17191c;
+const FLOOR_TINT = 0x969ca4; // bare aluminum platform
+const ENGINE_TINT = 0x4a4e54;
+const TRUNK_TINT = 0x55585e;
+const DASH_TINT = 0x16181c;
+const SEAT_TINT = 0x2b2f37;
+const WHEEL_TINT = 0x101214;
 
 type BlockOrNull = THREE.BufferGeometry | null;
 
@@ -626,8 +652,8 @@ function buildInterior(
   hull: THREE.BufferGeometry,
 ): THREE.BufferGeometry | null {
   // boxes vs curved bodywork: any guessed width pokes through SOME model,
-  // so each block measures its own safe half-width with inward rays
-  // against the hull over its (y, z) face
+  // so the wide pieces measure their safe half-width with inward rays
+  // against the hull over their (y, z) face
   const mesh = new THREE.Mesh(hull);
   const ray = new THREE.Raycaster();
   const origin = new THREE.Vector3();
@@ -648,43 +674,88 @@ function buildInterior(
     }
     return w;
   };
-  const block = (y0: number, y1: number, z0: number, z1: number, tint: number): BlockOrNull => {
-    const halfW = safeHalfW(y0, y1, z0, z1);
-    if (!isFinite(halfW) || halfW < 0.15 || y1 - y0 < 0.12 || z1 - z0 < 0.12) return null;
-    const g = stripToPosNormal(new THREE.BoxGeometry(halfW * 2, y1 - y0, z1 - z0));
+  const boxAt = (x: number, w: number, y0: number, y1: number, z0: number, z1: number, tint: number): BlockOrNull => {
+    if (w < 0.04 || y1 - y0 < 0.04 || z1 - z0 < 0.04) return null;
+    const g = stripToPosNormal(new THREE.BoxGeometry(w, y1 - y0, z1 - z0));
     applyUniformColor(g, tint);
-    g.translate(0, (y0 + y1) / 2, (z0 + z1) / 2);
+    g.translate(x, (y0 + y1) / 2, (z0 + z1) / 2);
     return g;
   };
+  const metal: BlockOrNull[] = [];
+  const cabin: BlockOrNull[] = [];
 
-  const blocks: BlockOrNull[] = [];
   const sill = m.door.sillY + 0.04;
   const waist = m.door.waistY;
+  const gh = m.maxY - waist; // greenhouse height
+  const dz0 = m.door.z0;
+  const dz1 = m.door.z1;
+  const floorHalfW = Math.min(safeHalfW(sill, waist - 0.05, dz0 + 0.05, dz1 - 0.05) - 0.02, m.door.x - 0.06);
+  if (!isFinite(floorHalfW) || floorHalfW < 0.2) return null; // unmeasurable side — skip dressing
+
+  const seats = (x: number, w: number, zFront: number, zBack: number) => {
+    const top = sill + 0.07;
+    cabin.push(boxAt(x, w, top, top + 0.17, zFront, zBack - 0.1, SEAT_TINT)); // cushion
+    cabin.push(boxAt(x, w, top, waist + 0.3 * gh, zBack - 0.1, zBack, SEAT_TINT)); // backrest
+  };
+  const steeringWheel = (x: number, y: number, z: number, tilt: number) => {
+    const g = stripToPosNormal(new THREE.TorusGeometry(0.155, 0.026, 6, 14));
+    applyUniformColor(g, WHEEL_TINT);
+    g.rotateX(tilt);
+    g.translate(x, y, z);
+    cabin.push(g);
+    cabin.push(boxAt(x, 0.05, y - 0.12, y - 0.02, z - 0.2, z, DASH_TINT)); // column
+  };
+
   if (spec.variant === 'bus') {
-    // slab sides and a near-vertical windshield — one box does
-    blocks.push(block(sill, waist + 0.45 * (m.maxY - waist), m.noseZ + 0.5, m.tailZ - 0.5, CABIN_TINT));
+    metal.push(boxAt(0, floorHalfW * 2, sill, sill + 0.08, m.noseZ + 0.55, m.tailZ - 0.55, FLOOR_TINT));
+    // rear-engine bus: a metal mass behind the last row plugs the tail wound
+    metal.push(boxAt(0, floorHalfW * 2 * 0.9, sill, waist - 0.1, m.tailZ - 1.2, m.tailZ - 0.4, ENGINE_TINT));
+    cabin.push(boxAt(0, floorHalfW * 2 * 0.94, waist - 0.3, waist, m.noseZ + 0.55, m.noseZ + 0.9, DASH_TINT));
+    const driverX = -floorHalfW * 0.5;
+    steeringWheel(driverX, waist - 0.02, m.noseZ + 1.0, -0.9); // bus wheels lie flatter
+    seats(driverX, 0.5, m.noseZ + 1.15, m.noseZ + 1.75);
+    for (let z = m.noseZ + 2.2; z + 0.55 < m.tailZ - 1.3; z += 1.15) {
+      seats(0, floorHalfW * 2 * 0.85, z, z + 0.55);
+    }
   } else {
     const r = spec.wheelRadius;
     // engine/trunk tops stay under the LOW end of each sloped lid line —
-    // and the lines are chords, so the rounded nose/tail dip below them:
-    // generous z insets + an extra drop keep the blocks inside the shell
+    // and the lines are chords, so the rounded nose/tail dip below them
     const bonnetZ1 = arch.zFront + r;
     const bonnetLow = m.bonnet.y - (Math.abs(m.bonnet.slope) * (bonnetZ1 - m.noseZ - FACE_DEPTH)) / 2;
     const bootZ1 = m.tailZ - FACE_DEPTH;
     const bootLow = m.boot.y - (Math.abs(m.boot.slope) * (bootZ1 - arch.zRear)) / 2;
-    blocks.push(block(sill, bonnetLow - 0.09, m.noseZ + 0.18, bonnetZ1 - 0.05, ENGINE_TINT));
-    blocks.push(block(sill, bootLow - 0.09, arch.zRear + 0.1, m.tailZ - 0.18, TRUNK_TINT));
-    // cabin: a dash-height slab the full door band, plus a taller "seats"
-    // mass set back where the greenhouse is high — a single tall box would
-    // punch through the raked windshield (and the rear glass)
-    const len = m.door.z1 - m.door.z0;
-    blocks.push(block(sill, waist - 0.05, m.door.z0 + 0.05, m.door.z1 - 0.05, CABIN_TINT));
-    blocks.push(block(waist - 0.05, waist + 0.45 * (m.maxY - waist), m.door.z0 + 0.42 * len, m.door.z1 - 0.26 * len, CABIN_TINT));
+    const engineHalfW = Math.min(safeHalfW(sill, bonnetLow - 0.09, m.noseZ + 0.18, bonnetZ1 - 0.05), m.nose.halfW) - 0.02;
+    const trunkHalfW = Math.min(safeHalfW(sill, bootLow - 0.09, arch.zRear + 0.1, m.tailZ - 0.18), m.tail.halfW) - 0.02;
+    if (isFinite(engineHalfW)) metal.push(boxAt(0, engineHalfW * 2, sill, bonnetLow - 0.09, m.noseZ + 0.18, bonnetZ1 - 0.05, ENGINE_TINT));
+    if (isFinite(trunkHalfW)) metal.push(boxAt(0, trunkHalfW * 2, sill, bootLow - 0.09, arch.zRear + 0.1, m.tailZ - 0.18, TRUNK_TINT));
+    metal.push(boxAt(0, floorHalfW * 2, sill, sill + 0.07, dz0 + 0.04, dz1 - 0.04, FLOOR_TINT));
+
+    cabin.push(boxAt(0, floorHalfW * 2 * 0.94, waist - 0.26, waist + 0.02, dz0 + 0.04, dz0 + 0.34, DASH_TINT));
+    const driverX = -floorHalfW * 0.5;
+    steeringWheel(driverX, waist + 0.02, dz0 + 0.52, -0.5);
+    const cabMid = (dz0 + dz1) / 2;
+    const seatW = Math.min(0.46, floorHalfW * 0.85);
+    seats(driverX, seatW, cabMid - 0.32, cabMid + 0.2);
+    seats(floorHalfW * 0.5, seatW, cabMid - 0.32, cabMid + 0.2);
+    if (dz1 - 0.1 - (cabMid + 0.42) > 0.25) seats(0, floorHalfW * 2 * 0.88, cabMid + 0.42, dz1 - 0.1); // rear bench
   }
-  const real = blocks.filter((b): b is THREE.BufferGeometry => b !== null);
-  const merged = real.length ? mergeGeometries(real, false) : null;
-  for (const b of real) b.dispose();
-  return merged;
+
+  const metalReal = metal.filter((b): b is THREE.BufferGeometry => b !== null);
+  const cabinReal = cabin.filter((b): b is THREE.BufferGeometry => b !== null);
+  const metalGeo = metalReal.length ? mergeGeometries(metalReal, false) : null;
+  const cabinGeo = cabinReal.length ? mergeGeometries(cabinReal, false) : null;
+  for (const b of [...metalReal, ...cabinReal]) b.dispose();
+  // two material groups: 0 = metalMat, 1 = cabinMat (vehicles.ts)
+  if (metalGeo && cabinGeo) {
+    const out = mergeGeometries([metalGeo, cabinGeo], true);
+    metalGeo.dispose();
+    cabinGeo.dispose();
+    return out;
+  }
+  const single = metalGeo ?? cabinGeo;
+  if (single) single.addGroup(0, single.index ? single.index.count : (single.attributes.position as THREE.BufferAttribute).count, metalGeo ? 0 : 1);
+  return single;
 }
 
 /** Drop UVs/colors/tangents so primitives merge; we rebuild color ourselves. */

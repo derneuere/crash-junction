@@ -1,4 +1,7 @@
-export { GLASS, hullMat, wheelMat, wheelGeometry, makeColoredBox, applyUniformColor, smoothstep } from './shared';
+export {
+  GLASS, hullMat, glassMat, metalMat, cabinMat, wheelMat, wheelGeometry,
+  makeColoredBox, applyUniformColor, smoothstep, registerCarMaterial, setCarEnvMap,
+} from './shared';
 export { makeSedanGeometry } from './sedan';
 export { makeBoxHullGeometry } from './boxHull';
 export { makeTankGeometry } from './tank';

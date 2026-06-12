@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
 import * as CANNON from 'cannon-es';
 import {
   AFTERTOUCH_F,
@@ -29,6 +30,7 @@ import { createMode, type GameMode, type ModeHost } from './modes/mode';
 import { createPhysics, type PhysicsContext } from './physics';
 import { buildEnvironment, makeHeightSampler } from './environment';
 import { charActor, createBarrel, createPole, createVehicle, deformActor, popWheel, repairVehicle, shatterGlass, type LoosePart } from './vehicles';
+import { setCarEnvMap } from './geometry';
 import { resetModelPicker } from './models';
 import { accumulatePanelDamage, makePanelBody, updatePanelFlap } from './panels';
 import type { PanelState } from './types';
@@ -151,6 +153,12 @@ export class Game {
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
     this.renderer.toneMappingExposure = 1.05;
     container.appendChild(this.renderer.domElement);
+
+    // Burnout-3 gloss: every car material reflects the same PMREM room —
+    // scoped to the cars (not scene.environment) so the world keeps its look
+    const pmrem = new THREE.PMREMGenerator(this.renderer);
+    setCarEnvMap(pmrem.fromScene(new RoomEnvironment(), 0.04).texture);
+    pmrem.dispose();
 
     this.scene.background = new THREE.Color(0xb6cde6);
     this.scene.fog = new THREE.Fog(0xb6cde6, 55, 150);

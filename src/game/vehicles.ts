@@ -4,10 +4,10 @@ import { CRUSH_MAX, CRUSH_SCALE, GRAVITY, SUSP_MAX_COMP, SUSP_SAG, SUSP_ZETA } f
 import type { Actor, CollideEvent, DeformablePart, SuspensionCorner, VehicleSpawn, VehicleSpec, Variant } from './types';
 import { GROUP_DECOR, type PhysicsContext } from './physics';
 import { simRand } from './rng';
-import { GLASS, hullMat, makeBoxHullGeometry, makeSedanGeometry, makeTankGeometry, wheelGeometry, wheelMat } from './geometry';
+import { GLASS, cabinMat, glassMat, hullMat, makeBoxHullGeometry, makeSedanGeometry, makeTankGeometry, metalMat, wheelGeometry, wheelMat } from './geometry';
 import { buildPanels } from './panels';
 import { makeBarrelTexture } from './textures';
-import { getVehicleModel, type VehicleModel } from './models';
+import { applyGlassGroups, getVehicleModel, type VehicleModel } from './models';
 
 export const SPECS: Record<Variant, VehicleSpec> = {
   sedan: {
@@ -40,7 +40,8 @@ function registerDeformable(mesh: THREE.Mesh, deformables: DeformablePart[], gla
 }
 
 /** Hull mesh from a baked Quaternius model: clone the template geometry and
- *  repaint its body panels in the spawn color. */
+ *  repaint its body panels in the spawn color. The glass index groups wear
+ *  their own near-mirror material. */
 function makeModelHull(model: VehicleModel, color: number): THREE.Mesh {
   const geo = model.body.clone();
   const col = geo.attributes.color as THREE.BufferAttribute;
@@ -48,7 +49,7 @@ function makeModelHull(model: VehicleModel, color: number): THREE.Mesh {
   for (const [s, e] of model.paintRanges) {
     for (let i = s; i < e; i++) col.setXYZ(i, c.r, c.g, c.b);
   }
-  const mesh = new THREE.Mesh(geo, hullMat);
+  const mesh = new THREE.Mesh(geo, geo.groups.length ? [hullMat, glassMat] : hullMat);
   mesh.castShadow = mesh.receiveShadow = true;
   return mesh;
 }
@@ -117,8 +118,8 @@ export function createVehicle(
     group.add(hull);
     registerDeformable(hull, deformables, model.glassRanges);
     if (model.interior) {
-      // dark engine-bay/cabin/trunk masses — wounds show these, not daylight
-      const inner = new THREE.Mesh(model.interior.clone(), hullMat);
+      // stripped-chassis innards — wounds show these, not daylight
+      const inner = new THREE.Mesh(model.interior.clone(), [metalMat, cabinMat]);
       group.add(inner);
       registerDeformable(inner, deformables);
     }
@@ -395,7 +396,10 @@ export function repairVehicle(actor: Actor): void {
     const col = geo.attributes.color as THREE.BufferAttribute;
     (col.array as Float32Array).set(part.baseCol);
     col.needsUpdate = true;
-    if (part.baseIndex) geo.setIndex(new THREE.BufferAttribute(part.baseIndex.slice(), 1)); // reglaze
+    if (part.baseIndex) {
+      geo.setIndex(new THREE.BufferAttribute(part.baseIndex.slice(), 1)); // reglaze
+      if (part.glass) applyGlassGroups(geo, part.glass);
+    }
     geo.computeVertexNormals();
   }
   for (const p of actor.panels) {
@@ -469,6 +473,7 @@ export function shatterGlass(actor: Actor, worldPoint: THREE.Vector3, radius: nu
         keep.push(a, b, c);
       }
       geo.setIndex(keep);
+      applyGlassGroups(geo, part.glass); // material groups address the index
     }
   }
   return broken;

@@ -4,7 +4,7 @@ import { CRUSH_SCALE } from './constants';
 import type { Actor, DeformablePart, PanelKind, PanelState, Variant, VehicleSpec } from './types';
 import type { PanelCut, PanelFace, VehicleModel } from './models';
 import { simRand } from './rng';
-import { hullMat, makeColoredBox } from './geometry';
+import { hullMat, makeColoredBox, registerCarMaterial } from './geometry';
 
 // Detachable body panels, modeled on Burnout Paradise's DeformationSpec
 // (0x1001C — see steward/src/lib/core/deformationSpec.ts and the
@@ -159,6 +159,7 @@ export function panelDefs(spec: VehicleSpec, model: VehicleModel | null): PanelD
  *  shell, so a FrontSide door would vanish seen from behind). */
 const panelMat = hullMat.clone();
 panelMat.side = THREE.DoubleSide;
+registerCarMaterial(panelMat, 0.5); // same gloss as the hull paint
 
 /** Clone a cutout template and repaint its paint verts in the spawn color
  *  (the cutout keeps its baked trim/handle colors elsewhere). */
