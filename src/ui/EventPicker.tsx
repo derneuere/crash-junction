@@ -1,5 +1,6 @@
 import { useEffect } from 'react';
 import type { TimeOfDay } from '../game/daynight';
+import type { GfxMode } from '../game/Game';
 import { LEVELS, LEVEL_LABELS, type LevelId } from '../game/levels';
 import { PLAYER_CARS, type PlayerCarId } from '../game/models';
 import type { BestMap } from './storage';
@@ -16,20 +17,26 @@ interface EventPickerProps {
   variants: Record<LevelId, TimeOfDay>;
   best: BestMap;
   carId: PlayerCarId;
+  /** Global presentation tier (not per-event): CINE = film-look post chain
+   *  + live player reflections, FAST = the bare renderer. */
+  gfx: GfxMode;
   onSelectEvent: (id: LevelId, tod?: TimeOfDay) => void;
   onSelectCar: (id: PlayerCarId) => void;
+  onSetGfx: (g: GfxMode) => void;
   onOpenDebug: () => void;
 }
 
 const ORDER = Object.keys(LEVELS) as LevelId[];
+// ↑/↓/Tab walk the variant ring on the focused card
+const TOD_CYCLE: Record<TimeOfDay, TimeOfDay> = { day: 'dusk', dusk: 'night', night: 'day' };
 
 /** The B3 Crash Nav strip (research doc §3): region header, one card per
- *  event with DAY/NIGHT variant chips, the car roster footer. Idle-only —
- *  Hud unmounts it the moment a take starts. */
+ *  event with DAY/DUSK/NIGHT variant chips, the car roster footer. Idle-only
+ *  — Hud unmounts it the moment a take starts. */
 export function EventPicker({
-  levelId, tod, variants, best, carId, onSelectEvent, onSelectCar, onOpenDebug,
+  levelId, tod, variants, best, carId, gfx, onSelectEvent, onSelectCar, onSetGfx, onOpenDebug,
 }: EventPickerProps) {
-  // keyboard browse: ←/→ walk the strip, ↑/↓/Tab flip the focused variant,
+  // keyboard browse: ←/→ walk the strip, ↑/↓/Tab cycle the focused variant,
   // Space stays the game's own launch key (Game.ts listens on window)
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -39,7 +46,7 @@ export function EventPicker({
         onSelectEvent(next);
       } else if (e.code === 'ArrowUp' || e.code === 'ArrowDown' || e.code === 'Tab') {
         if (e.code === 'Tab') e.preventDefault(); // variant flip, not focus walk
-        onSelectEvent(levelId, tod === 'day' ? 'night' : 'day');
+        onSelectEvent(levelId, TOD_CYCLE[tod]);
       }
     };
     addEventListener('keydown', onKey);
@@ -78,6 +85,25 @@ export function EventPicker({
             }}
           >
             {c.label} &middot; {c.flavor.toUpperCase()}
+          </button>
+        ))}
+        <span className="carLbl gfxLbl">GFX</span>
+        {(
+          [
+            ['cine', 'CINE', 'Cinematic: bloom, motion blur, AO, live paint reflections'],
+            ['fast', 'FAST', 'Fast: bare renderer (the pre-film-look path)'],
+          ] as const
+        ).map(([g, label, title]) => (
+          <button
+            key={g}
+            className={g === gfx ? 'active' : undefined}
+            title={title}
+            onClick={(e) => {
+              onSetGfx(g);
+              e.currentTarget.blur(); // keep Space on the game's launch key
+            }}
+          >
+            {label}
           </button>
         ))}
         <button className="devBtn" title="Debug overlay (` toggles)" onClick={onOpenDebug}>

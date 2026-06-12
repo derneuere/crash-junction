@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Game } from './game/Game';
+import { Game, type GfxMode } from './game/Game';
 import type { EngineFlavor } from './game/audio';
 import type { TimeOfDay } from './game/daynight';
 import { LEVELS, type LevelId } from './game/levels';
@@ -34,9 +34,10 @@ export default function App() {
   const [replaying, setReplaying] = useState(false);
   const [cineCam, setCineCam] = useState(false);
   const [debugOpen, setDebugOpen] = useState(false);
-  const [timeOfDay, setTimeOfDayState] = useState<TimeOfDay>(
-    () => sel0?.tod ?? (localStorage.getItem('cj-tod') === 'night' ? 'night' : 'day'),
-  );
+  const [timeOfDay, setTimeOfDayState] = useState<TimeOfDay>(() => {
+    const legacy = localStorage.getItem('cj-tod');
+    return sel0?.tod ?? (legacy === 'night' || legacy === 'dusk' ? legacy : 'day');
+  });
   const todRef = useRef(timeOfDay); // the remount effect reads the live value
   // per-event variant memory: which DAY/NIGHT chip each card reopens with
   const [perEvent, setPerEvent] = useState<Partial<Record<LevelId, TimeOfDay>>>(sel0?.perEvent ?? {});
@@ -49,6 +50,10 @@ export default function App() {
     return saved === 'v10' || saved === 'v8' ? saved : 'stock';
   });
   const engineRef = useRef(engineSound);
+  const [gfx, setGfxState] = useState<GfxMode>(() =>
+    localStorage.getItem('cj-gfx') === 'fast' ? 'fast' : 'cine',
+  );
+  const gfxRef = useRef(gfx);
   const stateRef = useRef(GameState.Idle); // for Idle→Launch edge detection
   const replayingRef = useRef(false); // a tape's report must never write records
   const runTod = useRef(timeOfDay); // the variant the CURRENT take launched with
@@ -65,6 +70,17 @@ export default function App() {
     engineRef.current = f;
     localStorage.setItem('cj-engine', f);
     gameRef.current?.setEngineFlavor(f);
+  }, []);
+
+  /** Presentation tier (CINE = film-look chain + live player reflections,
+   *  FAST = the bare renderer) — global, not per-event: it's a machine
+   *  capability, not a creative variant. Lives on the idle car row + the
+   *  debug overlay; persisted as 'cj-gfx'. */
+  const setGfx = useCallback((g: GfxMode) => {
+    setGfxState(g);
+    gfxRef.current = g;
+    localStorage.setItem('cj-gfx', g);
+    gameRef.current?.setGfx(g);
   }, []);
 
   /** Picker selection: focusing a card mounts its level (the attract orbit
@@ -112,6 +128,7 @@ export default function App() {
     // pin it before the Game constructs, never mid-take (models.ts)
     setPlayerCar(carId);
     const game = new Game(containerRef.current!, LEVELS[levelId]);
+    game.setGfx(gfxRef.current); // before the tod sweep — it sizes shadows too
     game.setTimeOfDay(todRef.current);
     game.setEngineFlavor(engineRef.current);
     gameRef.current = game;
@@ -268,8 +285,10 @@ export default function App() {
         variants={variants}
         best={best}
         carId={carId}
+        gfx={gfx}
         onSelectEvent={selectEvent}
         onSelectCar={selectCar}
+        onSetGfx={setGfx}
         onOpenDebug={() => setDebugOpen(true)}
         onCashDone={(id) => setCash((list) => list.filter((c) => c.id !== id))}
       />
@@ -280,8 +299,10 @@ export default function App() {
         levelId={levelId}
         timeOfDay={timeOfDay}
         engineSound={engineSound}
+        gfx={gfx}
         onSetTimeOfDay={setTimeOfDay}
         onSetEngineSound={setEngineSound}
+        onSetGfx={setGfx}
         onSelectLevel={selectEvent}
         onLoadReplay={loadReplay}
       />

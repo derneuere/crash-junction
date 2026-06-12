@@ -27,13 +27,17 @@ import {
 } from './replay';
 import { LEVELS, type LevelId } from './levels';
 import { createMode, type GameMode, type ModeHost } from './modes/mode';
-import { createPhysics, type PhysicsContext } from './physics';
+import { GROUP_DECOR, createPhysics, type PhysicsContext } from './physics';
 import { buildEnvironment, makeHeightSampler } from './environment';
 import { loadLevelProps } from './props';
-import { BRAKE_INTENSITY, charActor, createBarrel, createPole, createVehicle, deformActor, popWheel, repairVehicle, shatterGlass, type LoosePart } from './vehicles';
-import { applyCarEnvScale, setCarEnvMap } from './geometry';
+import { BRAKE_INTENSITY, HEADLIGHT_INTENSITY, charActor, createBarrel, createPole, createVehicle, deformActor, popWheel, repairVehicle, shatterGlass, type LoosePart } from './vehicles';
+import { applyCarEnvScale, setCarEnvMap, setPlayerEnvMap } from './geometry';
 import { applyTimeOfDay, type TimeOfDay } from './daynight';
+import { SKY_PRESETS, SkyRig, SunFlare } from './skyenv';
+import { PlayerReflections } from './reflections';
+import { Postfx } from './postfx';
 import { makeGlowTexture } from './textures';
+import { Perf, type PerfReport } from './perf';
 import { resetModelPicker } from './models';
 import { accumulatePanelDamage, makePanelBody, updatePanelFlap } from './panels';
 import type { PanelState } from './types';
@@ -69,6 +73,10 @@ const UP = new THREE.Vector3(0, 1, 0);
 const _atF = new CANNON.Vec3();
 const _contactIds = new Set<number>(); // bodies with solver contacts this step
 const NO_CMDS: Command[] = []; // shared empty — never mutated
+const _shadowOrigin = new THREE.Vector3();
+const _shadowRight = new THREE.Vector3();
+const _shadowUp = new THREE.Vector3();
+const _shadowTarget = new THREE.Vector3();
 
 /** The reflection world the cars see: a bright sky ceiling with one hot
  *  sun strip, sky-blue upper walls over a dark lower band (the horizon
@@ -157,6 +165,33 @@ function makeSkySprite(tex: THREE.Texture, scale: number): THREE.Sprite {
   return s;
 }
 
+/** Presentation quality tier. 'cine' = the film-look chain (postfx.ts) +
+ *  live player reflections (reflections.ts); 'fast' = the bare renderer
+ *  path. Replay verify runs (?verify=1) force 'fast' — headless swiftshader
+ *  shouldn't pay for pixels nobody sees. Pure visuals either way. */
+export type GfxMode = 'cine' | 'fast';
+
+/** Scene-light grading per time of day. The sun's direction feeds the
+ *  follow-the-player shadow rig; the sky dome / IBL handles the rest. */
+interface TodPreset {
+  fog: number;
+  hemiSky: number;
+  hemiGround: number;
+  hemiInt: number;
+  sunColor: number;
+  sunInt: number;
+  /** scene.environment strength — the IBL share of ambient light */
+  envInt: number;
+}
+
+const TOD_PRESETS: Record<TimeOfDay, TodPreset> = {
+  // hemisphere runs lower than the pre-IBL 1.45 — the sky environment now
+  // carries a share of the ambient
+  day: { fog: 0xb6cde6, hemiSky: 0xbfd6ff, hemiGround: 0x4a4036, hemiInt: 0.85, sunColor: 0xfff0dd, sunInt: 2.2, envInt: 0.6 },
+  dusk: { fog: 0xcfa98c, hemiSky: 0x8fa0c8, hemiGround: 0x4a4036, hemiInt: 0.55, sunColor: 0xffc88a, sunInt: 3.0, envInt: 0.65 },
+  night: { fog: 0x0a0f1d, hemiSky: 0x33415c, hemiGround: 0x12141c, hemiInt: 0.55, sunColor: 0x9db6e8, sunInt: 0.55, envInt: 0.5 },
+};
+
 export class Game {
   readonly events = new Emitter<GameEvents>();
 
@@ -167,10 +202,24 @@ export class Game {
   private sunSprite!: THREE.Sprite;
   private moonSprite!: THREE.Sprite;
   private timeOfDay: TimeOfDay = 'day';
-  private envTex: { day?: THREE.Texture; night?: THREE.Texture } = {};
+  private envTex: { day?: THREE.Texture; dusk?: THREE.Texture; night?: THREE.Texture } = {};
+  private skyRig = new SkyRig();
+  private reflections = new PlayerReflections();
+  private postfx!: Postfx;
+  private sunFlare = new SunFlare();
+  private flareFrom = new CANNON.Vec3();
+  private flareTo = new CANNON.Vec3();
+  private gfx: GfxMode = 'cine';
+  // verify replays run headless on swiftshader — never pay for cine pixels
+  private readonly forceFast = new URLSearchParams(location.search).get('verify') === '1';
+  // never drawn into — exists so the warmup compile sees the render-target
+  // program key (linear output, no tone mapping)
+  private warmupRT = new THREE.WebGLRenderTarget(1, 1);
+  private sunDirUnit = new THREE.Vector3(); // toward the sun/moon, unit
   private camera: THREE.PerspectiveCamera;
   private phys: PhysicsContext;
   private fx: Effects;
+  private perf: Perf;
   private audio = new GameAudio();
   private director = new CameraDirector();
   private heightAt: HeightSampler;
@@ -257,6 +306,16 @@ export class Game {
     this.renderer.toneMappingExposure = 1.05;
     container.appendChild(this.renderer.domElement);
 
+    this.perf = new Perf(this.renderer, this.scene, () => ({
+      tod: this.timeOfDay,
+      gfx: this.gfx,
+      cine: this.cineActive(),
+      level: this.levelId,
+      state: GameState[this.state],
+      actors: this.actors.length,
+      replaying: !!this.replay,
+    }));
+
     // Burnout-3 gloss: every car material reflects a PMREM capture of a
     // purpose-built world — a bright showroom by day, lamp glints and lit
     // windows by night. Scoped to the cars (not scene.environment) so the
@@ -275,14 +334,22 @@ export class Game {
     }
     pmrem.dispose();
     setCarEnvMap(this.envTex.day!);
+    // rivals' dusk showroom = the day bake (they're never close enough to
+    // read the difference; the player runs the live cube map anyway)
+    this.envTex.dusk = this.envTex.day;
 
     this.scene.background = new THREE.Color(0xb6cde6);
     this.scene.fog = new THREE.Fog(0xb6cde6, 55, 150);
+    // the physical sky: visible background dome by day/dusk, and — PMREM
+    // captured in setTimeOfDay — scene.environment, the world's IBL
+    this.scene.add(this.skyRig.mesh);
 
     this.camera = new THREE.PerspectiveCamera(55, container.clientWidth / container.clientHeight, 0.1, 400);
     this.camera.position.set(24, 11, 24);
     this.cam0.pos.copy(this.camera.position);
     this.cam0.quat.copy(this.camera.quaternion);
+
+    this.postfx = new Postfx(this.renderer, this.scene, this.camera, container.clientWidth, container.clientHeight);
 
     this.hemi = new THREE.HemisphereLight(0xbfd6ff, 0x4a4036, 1.45);
     this.scene.add(this.hemi);
@@ -290,22 +357,28 @@ export class Game {
     sun.position.set(34, 44, 20);
     sun.castShadow = true;
     sun.shadow.mapSize.set(2048, 2048);
-    sun.shadow.camera.left = -34;
-    sun.shadow.camera.right = 34;
-    sun.shadow.camera.top = 34;
-    sun.shadow.camera.bottom = -34;
-    sun.shadow.camera.far = 120;
+    sun.shadow.camera.left = -38;
+    sun.shadow.camera.right = 38;
+    sun.shadow.camera.top = 38;
+    sun.shadow.camera.bottom = -38;
+    sun.shadow.camera.near = 1;
+    sun.shadow.camera.far = 180;
     sun.shadow.bias = -0.0008;
     this.scene.add(sun);
+    this.scene.add(sun.target); // the follow-shadow rig drives it per frame
     this.sun = sun;
 
     // the visible sun / moon disks, pinned along the key-light directions
+    // (setTimeOfDay re-aims the sun disk along the sky preset's sun)
     this.sunSprite = makeSkySprite(makeGlowTexture('rgba(255,246,220,1)', 'rgba(255,212,130,0.5)'), 60);
     this.sunSprite.position.set(170, 220, 100);
     this.scene.add(this.sunSprite);
     this.moonSprite = makeSkySprite(makeGlowTexture('rgba(228,236,255,1)', 'rgba(170,190,235,0.35)'), 30);
     this.moonSprite.position.set(-150, 220, -120);
     this.scene.add(this.moonSprite);
+    // lens flare ghosts hang off the sun disk; physics-ray occluded, so the
+    // flare dies behind a building and blazes when the sun clears the roofs
+    this.scene.add(this.sunFlare.group);
 
     if (level.mode.kind === 'race') {
       // the circuit is far bigger than the junction — orbit high and wide
@@ -346,6 +419,7 @@ export class Game {
     this.resizeObserver = new ResizeObserver(() => this.onResize());
     this.resizeObserver.observe(container);
 
+    this.setGfx(this.gfx); // tone-map handoff + player env before first frame
     this.setTimeOfDay(this.timeOfDay); // sweep the freshly built scene
 
     this.schedule();
@@ -360,32 +434,129 @@ export class Game {
     this.audio.setEngineFlavor(f);
   }
 
-  /** Day/night toggle: relights the scene, swaps sun ↔ moon, lights the
-   *  building windows, streetlights and car lenses (the daynight emissive
-   *  sweep), and dims the showroom reflections under a dark sky. Pure
-   *  visuals — the sim, and so replay determinism, never sees it. */
+  /** Time-of-day toggle (day / dusk / night): regrades the lights and fog,
+   *  re-aims the sun (and so the follow-shadow rig), rebakes the sky into
+   *  scene.environment, swaps the showroom reflection world and runs the
+   *  emissive sweep. Pure visuals — the sim, and so replay determinism,
+   *  never sees it. */
   setTimeOfDay(t: TimeOfDay): void {
+    this.perf.tag(`tod:${t}`);
     this.timeOfDay = t;
     const night = t === 'night';
-    const sky = night ? 0x0a0f1d : 0xb6cde6;
-    (this.scene.background as THREE.Color).setHex(sky);
-    (this.scene.fog as THREE.Fog).color.setHex(sky);
-    this.hemi.color.setHex(night ? 0x33415c : 0xbfd6ff);
-    this.hemi.groundColor.setHex(night ? 0x12141c : 0x4a4036);
-    this.hemi.intensity = night ? 0.6 : 1.45;
-    this.sun.color.setHex(night ? 0x9db6e8 : 0xfff0dd);
-    this.sun.intensity = night ? 0.55 : 2.2;
-    // keep |position| shadow-camera sized; the sky disks sit much further out
-    if (night) this.sun.position.set(-30, 48, -24);
-    else this.sun.position.set(34, 44, 20);
+    const p = TOD_PRESETS[t];
+    (this.scene.background as THREE.Color).setHex(p.fog);
+    (this.scene.fog as THREE.Fog).color.setHex(p.fog);
+    this.hemi.color.setHex(p.hemiSky);
+    this.hemi.groundColor.setHex(p.hemiGround);
+    this.hemi.intensity = p.hemiInt;
+    this.sun.color.setHex(p.sunColor);
+    this.sun.intensity = p.sunInt;
+
+    if (night) {
+      // no physical night sky — flat dark background, moon key light, and
+      // the lamp-glint showroom doubles as the world's (faint) IBL
+      this.skyRig.mesh.visible = false;
+      this.sunDirUnit.set(-30, 48, -24).normalize();
+      this.scene.environment = this.envTex.night!;
+    } else {
+      this.skyRig.mesh.visible = true;
+      this.skyRig.configure(SKY_PRESETS[t]);
+      this.sunDirUnit.copy(this.skyRig.sunDir);
+      this.scene.environment = this.skyRig.bake(this.renderer);
+    }
+    this.scene.environmentIntensity = p.envInt;
+    this.updateShadowRig(); // re-aim immediately — don't wait a frame
+
+    this.sunSprite.position.copy(this.sunDirUnit).multiplyScalar(290);
     this.sunSprite.visible = !night;
     this.moonSprite.visible = night;
+
     // swap the reflection world: showroom sky by day, lamp glints and lit
     // windows by night (its base is already dark — no extra dimming)
     const env = this.envTex[t];
     if (env) setCarEnvMap(env);
     applyCarEnvScale(night ? 1.15 : 1);
+    this.refreshPlayerEnv();
     applyTimeOfDay(this.scene, t);
+
+    // flip the vehicle/lamp lights for the new tod NOW (syncMeshes drives
+    // them per frame) so the warmup below compiles against the real light
+    // count, not last frame's
+    const lightsOn = t !== 'day';
+    for (const a of this.actors) {
+      const nl = a.nightLights;
+      if (!nl) continue;
+      if (nl.lamp) nl.lamp.visible = lightsOn;
+      if (nl.head) nl.head.visible = lightsOn;
+      if (nl.brake) nl.brake.visible = lightsOn;
+    }
+    // warmup: pre-compile every material — including the pooled, still
+    // invisible explosion/debris/glass sprites — under the new light
+    // signature, so the first explosion never stalls on first-use shader
+    // compiles. Programs are keyed on the bound render target too
+    // (toneMapping + output color space), so compile both variants: the
+    // screen one (fast tier) and the render-target one (cine composer
+    // buffer and the reflection cube share that key). The relight already
+    // churns programs; this rides it. Skipped under ?verify=1: headless
+    // replays render pixels nobody sees.
+    if (!this.forceFast) {
+      this.renderer.compile(this.scene, this.camera);
+      this.renderer.setRenderTarget(this.warmupRT);
+      this.renderer.compile(this.scene, this.camera);
+      this.renderer.setRenderTarget(null);
+    }
+  }
+
+  /** Presentation tier (see GfxMode). Swaps the player between the live
+   *  cube map and the showroom fallback, sizes the shadow budget, and
+   *  hands tone mapping to the chain or the renderer. */
+  setGfx(g: GfxMode): void {
+    this.perf.tag(`gfx:${g}`);
+    this.gfx = g;
+    const cine = this.cineActive();
+    // with the composer, the renderer draws into an HDR buffer — ACES then
+    // lives in the chain (postfx.ts); without it, back on the renderer
+    this.renderer.toneMapping = cine ? THREE.NoToneMapping : THREE.ACESFilmicToneMapping;
+    const size = cine ? 4096 : 2048;
+    if (this.sun.shadow.mapSize.x !== size) {
+      this.sun.shadow.mapSize.set(size, size);
+      this.sun.shadow.map?.dispose();
+      this.sun.shadow.map = null;
+    }
+    this.refreshPlayerEnv();
+  }
+
+  private cineActive(): boolean {
+    return this.gfx === 'cine' && !this.forceFast;
+  }
+
+  /** The player's paint reflects the live capture in cine, the showroom in
+   *  fast — re-pointed on every gfx or time-of-day change. */
+  private refreshPlayerEnv(): void {
+    const fallback = this.envTex[this.timeOfDay] ?? this.envTex.day!;
+    setPlayerEnvMap(this.cineActive() ? this.reflections.texture : fallback);
+  }
+
+  // ---------- follow-the-player shadow rig ----------
+  // The old fixed ±34 m box only shadowed the junction block around the
+  // origin — race circuits span hundreds of metres and most of every lap
+  // simply had no shadows. The box now tracks the player (idle: the level
+  // origin), snapped to shadow-texel steps in light space so the shadow
+  // edges don't swim as the box glides.
+  private updateShadowRig(): void {
+    const t = this.player ? this.player.group.position : _shadowOrigin;
+    const cam = this.sun.shadow.camera;
+    const texel = (cam.right - cam.left) / this.sun.shadow.mapSize.x;
+    // light-space basis (sun direction is constant per time of day)
+    _shadowRight.crossVectors(UP, this.sunDirUnit).normalize();
+    _shadowUp.crossVectors(this.sunDirUnit, _shadowRight);
+    const px = Math.round(t.dot(_shadowRight) / texel) * texel;
+    const py = Math.round(t.dot(_shadowUp) / texel) * texel;
+    const pd = t.dot(this.sunDirUnit);
+    _shadowTarget.set(0, 0, 0).addScaledVector(_shadowRight, px).addScaledVector(_shadowUp, py).addScaledVector(this.sunDirUnit, pd);
+    this.sun.target.position.copy(_shadowTarget);
+    this.sun.position.copy(_shadowTarget).addScaledVector(this.sunDirUnit, 60);
+    this.sun.target.updateMatrixWorld();
   }
 
   /** rAF normally; setTimeout when the tab is hidden (rAF stops firing
@@ -405,6 +576,7 @@ export class Game {
 
   /** Detonate at a world position. power ≈ 1 is a barrel, ~2.4 a tanker. */
   explode(p: THREE.Vector3, power: number): void {
+    this.perf.tag('explosion');
     this.fx.explosion.spawn(p, power);
     this.fx.sparks.spawn(p, 70, 8 + 5 * power);
     this.fx.debris.spawn(p, 14 + Math.round(6 * power), 9 * power);
@@ -554,6 +726,11 @@ export class Game {
     removeEventListener('keyup', this.onKeyUp);
     this.container.removeEventListener('pointerdown', this.onPointerDown);
     this.resizeObserver.disconnect();
+    this.postfx.dispose();
+    this.warmupRT.dispose();
+    this.reflections.dispose();
+    this.skyRig.dispose();
+    this.sunFlare.dispose();
     this.renderer.dispose();
     this.renderer.forceContextLoss(); // dispose() alone leaks the WebGL
     // context; repeated HMR remounts would hit the browser's context cap
@@ -704,6 +881,7 @@ export class Game {
     this.camera.aspect = w / h;
     this.camera.updateProjectionMatrix();
     this.renderer.setSize(w, h);
+    this.postfx.setSize(w, h);
   }
 
   private tryCrashbreaker(): void {
@@ -942,6 +1120,7 @@ export class Game {
    *  crashbreaker a step, Burnout-Revenge style. */
   private markCrashed(a: Actor): void {
     if (a.crashed) return;
+    this.perf.tag('wreck');
     if (a.isPlayer && this.replay) {
       this.replay.stats.playerWrecks++;
       const dt = this.simTime - this.replay.lastTakedownAt;
@@ -1000,6 +1179,7 @@ export class Game {
   private popLooseWheel(actor: Actor, p: THREE.Vector3): void {
     const part = popWheel(actor, p, this.scene, this.phys.world, this.phys.matCar);
     if (part) {
+      this.perf.tag('wheel-pop');
       this.looseParts.push(part);
       this.audio.wheelPop(p);
     }
@@ -1007,6 +1187,7 @@ export class Game {
 
   /** A panel crossed its detach threshold: door/bonnet/boot flies off. */
   private detachPanel = (actor: Actor, panel: PanelState): void => {
+    this.perf.tag('panel-detach');
     this.scene.attach(panel.mesh); // keep the flapped world transform
     const body = makePanelBody(actor, panel, this.phys.matCar);
     this.phys.world.addBody(body);
@@ -1212,7 +1393,7 @@ export class Game {
   }
 
   private syncMeshes(dt: number): void {
-    const night = this.timeOfDay === 'night';
+    const night = this.timeOfDay !== 'day'; // golden hour runs lights too
     const playerBrakes = !!(this.keys['ArrowDown'] || this.keys['KeyS']);
     for (const a of this.actors) {
       a.group.position.set(a.body.position.x, a.body.position.y, a.body.position.z);
@@ -1222,9 +1403,17 @@ export class Game {
         // streetlamps just follow the night — even lying on their side
         if (nl.lamp) nl.lamp.visible = night;
         if (nl.head && nl.brake) {
+          // a wreck dims its lights to zero, it never leaves the render
+          // list: the visible-light COUNT keys every shader program, so one
+          // flip recompiles the whole scene (at night a pileup fired
+          // multi-second recompile storms right before the tanker blew).
+          // Day keeps visible=false — that path stays at zero light cost,
+          // and the tod toggle's one-time churn rides the full relight.
           const alive = night && !a.crashed && !a.exploded;
-          nl.head.visible = alive;
-          nl.brake.visible = alive;
+          if ((nl.head.intensity > 0) !== alive) this.perf.tag(alive ? 'vlight-on' : 'vlight-off');
+          nl.head.visible = night;
+          nl.brake.visible = night;
+          nl.head.intensity = alive ? HEADLIGHT_INTENSITY : 0;
           // brake detection: the player's actual brake input; traffic by
           // measured deceleration, latched briefly so it doesn't flicker
           const sp = Math.hypot(a.body.velocity.x, a.body.velocity.z);
@@ -1582,10 +1771,17 @@ export class Game {
     // they track THIS frame's camera. Presentation only: reads the camera
     // and controller speed, rolls Math.random, writes nothing the sim or
     // worldHash can see — replays and both pins are untouched.
+    // FAST tier only: streaks are the cheap stand-in for radial blur, and
+    // in CINE the real per-pixel motion blur (postfx.ts) supplies the smear
+    // — both at once would double-count the speed cue. Speed 0 spawns
+    // nothing but still walks the pool, so a mid-run tier flip lets any
+    // live streaks fade out instead of freezing them.
     this.fx.streaks.frame(
       simDt,
       this.camera,
-      this.state === GameState.Launch && this.player && !this.player.crashed ? this.control.speed : 0,
+      !this.cineActive() && this.state === GameState.Launch && this.player && !this.player.crashed
+        ? this.control.speed
+        : 0,
       this.control.boosting,
     );
   }
@@ -1595,6 +1791,8 @@ export class Game {
     this.schedule();
     const elapsed = (now - this.last) / 1000;
     this.last = now;
+    this.perf.beginFrame();
+    const tSim = performance.now();
 
     if (this.replay) {
       // pace the tape 1:1 with its recorded dts via the rAF cadence; fast
@@ -1615,6 +1813,7 @@ export class Game {
       this.simKeys = keysFromMask(mask);
       this.advance(dt, hidden, cmds);
     }
+    this.perf.simMs = performance.now() - tSim;
 
     // audio: one sim readout per rendered frame — engine/skid/boost/wind
     // loops, the slow-mo warp, landing thumps and near-miss whooshes all
@@ -1639,6 +1838,54 @@ export class Game {
     af.vy = p ? p.body.velocity.y : 0;
     af.player = p;
     this.audio.frame(af);
-    this.renderer.render(this.scene, this.camera);
+
+    // presentation pixels only from here down — the sim never reads back
+    this.updateShadowRig();
+    this.sunFlare.update(this.camera, this.sunSprite.position, af.dt, this.sunSprite.visible, () => this.flareOccluded());
+    if (this.cineActive()) {
+      if (p) {
+        // the world sweeps through the player's paint: re-capture the cube
+        // map (the car must not reflect itself; the flare is screen dressing)
+        const tCube = performance.now();
+        this.reflections.update(this.renderer, this.scene, p.group.position, [p.group, this.sunFlare.group]);
+        this.perf.cubeMs = performance.now() - tCube;
+      }
+      const tPost = performance.now();
+      this.postfx.render(af.dt);
+      this.perf.postMs = performance.now() - tPost;
+    } else {
+      const tPost = performance.now();
+      this.renderer.render(this.scene, this.camera);
+      this.perf.postMs = performance.now() - tPost;
+    }
+    this.perf.endFrame(elapsed * 1000);
   };
+
+  /** Lag-spike tracker readout (see perf.ts): the frame ring, the rolling
+   *  median and every captured spike report. window.__lagSpikes holds the
+   *  same spike list live. */
+  perfReport(): PerfReport {
+    return this.perf.report();
+  }
+
+  /** One physics ray camera → sun: is something chunky in the way? The
+   *  player's own body is ignored — at dusk the sun sits dead ahead and the
+   *  chase ray passes straight through the chassis box. */
+  private flareOccluded(): boolean {
+    this.flareFrom.set(this.camera.position.x, this.camera.position.y, this.camera.position.z);
+    this.flareTo.set(this.sunSprite.position.x, this.sunSprite.position.y, this.sunSprite.position.z);
+    let hit = false;
+    this.phys.world.raycastAll(
+      this.flareFrom,
+      this.flareTo,
+      { skipBackfaces: true, collisionFilterMask: ~GROUP_DECOR },
+      (result) => {
+        if (result.body !== this.player?.body) {
+          hit = true;
+          result.abort();
+        }
+      },
+    );
+    return hit;
+  }
 }

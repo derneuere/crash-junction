@@ -112,6 +112,64 @@ export function applyCarEnvScale(scale: number): void {
   for (const m of carMats) m.envMapIntensity = (ENV_INTENSITY.get(m) ?? 0.5) * scale;
 }
 
+// ---------- player live-reflection materials ----------
+// The player's car trades the shared showroom materials for clones wearing
+// the live CubeCamera capture (reflections.ts) — the world actually sweeps
+// through the paint. Clones live OUTSIDE carMats on purpose: setCarEnvMap
+// (the day/night showroom swap) must never claw them back. Rivals and
+// traffic keep the showroom; they're never close enough for it to read.
+
+const playerSwap = new Map<THREE.Material, THREE.MeshStandardMaterial>();
+const PLAYER_INTENSITY = new Map<THREE.MeshStandardMaterial, number>();
+let playerEnv: THREE.Texture | null = null;
+
+/** Declare a shared car material swappable on the player (paint, glass,
+ *  lenses — modules owning extras, like panels.ts, register theirs too).
+ *  Clones are created eagerly so the daynight sweep always sees them. */
+export function registerPlayerSwappable(src: THREE.MeshStandardMaterial, intensity: number): void {
+  if (playerSwap.has(src)) return;
+  const clone = src.clone() as THREE.MeshStandardMaterial;
+  playerSwap.set(src, clone);
+  PLAYER_INTENSITY.set(clone, intensity);
+  if (playerEnv) {
+    clone.envMap = playerEnv;
+    clone.envMapIntensity = intensity;
+    clone.needsUpdate = true;
+  }
+}
+
+// the live world is dimmer than the showroom's hot strip — run the player
+// set a notch hotter than the rivals' tuned values
+registerPlayerSwappable(hullMat, 0.9);
+registerPlayerSwappable(glassMat, 1.2);
+registerPlayerSwappable(headlightMat, 1.1);
+registerPlayerSwappable(taillightMat, 1.1);
+
+/** Swap every registered shared material on this subtree for its player
+ *  clone — run once over the player's group at build time (panels and
+ *  cutouts hang inside it, so one traversal covers the whole car). */
+export function adoptPlayerMaterials(root: THREE.Object3D): void {
+  root.traverse((o) => {
+    const mesh = o as THREE.Mesh;
+    if (!mesh.isMesh) return;
+    if (Array.isArray(mesh.material)) {
+      mesh.material = mesh.material.map((m) => playerSwap.get(m) ?? m);
+    } else {
+      mesh.material = playerSwap.get(mesh.material as THREE.Material) ?? mesh.material;
+    }
+  });
+}
+
+/** Point the player set at a (live or fallback) environment texture. */
+export function setPlayerEnvMap(tex: THREE.Texture): void {
+  playerEnv = tex;
+  for (const m of playerSwap.values()) {
+    m.envMap = tex;
+    m.envMapIntensity = PLAYER_INTENSITY.get(m) ?? 0.9;
+    m.needsUpdate = true;
+  }
+}
+
 export const wheelMat = new THREE.MeshStandardMaterial({ color: 0x191b1f, roughness: 0.85 });
 
 const wheelGeoCache = new Map<number, THREE.CylinderGeometry>();

@@ -4,7 +4,7 @@ import { CRUSH_MAX, CRUSH_VISUAL, GRAVITY, SUSP_MAX_COMP, SUSP_SAG, SUSP_ZETA } 
 import type { Actor, CollideEvent, DeformablePart, SuspensionCorner, VehicleSpawn, VehicleSpec, Variant } from './types';
 import { GROUP_DECOR, type PhysicsContext } from './physics';
 import { simRand } from './rng';
-import { GLASS, applyNormalSmoothing, buildNormalSmoothing, cabinMat, glassMat, headlightMat, hullMat, makeBoxHullGeometry, makeSedanGeometry, makeTankGeometry, metalMat, taillightMat, wheelGeometry, wheelMat } from './geometry';
+import { GLASS, adoptPlayerMaterials, applyNormalSmoothing, buildNormalSmoothing, cabinMat, glassMat, headlightMat, hullMat, makeBoxHullGeometry, makeSedanGeometry, makeTankGeometry, metalMat, taillightMat, wheelGeometry, wheelMat } from './geometry';
 import { buildPanels } from './panels';
 import { makeBarrelTexture } from './textures';
 import { applyHullGroups, getVehicleModel, type VehicleModel } from './models';
@@ -70,10 +70,11 @@ const modelWheelMat = new THREE.MeshStandardMaterial({ vertexColors: true, flatS
 // ---------- night vehicle lights ----------
 // Real dynamic lights, three.js forward-renderer budget permitting: one
 // shadowless headlight SpotLight painting the road ahead and one red brake
-// PointLight per vehicle. They exist only at night (Game flips visibility,
-// so the day/CI render path never pays for them) and the brake fires via
-// INTENSITY, not visibility — toggling a light in and out of the render
-// list would churn shader programs every brake tap.
+// PointLight per vehicle. Visibility follows time of day ONLY (the day/CI
+// render path never pays for them); everything that changes during play —
+// brake taps, wreck/explosion shutoff — drives INTENSITY, because the
+// visible-light count keys every shader program: one light leaving the
+// render list recompiles the whole scene.
 export const HEADLIGHT_INTENSITY = 80; // candela (physical falloff)
 export const BRAKE_INTENSITY = 22;
 
@@ -198,6 +199,9 @@ export function createVehicle(
 
   const wheels = buildWheels(spec, group, model);
   const nightLights = makeVehicleLights(spec, group);
+  // the player's paint/glass/lens/panel materials swap to the live
+  // CubeCamera reflection set (one traversal — panels hang in the group)
+  if (isPlayer) adoptPlayerMaterials(group);
   scene.add(group);
 
   const body = new CANNON.Body({ mass: isPlayer ? spec.mass + 130 : spec.mass, material: phys.matCar });

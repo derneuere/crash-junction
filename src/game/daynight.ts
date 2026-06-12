@@ -7,14 +7,19 @@ import * as THREE from 'three';
 // a scene sweep instead of a registry, so level rebuilds, per-building
 // material clones and shared car materials all need no bookkeeping.
 
-export type TimeOfDay = 'day' | 'night';
+export type TimeOfDay = 'day' | 'dusk' | 'night';
 
 interface NightTag {
   intensity: number;
   day?: number;
 }
 
+/** How much of the night emissive level each time of day runs: windows and
+ *  lenses come on at dusk, but the low sun still outshines them. */
+const NIGHT_EMISSIVE_FACTOR: Record<TimeOfDay, number> = { day: 0, dusk: 0.55, night: 1 };
+
 export function applyTimeOfDay(scene: THREE.Scene, t: TimeOfDay): void {
+  const f = NIGHT_EMISSIVE_FACTOR[t];
   const seen = new Set<THREE.Material>();
   scene.traverse((o) => {
     const mesh = o as THREE.Mesh;
@@ -25,7 +30,8 @@ export function applyTimeOfDay(scene: THREE.Scene, t: TimeOfDay): void {
       seen.add(m);
       const tag = m.userData.night as NightTag | undefined;
       if (!tag) continue;
-      (m as THREE.MeshStandardMaterial).emissiveIntensity = t === 'night' ? tag.intensity : (tag.day ?? 0);
+      const day = tag.day ?? 0;
+      (m as THREE.MeshStandardMaterial).emissiveIntensity = day + (tag.intensity - day) * f;
     }
   });
 }

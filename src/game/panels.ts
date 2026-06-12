@@ -4,7 +4,7 @@ import { CRUSH_SCALE } from './constants';
 import type { Actor, DeformablePart, PanelKind, PanelState, Variant, VehicleSpec } from './types';
 import type { PanelCut, PanelFace, VehicleModel } from './models';
 import { simRand } from './rng';
-import { hullMat, makeColoredBox, registerCarMaterial } from './geometry';
+import { hullMat, makeColoredBox, registerCarMaterial, registerPlayerSwappable } from './geometry';
 
 // Detachable body panels, modeled on Burnout Paradise's DeformationSpec
 // (0x1001C — see steward/src/lib/core/deformationSpec.ts and the
@@ -160,6 +160,9 @@ export function panelDefs(spec: VehicleSpec, model: VehicleModel | null): PanelD
 const panelMat = hullMat.clone();
 panelMat.side = THREE.DoubleSide;
 registerCarMaterial(panelMat, 0.5); // same gloss as the hull paint
+// the player's panels join the live-reflection swap — without this the
+// bonnet would mirror the street while a torn door mirrors the showroom
+registerPlayerSwappable(panelMat, 0.6);
 
 /** Clone a cutout template and repaint its paint verts in the spawn color
  *  (the cutout keeps its baked trim/handle colors elsewhere). */

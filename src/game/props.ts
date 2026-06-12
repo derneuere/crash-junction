@@ -32,20 +32,19 @@ function loadPropScene(url: string): Promise<THREE.Group> {
       p = make ? Promise.resolve(make()) : Promise.reject(new Error(`unknown builtin prop '${url}'`));
     } else {
       p = new GLTFLoader().loadAsync(url).then((gltf) => {
-        // The Kenney kits ship glTF's DEFAULT metallicFactor of 1. With no
-        // scene.environment, a fully-metallic surface has no diffuse and
-        // near-zero ambient in three.js, so every off-sun face rendered
-        // close to black — the cliff crag read as a charcoal city skyline
-        // and tint work could never lighten it (multiply only darkens).
-        // The concepts are sunlit matte low-poly: force dielectric and let
-        // the colormaps speak. Template-level (cached), so it covers every
-        // clone; visual only, physics never sees materials.
+        // The Kenney kits ship glTF's DEFAULT metallicFactor of 1. That was
+        // pure black before the sky IBL existed (no scene.environment = no
+        // ambient on metal); now it would render as full chrome — equally
+        // wrong for the sunlit matte low-poly concepts. Cap metalness at a
+        // brushed-metal level: enough sky pickup to gleam, colormaps still
+        // speak. Template-level (cached), so it covers every clone; visual
+        // only, physics never sees materials.
         gltf.scene.traverse((o) => {
           const mesh = o as THREE.Mesh;
           if (!mesh.isMesh) return;
           for (const m of Array.isArray(mesh.material) ? mesh.material : [mesh.material]) {
             const std = m as THREE.MeshStandardMaterial;
-            if (std.isMeshStandardMaterial) std.metalness = 0;
+            if (std.isMeshStandardMaterial) std.metalness = Math.min(std.metalness, 0.35);
           }
         });
         return gltf.scene;

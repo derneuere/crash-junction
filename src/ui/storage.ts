@@ -9,9 +9,12 @@ import { DEFAULT_CAR, PLAYER_CARS, type PlayerCarId } from '../game/models';
 //             links rely on it surviving, so it keeps being written
 //   cj-sel    { level, tod, perEvent } — last selection + the per-event
 //             variant memory the cards reopen with
-//   cj-best   { [levelId]: { day, night } } — best medal per event variant
+//   cj-best   { [levelId]: { day, dusk, night } } — best medal per event
+//             variant (pre-dusk saves had two slots; absent keys just read
+//             as "never medaled", so no migration step is needed)
 //   cj-car    player car id (v1 roster, models.ts)
 //   cj-engine engine flavor — owned by App since the flavor feature, unchanged
+//   cj-gfx    presentation tier ('cine' | 'fast') — owned by App, global
 //
 // Everything here is presentation-side persistence: the sim never reads it
 // (App applies tod/car/engine at the remount take boundary).
@@ -28,7 +31,7 @@ export interface Selection {
 const MEDAL_RANK: Record<Medal, number> = { NONE: 0, BRONZE: 1, SILVER: 2, GOLD: 3 };
 
 const isLevel = (v: unknown): v is LevelId => typeof v === 'string' && v in LEVELS;
-const isTod = (v: unknown): v is TimeOfDay => v === 'day' || v === 'night';
+const isTod = (v: unknown): v is TimeOfDay => v === 'day' || v === 'dusk' || v === 'night';
 const isMedal = (v: unknown): v is Medal =>
   v === 'GOLD' || v === 'SILVER' || v === 'BRONZE' || v === 'NONE';
 

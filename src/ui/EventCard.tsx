@@ -23,18 +23,19 @@ interface EventCardProps {
 const MEDAL_RANK: Record<Medal, number> = { NONE: 0, BRONZE: 1, SILVER: 2, GOLD: 3 };
 
 /** One B3 Crash Nav event slot (research doc §3.4): thumbnail, mode icon +
- *  best-medal disc, slanted-caps name, stakes line, DAY/NIGHT variant chips
- *  each wearing its own medal pip, and the LAUNCH row when focused.
+ *  best-medal disc, slanted-caps name, stakes line, DAY/DUSK/NIGHT variant
+ *  chips each wearing its own medal pip, and the LAUNCH row when focused.
  *
  *  CONTRACT (tools/refshot.mjs): the name button's visible text is EXACTLY
  *  the level label (it drives /^GANTRY POINT$/), and the day chip's text
- *  keeps a bare DAY word (it drives /\bDAY\b/). Keep both as real <button>s. */
+ *  keeps a bare DAY word (it drives /\bDAY\b/ — DUSK has no DAY word
+ *  boundary, so the new chip can't shadow it). Keep both as real <button>s. */
 export function EventCard({
   id, label, mode, focused, variant, best, onFocus, onVariant, onLaunch,
 }: EventCardProps) {
   const meta = EVENT_META[id];
-  // the slot's headline medal — best across both variants, B3's at-a-glance read
-  const bestAny = ([best?.day, best?.night].filter(Boolean) as Medal[])
+  // the slot's headline medal — best across all variants, B3's at-a-glance read
+  const bestAny = ([best?.day, best?.dusk, best?.night].filter(Boolean) as Medal[])
     .sort((a, b) => MEDAL_RANK[b] - MEDAL_RANK[a])[0] ?? null;
   const chip = (t: TimeOfDay, icon: string, text: string) => (
     <button
@@ -75,6 +76,7 @@ export function EventCard({
       <div className="modeLine">{meta.modeLine}</div>
       <div className="variants">
         {chip('day', '☀', 'DAY')}
+        {chip('dusk', '☄', 'DUSK')}
         {chip('night', '☽', 'NIGHT')}
       </div>
       {/* hidden (not unmounted) when unfocused so cards keep one height */}

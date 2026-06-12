@@ -180,8 +180,20 @@ try {
     c.position.set(cam[0], cam[1], cam[2]);
     c.lookAt(look[0], look[1], look[2]);
     // render + read back in the same task — the drawing buffer is only
-    // guaranteed until control returns to the browser
-    r.render(g.scene, c);
+    // guaranteed until control returns to the browser.
+    // CINE tier: the composer owns tone mapping (the renderer runs
+    // NoToneMapping while it's active — toneMapping 0), so a raw
+    // renderer.render would capture a washed-out linear frame. Render
+    // through the chain instead, twice: the first composed frame after the
+    // camera teleport smears the velocity-based motion blur; the second has
+    // a settled velocity buffer.
+    if (r.toneMapping === 0 && g.postfx) {
+      g.postfx.setSize(1920, 1080);
+      g.postfx.render(1 / 60);
+      g.postfx.render(1 / 60);
+    } else {
+      r.render(g.scene, c);
+    }
     return r.domElement.toDataURL('image/png');
   }, pose);
 
