@@ -112,6 +112,9 @@ canvas {
 .daynight.engine {
   top: 54px;
 }
+.daynight.gfx {
+  top: 92px;
+}
 
 .prompt {
   position: absolute;

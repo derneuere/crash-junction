@@ -4,7 +4,7 @@ import { CRUSH_MAX, CRUSH_VISUAL, GRAVITY, SUSP_MAX_COMP, SUSP_SAG, SUSP_ZETA } 
 import type { Actor, CollideEvent, DeformablePart, SuspensionCorner, VehicleSpawn, VehicleSpec, Variant } from './types';
 import { GROUP_DECOR, type PhysicsContext } from './physics';
 import { simRand } from './rng';
-import { GLASS, applyNormalSmoothing, buildNormalSmoothing, cabinMat, glassMat, headlightMat, hullMat, makeBoxHullGeometry, makeSedanGeometry, makeTankGeometry, metalMat, taillightMat, wheelGeometry, wheelMat } from './geometry';
+import { GLASS, adoptPlayerMaterials, applyNormalSmoothing, buildNormalSmoothing, cabinMat, glassMat, headlightMat, hullMat, makeBoxHullGeometry, makeSedanGeometry, makeTankGeometry, metalMat, taillightMat, wheelGeometry, wheelMat } from './geometry';
 import { buildPanels } from './panels';
 import { makeBarrelTexture } from './textures';
 import { applyHullGroups, getVehicleModel, type VehicleModel } from './models';
@@ -198,6 +198,9 @@ export function createVehicle(
 
   const wheels = buildWheels(spec, group, model);
   const nightLights = makeVehicleLights(spec, group);
+  // the player's paint/glass/lens/panel materials swap to the live
+  // CubeCamera reflection set (one traversal — panels hang in the group)
+  if (isPlayer) adoptPlayerMaterials(group);
   scene.add(group);
 
   const body = new CANNON.Body({ mass: isPlayer ? spec.mass + 130 : spec.mass, material: phys.matCar });

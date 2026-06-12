@@ -1,6 +1,7 @@
 import { GameState, type ModeKind } from '../game/types';
 import type { EngineFlavor } from '../game/audio';
 import type { TimeOfDay } from '../game/daynight';
+import type { GfxMode } from '../game/Game';
 import type { CashFloatData, RaceStanding, ReportData } from '../game/events';
 import { LEVEL_LABELS, type LevelId } from '../game/levels';
 import { BoostBar, CrashbreakerBar, RaceChip, RaceTagline, ScoreChip } from './chips';
@@ -31,6 +32,8 @@ interface HudProps {
   onSetTimeOfDay: (t: TimeOfDay) => void;
   engineSound: EngineFlavor;
   onSetEngineSound: (f: EngineFlavor) => void;
+  gfx: GfxMode;
+  onSetGfx: (g: GfxMode) => void;
   onCashDone: (id: number) => void;
 }
 
@@ -39,7 +42,7 @@ interface HudProps {
 export function Hud({
   state, mode, damage, goldTarget, levelId, onSelectLevel,
   multiplier, boost, flash, report, cash, crashbreaker, race, replaying, cineCam,
-  timeOfDay, onSetTimeOfDay, engineSound, onSetEngineSound, onCashDone,
+  timeOfDay, onSetTimeOfDay, engineSound, onSetEngineSound, gfx, onSetGfx, onCashDone,
 }: HudProps) {
   const cine = state === GameState.Crash || cineCam;
   const inRun = state !== GameState.Idle && state !== GameState.Done;
@@ -73,11 +76,35 @@ export function Hud({
           &#9728; DAY
         </button>
         <button
+          className={timeOfDay === 'dusk' ? 'active' : undefined}
+          onClick={() => onSetTimeOfDay('dusk')}
+          title="Golden hour"
+        >
+          &#9732; DUSK
+        </button>
+        <button
           className={timeOfDay === 'night' ? 'active' : undefined}
           onClick={() => onSetTimeOfDay('night')}
           title="Night"
         >
           &#9789; NIGHT
+        </button>
+      </div>
+
+      <div className="daynight gfx">
+        <button
+          className={gfx === 'cine' ? 'active' : undefined}
+          onClick={() => onSetGfx('cine')}
+          title="Cinematic: bloom, motion blur, AO, live reflections"
+        >
+          CINE
+        </button>
+        <button
+          className={gfx === 'fast' ? 'active' : undefined}
+          onClick={() => onSetGfx('fast')}
+          title="Fast: bare renderer (the pre-film-look path)"
+        >
+          FAST
         </button>
       </div>
 

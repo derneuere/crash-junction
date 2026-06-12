@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Game } from './game/Game';
+import { Game, type GfxMode } from './game/Game';
 import type { EngineFlavor } from './game/audio';
 import type { TimeOfDay } from './game/daynight';
 import { LEVELS, type LevelId } from './game/levels';
@@ -26,9 +26,10 @@ export default function App() {
   const [race, setRace] = useState<RaceStanding | null>(null);
   const [replaying, setReplaying] = useState(false);
   const [cineCam, setCineCam] = useState(false);
-  const [timeOfDay, setTimeOfDayState] = useState<TimeOfDay>(() =>
-    localStorage.getItem('cj-tod') === 'night' ? 'night' : 'day',
-  );
+  const [timeOfDay, setTimeOfDayState] = useState<TimeOfDay>(() => {
+    const saved = localStorage.getItem('cj-tod');
+    return saved === 'night' || saved === 'dusk' ? saved : 'day';
+  });
   const todRef = useRef(timeOfDay); // the remount effect reads the live value
   const [engineSound, setEngineSoundState] = useState<EngineFlavor>(() => {
     const saved = localStorage.getItem('cj-engine');
@@ -36,6 +37,10 @@ export default function App() {
     return saved === 'v10' || saved === 'v8' ? saved : 'stock';
   });
   const engineRef = useRef(engineSound);
+  const [gfx, setGfxState] = useState<GfxMode>(() =>
+    localStorage.getItem('cj-gfx') === 'fast' ? 'fast' : 'cine',
+  );
+  const gfxRef = useRef(gfx);
 
   const setTimeOfDay = useCallback((t: TimeOfDay) => {
     setTimeOfDayState(t);
@@ -51,8 +56,16 @@ export default function App() {
     gameRef.current?.setEngineFlavor(f);
   }, []);
 
+  const setGfx = useCallback((g: GfxMode) => {
+    setGfxState(g);
+    gfxRef.current = g;
+    localStorage.setItem('cj-gfx', g);
+    gameRef.current?.setGfx(g);
+  }, []);
+
   useEffect(() => {
     const game = new Game(containerRef.current!, LEVELS[levelId]);
+    game.setGfx(gfxRef.current); // before the tod sweep — it sizes shadows too
     game.setTimeOfDay(todRef.current);
     game.setEngineFlavor(engineRef.current);
     gameRef.current = game;
@@ -180,6 +193,8 @@ export default function App() {
         onSetTimeOfDay={setTimeOfDay}
         engineSound={engineSound}
         onSetEngineSound={setEngineSound}
+        gfx={gfx}
+        onSetGfx={setGfx}
         onCashDone={(id) => setCash((list) => list.filter((c) => c.id !== id))}
       />
     </>
