@@ -39,7 +39,7 @@ import { applySuspension, type HeightSampler } from './suspension';
 import { PlayerControl, BOOST_CAP } from './control';
 import { Pickups } from './pickups';
 import { Effects } from './effects';
-import { GameAudio } from './audio';
+import { GameAudio, type EngineFlavor } from './audio';
 import { CameraDirector } from './camera';
 
 interface DeformJob {
@@ -334,6 +334,12 @@ export class Game {
    *  building windows, streetlights and car lenses (the daynight emissive
    *  sweep), and dims the showroom reflections under a dark sky. Pure
    *  visuals — the sim, and so replay determinism, never sees it. */
+  /** Engine sound flavor (recorded V10 / V8 loops). Pure audio — the sim,
+   *  and so replay determinism, never sees it. */
+  setEngineFlavor(f: EngineFlavor): void {
+    this.audio.setEngineFlavor(f);
+  }
+
   setTimeOfDay(t: TimeOfDay): void {
     this.timeOfDay = t;
     const night = t === 'night';

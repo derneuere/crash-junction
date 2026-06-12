@@ -1,4 +1,5 @@
 import { GameState, type ModeKind } from '../game/types';
+import type { EngineFlavor } from '../game/audio';
 import type { TimeOfDay } from '../game/daynight';
 import type { CashFloatData, RaceStanding, ReportData } from '../game/events';
 import { LEVEL_LABELS, type LevelId } from '../game/levels';
@@ -28,6 +29,8 @@ interface HudProps {
   cineCam: boolean; // takedown-cam beat — letterbox outside crashtime
   timeOfDay: TimeOfDay;
   onSetTimeOfDay: (t: TimeOfDay) => void;
+  engineSound: EngineFlavor;
+  onSetEngineSound: (f: EngineFlavor) => void;
   onCashDone: (id: number) => void;
 }
 
@@ -36,7 +39,7 @@ interface HudProps {
 export function Hud({
   state, mode, damage, goldTarget, levelId, onSelectLevel,
   multiplier, boost, flash, report, cash, crashbreaker, race, replaying, cineCam,
-  timeOfDay, onSetTimeOfDay, onCashDone,
+  timeOfDay, onSetTimeOfDay, engineSound, onSetEngineSound, onCashDone,
 }: HudProps) {
   const cine = state === GameState.Crash || cineCam;
   const inRun = state !== GameState.Idle && state !== GameState.Done;
@@ -75,6 +78,23 @@ export function Hud({
           title="Night"
         >
           &#9789; NIGHT
+        </button>
+      </div>
+
+      <div className="daynight engine">
+        <button
+          className={engineSound === 'v10' ? 'active' : undefined}
+          onClick={() => onSetEngineSound('v10')}
+          title="V10 engine sound"
+        >
+          V10
+        </button>
+        <button
+          className={engineSound === 'v8' ? 'active' : undefined}
+          onClick={() => onSetEngineSound('v8')}
+          title="V8 engine sound"
+        >
+          V8
         </button>
       </div>
 
