@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import * as CANNON from 'cannon-es';
 import { CRUSH_SCALE } from './constants';
 import type { Actor, DeformablePart, PanelKind, PanelState, Variant, VehicleSpec } from './types';
-import type { PanelFace, VehicleModel } from './models';
+import type { PanelCut, PanelFace, VehicleModel } from './models';
 import { simRand } from './rng';
 import { hullMat, makeColoredBox } from './geometry';
 
@@ -21,7 +21,7 @@ import { hullMat, makeColoredBox } from './geometry';
 //    metres and the detach impulse are invented; the ordering, hinge
 //    angles and two-stage loose→detach behavior are from the spec data.
 
-interface PanelDef {
+export interface PanelDef {
   kind: PanelKind;
   size: [number, number, number];
   center: [number, number, number];
@@ -31,7 +31,8 @@ interface PanelDef {
   outward: [number, number, number];
   maxAngle: number;
   threshold: number;
-  /** Rest rotation about the hinge axis — lays a lid on the hood slope. */
+  /** Rest rotation about the hinge axis — lays a lid box on the hood slope.
+   *  Hull cutouts carry the slope in their geometry and ignore this. */
   tilt?: number;
 }
 
@@ -145,10 +146,30 @@ function fittedBusPanels(model: VehicleModel): PanelDef[] {
   ];
 }
 
-function panelDefs(spec: VehicleSpec, model: VehicleModel | null): PanelDef[] {
+/** The panel layout a vehicle gets — model-fitted when dressed, table
+ *  otherwise. Pure, so bake-time hull cutting (models.ts) and per-vehicle
+ *  assembly below derive the same defs. */
+export function panelDefs(spec: VehicleSpec, model: VehicleModel | null): PanelDef[] {
   if (model && spec.variant === 'sedan') return fittedSedanPanels(model, spec);
   if (model && spec.variant === 'bus') return fittedBusPanels(model);
   return LAYOUTS[spec.variant]();
+}
+
+/** Torn bodywork tumbles — show its inside too (the hull is a one-sided
+ *  shell, so a FrontSide door would vanish seen from behind). */
+const panelMat = hullMat.clone();
+panelMat.side = THREE.DoubleSide;
+
+/** Clone a cutout template and repaint its paint verts in the spawn color
+ *  (the cutout keeps its baked trim/handle colors elsewhere). */
+function paintCut(cut: PanelCut, color: number): THREE.BufferGeometry {
+  const geo = cut.geo.clone();
+  const col = geo.attributes.color as THREE.BufferAttribute;
+  const c = new THREE.Color(color);
+  for (let i = 0; i < cut.paint.length; i++) {
+    if (cut.paint[i]) col.setXYZ(i, c.r, c.g, c.b);
+  }
+  return geo;
 }
 
 export function buildPanels(
@@ -159,8 +180,13 @@ export function buildPanels(
   model: VehicleModel | null,
 ): PanelState[] {
   const out: PanelState[] = [];
-  for (const def of panelDefs(spec, model)) {
-    const mesh = new THREE.Mesh(makeColoredBox(...def.size, color), hullMat);
+  panelDefs(spec, model).forEach((def, i) => {
+    // dressed vehicles hang real bodywork cut from their hull; the colored
+    // box is the fallback (procedural hulls, regions that cut to slivers)
+    const cut = model?.panelCuts[i] ?? null;
+    const mesh = cut
+      ? new THREE.Mesh(paintCut(cut, color), panelMat)
+      : new THREE.Mesh(makeColoredBox(...def.size, color), hullMat);
     mesh.castShadow = true;
     const pivot = new THREE.Group();
     pivot.position.set(
@@ -169,7 +195,8 @@ export function buildPanels(
       def.center[2] + def.hingeOffset[2],
     );
     mesh.position.set(-def.hingeOffset[0], -def.hingeOffset[1], -def.hingeOffset[2]);
-    if (def.tilt) mesh.quaternion.setFromAxisAngle(new THREE.Vector3(...def.axis), def.tilt);
+    // a box lid leans onto the hood slope; a cutout has the slope baked in
+    if (!cut && def.tilt) mesh.quaternion.setFromAxisAngle(new THREE.Vector3(...def.axis), def.tilt);
     pivot.add(mesh);
     group.add(pivot);
     const pos = mesh.geometry.attributes.position as THREE.BufferAttribute;
@@ -183,7 +210,7 @@ export function buildPanels(
       kind: def.kind,
       mesh,
       pivot,
-      size: { x: def.size[0], y: def.size[1], z: def.size[2] },
+      size: cut ? cut.size : { x: def.size[0], y: def.size[1], z: def.size[2] },
       hingeAxis: new THREE.Vector3(...def.axis),
       flapDir: def.flapDir,
       maxAngle: def.maxAngle,
@@ -195,7 +222,7 @@ export function buildPanels(
       angle: 0,
       detached: false,
     });
-  }
+  });
   return out;
 }
 
