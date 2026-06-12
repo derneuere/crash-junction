@@ -28,7 +28,7 @@ import { LEVELS, type LevelId } from './levels';
 import { createMode, type GameMode, type ModeHost } from './modes/mode';
 import { createPhysics, type PhysicsContext } from './physics';
 import { buildEnvironment, makeHeightSampler } from './environment';
-import { charActor, createBarrel, createPole, createVehicle, deformActor, popWheel, repairVehicle, shatterGlass, type LoosePart } from './vehicles';
+import { BRAKE_INTENSITY, charActor, createBarrel, createPole, createVehicle, deformActor, popWheel, repairVehicle, shatterGlass, type LoosePart } from './vehicles';
 import { applyCarEnvScale, setCarEnvMap } from './geometry';
 import { applyTimeOfDay, type TimeOfDay } from './daynight';
 import { makeGlowTexture } from './textures';
@@ -1091,15 +1091,30 @@ export class Game {
     }
   }
 
-  private syncMeshes(): void {
-    const lightsOn = this.timeOfDay === 'night';
+  private syncMeshes(dt: number): void {
+    const night = this.timeOfDay === 'night';
+    const playerBrakes = !!(this.keys['ArrowDown'] || this.keys['KeyS']);
     for (const a of this.actors) {
       a.group.position.set(a.body.position.x, a.body.position.y, a.body.position.z);
       a.group.quaternion.set(a.body.quaternion.x, a.body.quaternion.y, a.body.quaternion.z, a.body.quaternion.w);
-      // headlight/tail pools: night only, and a wreck's lights are gone
-      if (a.lightPools.length) {
-        const on = lightsOn && !a.crashed && !a.exploded;
-        for (const p of a.lightPools) p.visible = on;
+      const nl = a.nightLights;
+      if (nl) {
+        // streetlamps just follow the night — even lying on their side
+        if (nl.lamp) nl.lamp.visible = night;
+        if (nl.head && nl.brake) {
+          const alive = night && !a.crashed && !a.exploded;
+          nl.head.visible = alive;
+          nl.brake.visible = alive;
+          // brake detection: the player's actual brake input; traffic by
+          // measured deceleration, latched briefly so it doesn't flicker
+          const sp = Math.hypot(a.body.velocity.x, a.body.velocity.z);
+          const decel = dt > 1e-4 ? (a.lastSpeed - sp) / dt : 0;
+          a.lastSpeed = sp;
+          if (alive && (a.isPlayer ? playerBrakes && sp > 0.5 : decel > 3 && sp > 0.3)) a.brakeT = 0.22;
+          else a.brakeT = Math.max(0, a.brakeT - dt);
+          // intensity, not visibility — light-list churn recompiles shaders
+          nl.brake.intensity = a.brakeT > 0 ? BRAKE_INTENSITY : 0;
+        }
       }
     }
     // weight-transfer lean is purely visual — the physics body stays level
@@ -1393,7 +1408,7 @@ export class Game {
       steps++;
     }
 
-    this.syncMeshes();
+    this.syncMeshes(simDt);
     this.updateWheels(simDt);
     updatePanelFlap(this.actors, simDt);
     this.processDeforms();

@@ -6,7 +6,7 @@ import { GROUP_DECOR, type PhysicsContext } from './physics';
 import { simRand } from './rng';
 import { GLASS, applyNormalSmoothing, buildNormalSmoothing, cabinMat, glassMat, headlightMat, hullMat, makeBoxHullGeometry, makeSedanGeometry, makeTankGeometry, metalMat, taillightMat, wheelGeometry, wheelMat } from './geometry';
 import { buildPanels } from './panels';
-import { makeBarrelTexture, makeGlowTexture } from './textures';
+import { makeBarrelTexture } from './textures';
 import { applyHullGroups, getVehicleModel, type VehicleModel } from './models';
 
 export const SPECS: Record<Variant, VehicleSpec> = {
@@ -67,39 +67,29 @@ export type CollideHandler = (actor: Actor, e: CollideEvent) => void;
 /** Model wheels carry tire/rim paint as vertex colors. */
 const modelWheelMat = new THREE.MeshStandardMaterial({ vertexColors: true, flatShading: true, roughness: 0.8 });
 
-// ---------- night light pools ----------
-// The cheap Burnout trick for "headlights light the street": additive
-// gradient decals riding the car group flat on the road — warm white ahead
-// of the nose, tail/brake red behind. Game shows them only at night and
-// only while the car isn't a wreck.
-let poolTex: THREE.CanvasTexture | null = null;
-let headPoolMat: THREE.MeshBasicMaterial | null = null;
-let tailPoolMat: THREE.MeshBasicMaterial | null = null;
-const poolGeo = new THREE.PlaneGeometry(1, 1);
+// ---------- night vehicle lights ----------
+// Real dynamic lights, three.js forward-renderer budget permitting: one
+// shadowless headlight SpotLight painting the road ahead and one red brake
+// PointLight per vehicle. They exist only at night (Game flips visibility,
+// so the day/CI render path never pays for them) and the brake fires via
+// INTENSITY, not visibility — toggling a light in and out of the render
+// list would churn shader programs every brake tap.
+export const HEADLIGHT_INTENSITY = 80; // candela (physical falloff)
+export const BRAKE_INTENSITY = 22;
 
-function makeLightPools(spec: VehicleSpec): THREE.Object3D[] {
-  poolTex ??= makeGlowTexture('rgba(255,255,255,0.55)', 'rgba(255,255,255,0.22)');
-  headPoolMat ??= new THREE.MeshBasicMaterial({
-    map: poolTex, color: 0xfff1cf, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false,
-  });
-  tailPoolMat ??= new THREE.MeshBasicMaterial({
-    map: poolTex, color: 0xff2016, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false,
-  });
-  const roadY = -spec.rideHeight + 0.04; // group origin rides at COM height
-  const pool = (mat: THREE.MeshBasicMaterial, w: number, len: number, z: number) => {
-    const m = new THREE.Mesh(poolGeo, mat);
-    m.rotation.x = -Math.PI / 2;
-    m.scale.set(w, len, 1);
-    m.position.set(0, roadY, z);
-    m.visible = false; // Game flips these at night
-    return m;
-  };
-  const headLen = 8;
-  const tailLen = 3.4;
-  return [
-    pool(headPoolMat, spec.width * 2.1, headLen, -(spec.length / 2 + headLen / 2) + 1.2),
-    pool(tailPoolMat, spec.width * 1.5, tailLen, spec.length / 2 + tailLen / 2 - 0.6),
-  ];
+function makeVehicleLights(spec: VehicleSpec, group: THREE.Group): { head: THREE.SpotLight; brake: THREE.PointLight } {
+  const lensY = -spec.rideHeight + 0.72; // group origin rides at COM height
+  const head = new THREE.SpotLight(0xfff3d0, HEADLIGHT_INTENSITY, 30, 0.55, 0.5, 1.6);
+  head.position.set(0, lensY, -spec.length / 2 + 0.4);
+  head.target.position.set(0, -spec.rideHeight, -spec.length / 2 - 9);
+  head.visible = false;
+  group.add(head);
+  group.add(head.target); // spot targets need a place in the scene graph
+  const brake = new THREE.PointLight(0xff1a10, 0, 10, 2);
+  brake.position.set(0, lensY, spec.length / 2 + 0.2);
+  brake.visible = false;
+  group.add(brake);
+  return { head, brake };
 }
 
 function buildWheels(spec: VehicleSpec, group: THREE.Group, model?: VehicleModel | null): THREE.Mesh[] {
@@ -139,7 +129,8 @@ function makeActor(
   kind: Actor['kind'], body: CANNON.Body, group: THREE.Group, valueMult: number, cashLeft: number,
 ): Actor {
   return {
-    kind, body, group, spec: null, model: null, wheels: [], susp: [], deformables: [], panels: [], lightPools: [],
+    kind, body, group, spec: null, model: null, wheels: [], susp: [], deformables: [], panels: [],
+    nightLights: null, lastSpeed: 0, brakeT: 0,
     q0: body.quaternion.clone(), scripted: null, started: false, curSpeed: 0,
     isPlayer: false, crashed: false, destabilized: 0, destabilizedByPlayer: false,
     popped: 0, damageLvl: 0, smokeT: 0,
@@ -206,8 +197,7 @@ export function createVehicle(
   }
 
   const wheels = buildWheels(spec, group, model);
-  const lightPools = makeLightPools(spec);
-  for (const p of lightPools) group.add(p);
+  const nightLights = makeVehicleLights(spec, group);
   scene.add(group);
 
   const body = new CANNON.Body({ mass: isPlayer ? spec.mass + 130 : spec.mass, material: phys.matCar });
@@ -236,7 +226,7 @@ export function createVehicle(
   actor.susp = susp;
   actor.deformables = deformables;
   actor.panels = panels;
-  actor.lightPools = lightPools;
+  actor.nightLights = nightLights;
   actor.scripted = { dir: { x: spawn.dir.x, z: spawn.dir.z }, speed: spawn.speed, delay: spawn.delay ?? 0 };
   actor.curSpeed = isPlayer ? 0 : spawn.speed;
   actor.isPlayer = isPlayer;
@@ -259,6 +249,12 @@ export function createPole(scene: THREE.Scene, phys: PhysicsContext, onCollide: 
   head.position.set(0, 2.0, 0.22);
   head.castShadow = true;
   group.add(head);
+  // a real lamp at night — parented to the pole, so a toppled streetlight
+  // drags its glow across the asphalt with it
+  const lamp = new THREE.PointLight(0xffc97a, 50, 18, 1.8);
+  lamp.position.set(0, 1.95, 0.28);
+  lamp.visible = false;
+  group.add(lamp);
   scene.add(group);
 
   const body = new CANNON.Body({ mass: 90, material: phys.matCar });
@@ -274,6 +270,7 @@ export function createPole(scene: THREE.Scene, phys: PhysicsContext, onCollide: 
   body.sleep();
 
   const actor = makeActor('pole', body, group, 0.5, 900);
+  actor.nightLights = { lamp };
   body.addEventListener('collide', (e: unknown) => onCollide(actor, e as CollideEvent));
   return actor;
 }

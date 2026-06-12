@@ -180,9 +180,15 @@ export interface Actor {
   susp: SuspensionCorner[];
   deformables: DeformablePart[];
   panels: PanelState[];
-  /** Additive road decals: white pool ahead, red pool behind. Game shows
-   *  them at night for un-wrecked vehicles (a wreck's lights are gone). */
-  lightPools: THREE.Object3D[];
+  /** Real dynamic night lights, parented to the group: a headlight spot
+   *  painting the road, a brake point that fires only while braking, a
+   *  lamp point on streetlight poles. Game drives them per frame — night
+   *  only, wrecks go dark, a toppled pole takes its glow with it. */
+  nightLights: { head?: THREE.SpotLight; brake?: THREE.PointLight; lamp?: THREE.PointLight } | null;
+  /** Visual brake detection (night brake light): last frame's speed and
+   *  the latch that keeps the lamp lit through a braking phase. */
+  lastSpeed: number;
+  brakeT: number;
   q0: CANNON.Quaternion;
   scripted: { dir: { x: number; z: number }; speed: number; delay: number } | null;
   started: boolean;
