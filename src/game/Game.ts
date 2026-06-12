@@ -100,6 +100,53 @@ function makeCarEnvScene(): THREE.Scene {
   return scene;
 }
 
+/** The night reflection world: near-black, with the lights the player
+ *  actually sees downtown — streetlamp glints and warm lit-window grids
+ *  around the horizon, a pale moon overhead. These are the shapes that
+ *  glide across the paint at night. */
+function makeNightEnvScene(): THREE.Scene {
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x04060c);
+  const card = (w: number, h: number, color: number, mult: number, x: number, y: number, z: number, rx: number, ry: number) => {
+    const m = new THREE.Mesh(
+      new THREE.PlaneGeometry(w, h),
+      new THREE.MeshBasicMaterial({ color: new THREE.Color(color).multiplyScalar(mult), side: THREE.DoubleSide }),
+    );
+    m.position.set(x, y, z);
+    m.rotation.set(rx, ry, 0);
+    scene.add(m);
+  };
+  card(40, 40, 0x141d31, 1, 0, 9, 0, Math.PI / 2, 0); // faint navy sky
+  card(3.4, 3.4, 0xdfe9ff, 4.5, 6, 8.5, -4, Math.PI / 2, 0); // the moon
+  // dim moonlit horizon band so the beltline split survives the dark
+  for (let k = 0; k < 4; k++) {
+    const a = (k * Math.PI) / 2;
+    card(30, 5, 0x121a2c, 1.2, Math.sin(a) * 14, 2.4, Math.cos(a) * 14, 0, a);
+  }
+  // lit building windows + streetlamp heads scattered around the skyline
+  const spots: [number, number, number, number, number, number][] = [
+    // [azimuth, height, w, h, color, mult]
+    [0.4, 2.6, 1.4, 2.6, 0xffc97a, 3.2],
+    [1.1, 3.4, 1.1, 2.0, 0xffd9a0, 2.6],
+    [1.9, 2.2, 1.6, 2.8, 0xffc06a, 3.0],
+    [2.6, 3.8, 1.0, 1.6, 0xfff0c8, 2.4],
+    [3.4, 2.8, 1.5, 2.4, 0xffce85, 3.4],
+    [4.2, 3.2, 1.2, 2.0, 0xffd9a0, 2.8],
+    [5.0, 2.4, 1.5, 2.6, 0xffc97a, 3.0],
+    [5.7, 3.6, 1.0, 1.8, 0xfff0c8, 2.5],
+    // streetlamps: small, hot, lower
+    [0.9, 1.6, 0.6, 0.6, 0xffd9a0, 7],
+    [2.2, 1.4, 0.6, 0.6, 0xffe7bf, 7],
+    [3.8, 1.5, 0.6, 0.6, 0xffd9a0, 7],
+    [5.4, 1.6, 0.6, 0.6, 0xffe7bf, 7],
+  ];
+  for (const [a, y, w, h, color, mult] of spots) {
+    card(w, h, color, mult, Math.sin(a) * 13, y, Math.cos(a) * 13, 0, a);
+  }
+  card(60, 60, 0x02030a, 1, 0, -2.4, 0, -Math.PI / 2, 0); // floor
+  return scene;
+}
+
 /** A camera-facing glow disk pinned in the sky (fog must not eat it). */
 function makeSkySprite(tex: THREE.Texture, scale: number): THREE.Sprite {
   const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, fog: false, transparent: true, depthWrite: false }));
@@ -117,6 +164,7 @@ export class Game {
   private sunSprite!: THREE.Sprite;
   private moonSprite!: THREE.Sprite;
   private timeOfDay: TimeOfDay = 'day';
+  private envTex: { day?: THREE.Texture; night?: THREE.Texture } = {};
   private camera: THREE.PerspectiveCamera;
   private phys: PhysicsContext;
   private fx: Effects;
@@ -200,20 +248,24 @@ export class Game {
     this.renderer.toneMappingExposure = 1.05;
     container.appendChild(this.renderer.domElement);
 
-    // Burnout-3 gloss: every car material reflects the same PMREM capture
-    // of a purpose-built high-contrast world — scoped to the cars (not
-    // scene.environment) so the rest of the scene keeps its look
+    // Burnout-3 gloss: every car material reflects a PMREM capture of a
+    // purpose-built world — a bright showroom by day, lamp glints and lit
+    // windows by night. Scoped to the cars (not scene.environment) so the
+    // rest of the scene keeps its look.
     const pmrem = new THREE.PMREMGenerator(this.renderer);
-    const envScene = makeCarEnvScene();
-    setCarEnvMap(pmrem.fromScene(envScene, 0.035).texture);
-    envScene.traverse((o) => {
-      const m = o as THREE.Mesh;
-      if (m.isMesh) {
-        m.geometry.dispose();
-        (m.material as THREE.Material).dispose();
-      }
-    });
+    for (const [tod, makeScene] of [['day', makeCarEnvScene], ['night', makeNightEnvScene]] as const) {
+      const envScene = makeScene();
+      this.envTex[tod] = pmrem.fromScene(envScene, 0.035).texture;
+      envScene.traverse((o) => {
+        const m = o as THREE.Mesh;
+        if (m.isMesh) {
+          m.geometry.dispose();
+          (m.material as THREE.Material).dispose();
+        }
+      });
+    }
     pmrem.dispose();
+    setCarEnvMap(this.envTex.day!);
 
     this.scene.background = new THREE.Color(0xb6cde6);
     this.scene.fog = new THREE.Fog(0xb6cde6, 55, 150);
@@ -298,7 +350,11 @@ export class Game {
     else this.sun.position.set(34, 44, 20);
     this.sunSprite.visible = !night;
     this.moonSprite.visible = night;
-    applyCarEnvScale(night ? 0.45 : 1);
+    // swap the reflection world: showroom sky by day, lamp glints and lit
+    // windows by night (its base is already dark — no extra dimming)
+    const env = this.envTex[t];
+    if (env) setCarEnvMap(env);
+    applyCarEnvScale(night ? 1.15 : 1);
     applyTimeOfDay(this.scene, t);
   }
 
@@ -1036,9 +1092,15 @@ export class Game {
   }
 
   private syncMeshes(): void {
+    const lightsOn = this.timeOfDay === 'night';
     for (const a of this.actors) {
       a.group.position.set(a.body.position.x, a.body.position.y, a.body.position.z);
       a.group.quaternion.set(a.body.quaternion.x, a.body.quaternion.y, a.body.quaternion.z, a.body.quaternion.w);
+      // headlight/tail pools: night only, and a wreck's lights are gone
+      if (a.lightPools.length) {
+        const on = lightsOn && !a.crashed && !a.exploded;
+        for (const p of a.lightPools) p.visible = on;
+      }
     }
     // weight-transfer lean is purely visual — the physics body stays level
     // so the suspension rays and collision box are unaffected

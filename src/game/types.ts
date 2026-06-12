@@ -180,6 +180,9 @@ export interface Actor {
   susp: SuspensionCorner[];
   deformables: DeformablePart[];
   panels: PanelState[];
+  /** Additive road decals: white pool ahead, red pool behind. Game shows
+   *  them at night for un-wrecked vehicles (a wreck's lights are gone). */
+  lightPools: THREE.Object3D[];
   q0: CANNON.Quaternion;
   scripted: { dir: { x: number; z: number }; speed: number; delay: number } | null;
   started: boolean;

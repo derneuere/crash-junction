@@ -6,7 +6,7 @@ import { GROUP_DECOR, type PhysicsContext } from './physics';
 import { simRand } from './rng';
 import { GLASS, applyNormalSmoothing, buildNormalSmoothing, cabinMat, glassMat, headlightMat, hullMat, makeBoxHullGeometry, makeSedanGeometry, makeTankGeometry, metalMat, taillightMat, wheelGeometry, wheelMat } from './geometry';
 import { buildPanels } from './panels';
-import { makeBarrelTexture } from './textures';
+import { makeBarrelTexture, makeGlowTexture } from './textures';
 import { applyHullGroups, getVehicleModel, type VehicleModel } from './models';
 
 export const SPECS: Record<Variant, VehicleSpec> = {
@@ -67,6 +67,41 @@ export type CollideHandler = (actor: Actor, e: CollideEvent) => void;
 /** Model wheels carry tire/rim paint as vertex colors. */
 const modelWheelMat = new THREE.MeshStandardMaterial({ vertexColors: true, flatShading: true, roughness: 0.8 });
 
+// ---------- night light pools ----------
+// The cheap Burnout trick for "headlights light the street": additive
+// gradient decals riding the car group flat on the road — warm white ahead
+// of the nose, tail/brake red behind. Game shows them only at night and
+// only while the car isn't a wreck.
+let poolTex: THREE.CanvasTexture | null = null;
+let headPoolMat: THREE.MeshBasicMaterial | null = null;
+let tailPoolMat: THREE.MeshBasicMaterial | null = null;
+const poolGeo = new THREE.PlaneGeometry(1, 1);
+
+function makeLightPools(spec: VehicleSpec): THREE.Object3D[] {
+  poolTex ??= makeGlowTexture('rgba(255,255,255,0.55)', 'rgba(255,255,255,0.22)');
+  headPoolMat ??= new THREE.MeshBasicMaterial({
+    map: poolTex, color: 0xfff1cf, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false,
+  });
+  tailPoolMat ??= new THREE.MeshBasicMaterial({
+    map: poolTex, color: 0xff2016, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false,
+  });
+  const roadY = -spec.rideHeight + 0.04; // group origin rides at COM height
+  const pool = (mat: THREE.MeshBasicMaterial, w: number, len: number, z: number) => {
+    const m = new THREE.Mesh(poolGeo, mat);
+    m.rotation.x = -Math.PI / 2;
+    m.scale.set(w, len, 1);
+    m.position.set(0, roadY, z);
+    m.visible = false; // Game flips these at night
+    return m;
+  };
+  const headLen = 8;
+  const tailLen = 3.4;
+  return [
+    pool(headPoolMat, spec.width * 2.1, headLen, -(spec.length / 2 + headLen / 2) + 1.2),
+    pool(tailPoolMat, spec.width * 1.5, tailLen, spec.length / 2 + tailLen / 2 - 0.6),
+  ];
+}
+
 function buildWheels(spec: VehicleSpec, group: THREE.Group, model?: VehicleModel | null): THREE.Mesh[] {
   const wheels: THREE.Mesh[] = [];
   const ax = model ? model.arch.x : spec.wheelX;
@@ -104,7 +139,7 @@ function makeActor(
   kind: Actor['kind'], body: CANNON.Body, group: THREE.Group, valueMult: number, cashLeft: number,
 ): Actor {
   return {
-    kind, body, group, spec: null, model: null, wheels: [], susp: [], deformables: [], panels: [],
+    kind, body, group, spec: null, model: null, wheels: [], susp: [], deformables: [], panels: [], lightPools: [],
     q0: body.quaternion.clone(), scripted: null, started: false, curSpeed: 0,
     isPlayer: false, crashed: false, destabilized: 0, destabilizedByPlayer: false,
     popped: 0, damageLvl: 0, smokeT: 0,
@@ -171,6 +206,8 @@ export function createVehicle(
   }
 
   const wheels = buildWheels(spec, group, model);
+  const lightPools = makeLightPools(spec);
+  for (const p of lightPools) group.add(p);
   scene.add(group);
 
   const body = new CANNON.Body({ mass: isPlayer ? spec.mass + 130 : spec.mass, material: phys.matCar });
@@ -199,6 +236,7 @@ export function createVehicle(
   actor.susp = susp;
   actor.deformables = deformables;
   actor.panels = panels;
+  actor.lightPools = lightPools;
   actor.scripted = { dir: { x: spawn.dir.x, z: spawn.dir.z }, speed: spawn.speed, delay: spawn.delay ?? 0 };
   actor.curSpeed = isPlayer ? 0 : spawn.speed;
   actor.isPlayer = isPlayer;
