@@ -3,7 +3,7 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import type { VehicleSpec, Variant } from './types';
 import { panelDefs, type PanelDef } from './panels';
-import { applyUniformColor } from './geometry';
+import { applyNormalSmoothing, applyUniformColor, buildNormalSmoothing } from './geometry';
 
 // Quaternius CC0 vehicle models (public/models/*/glb), converted from FBX by
 // tools/convert-models.mjs. The game's whole damage pipeline — crumple,
@@ -315,6 +315,13 @@ function bakeModel(gltf: { scene: THREE.Group }, cfg: ModelConfig, spec: Vehicle
   merged.scale(sx, sy, sz);
   merged.translate(0, wheelY - rawWheelY * sy, 0);
   merged.computeVertexNormals();
+  // PS2-style paint: curved panels get smooth (creased) normals so env
+  // reflections sweep across them; hard edges keep their split normals.
+  // Done before the panel cuts, so the cutouts inherit the smoothing.
+  applyNormalSmoothing(
+    merged.attributes.normal as THREE.BufferAttribute,
+    buildNormalSmoothing(merged.attributes.position as THREE.BufferAttribute, merged.attributes.normal as THREE.BufferAttribute),
+  );
 
   const arch = {
     x: rawX * sx,

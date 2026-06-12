@@ -1,5 +1,4 @@
 import * as THREE from 'three';
-import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
 import * as CANNON from 'cannon-es';
 import {
   AFTERTOUCH_F,
@@ -65,6 +64,39 @@ const _pp = new THREE.Vector3();
 const UP = new THREE.Vector3(0, 1, 0);
 const _atF = new CANNON.Vec3();
 const NO_CMDS: Command[] = []; // shared empty — never mutated
+
+/** The reflection world the cars see: a bright sky ceiling with one hot
+ *  sun strip, sky-blue upper walls over a dark lower band (the horizon
+ *  line that makes paint read as deep), and a near-black floor. Structured,
+ *  high-contrast shapes — the streaks that sweep across smooth bodywork,
+ *  Burnout-3 style. Captured once by PMREM, then discarded. */
+function makeCarEnvScene(): THREE.Scene {
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x070a10);
+  const card = (w: number, h: number, color: number, mult: number, x: number, y: number, z: number, rx: number, ry: number) => {
+    const m = new THREE.Mesh(
+      new THREE.PlaneGeometry(w, h),
+      new THREE.MeshBasicMaterial({ color: new THREE.Color(color).multiplyScalar(mult), side: THREE.DoubleSide }),
+    );
+    m.position.set(x, y, z);
+    m.rotation.set(rx, ry, 0);
+    scene.add(m);
+  };
+  card(40, 40, 0xeaf2ff, 1.7, 0, 9, 0, Math.PI / 2, 0); // sky ceiling
+  // a rank of showroom striplights — curved panels always catch one
+  for (const z of [-6, 0, 6]) card(20, 1.5, 0xffffff, 6, 0, 8.6, z, Math.PI / 2, 0);
+  for (let k = 0; k < 4; k++) {
+    const a = (k * Math.PI) / 2;
+    const x = Math.sin(a) * 14;
+    const z = Math.cos(a) * 14;
+    // the sky band starts AT the horizon — vertical body sides must catch
+    // it, with the dark ground right below (the beltline horizon split)
+    card(30, 6.5, 0x9fb8dd, 1.3, x, 3.2, z, 0, a);
+    card(30, 3, 0x0a0d12, 1, x, -1.6, z, 0, a);
+  }
+  card(60, 60, 0x04050a, 1, 0, -2.4, 0, -Math.PI / 2, 0); // floor
+  return scene;
+}
 
 export class Game {
   readonly events = new Emitter<GameEvents>();
@@ -154,10 +186,19 @@ export class Game {
     this.renderer.toneMappingExposure = 1.05;
     container.appendChild(this.renderer.domElement);
 
-    // Burnout-3 gloss: every car material reflects the same PMREM room —
-    // scoped to the cars (not scene.environment) so the world keeps its look
+    // Burnout-3 gloss: every car material reflects the same PMREM capture
+    // of a purpose-built high-contrast world — scoped to the cars (not
+    // scene.environment) so the rest of the scene keeps its look
     const pmrem = new THREE.PMREMGenerator(this.renderer);
-    setCarEnvMap(pmrem.fromScene(new RoomEnvironment(), 0.04).texture);
+    const envScene = makeCarEnvScene();
+    setCarEnvMap(pmrem.fromScene(envScene, 0.035).texture);
+    envScene.traverse((o) => {
+      const m = o as THREE.Mesh;
+      if (m.isMesh) {
+        m.geometry.dispose();
+        (m.material as THREE.Material).dispose();
+      }
+    });
     pmrem.dispose();
 
     this.scene.background = new THREE.Color(0xb6cde6);

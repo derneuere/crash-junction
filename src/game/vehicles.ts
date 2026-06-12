@@ -4,7 +4,7 @@ import { CRUSH_MAX, CRUSH_SCALE, GRAVITY, SUSP_MAX_COMP, SUSP_SAG, SUSP_ZETA } f
 import type { Actor, CollideEvent, DeformablePart, SuspensionCorner, VehicleSpawn, VehicleSpec, Variant } from './types';
 import { GROUP_DECOR, type PhysicsContext } from './physics';
 import { simRand } from './rng';
-import { GLASS, cabinMat, glassMat, hullMat, makeBoxHullGeometry, makeSedanGeometry, makeTankGeometry, metalMat, wheelGeometry, wheelMat } from './geometry';
+import { GLASS, applyNormalSmoothing, buildNormalSmoothing, cabinMat, glassMat, hullMat, makeBoxHullGeometry, makeSedanGeometry, makeTankGeometry, metalMat, wheelGeometry, wheelMat } from './geometry';
 import { buildPanels } from './panels';
 import { makeBarrelTexture } from './textures';
 import { applyGlassGroups, getVehicleModel, type VehicleModel } from './models';
@@ -326,6 +326,9 @@ export function deformActor(actor: Actor, worldPoint: THREE.Vector3, strength: n
     if (!part.weld) {
       part.glassMask = buildGlassMask(part);
       part.weld = buildWeld(base, part.glassMask);
+      // first deform — normals are still pristine, the only safe moment
+      // to derive the smoothing clusters
+      part.smooth = buildNormalSmoothing(pos, geo.attributes.normal as THREE.BufferAttribute);
     }
     const weld = part.weld;
     const glassMask = part.glassMask;
@@ -379,6 +382,7 @@ export function deformActor(actor: Actor, worldPoint: THREE.Vector3, strength: n
       pos.needsUpdate = true;
       col.needsUpdate = true;
       geo.computeVertexNormals();
+      if (part.smooth) applyNormalSmoothing(geo.attributes.normal as THREE.BufferAttribute, part.smooth);
     }
   }
 }
@@ -400,7 +404,11 @@ export function repairVehicle(actor: Actor): void {
       geo.setIndex(new THREE.BufferAttribute(part.baseIndex.slice(), 1)); // reglaze
       if (part.glass) applyGlassGroups(geo, part.glass);
     }
+    // never-deformed parts still carry pristine normals — derive the
+    // smoothing clusters now or the recompute below would flatten them
+    part.smooth ??= buildNormalSmoothing(pos, geo.attributes.normal as THREE.BufferAttribute);
     geo.computeVertexNormals();
+    applyNormalSmoothing(geo.attributes.normal as THREE.BufferAttribute, part.smooth);
   }
   for (const p of actor.panels) {
     if (p.detached) {

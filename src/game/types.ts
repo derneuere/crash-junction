@@ -136,6 +136,10 @@ export interface DeformablePart {
   /** Pristine triangle index, stashed the first time shatterGlass blows a
    *  pane out of the hull — repairVehicle reglazes from it. */
   baseIndex?: Uint16Array | Uint32Array;
+  /** Creased-normal smoothing clusters (built from pristine normals) —
+   *  computeVertexNormals() always rebuilds flat split normals, so every
+   *  recompute is followed by applyNormalSmoothing with this map. */
+  smooth?: Uint32Array;
 }
 
 export type PanelKind = 'door' | 'bonnet' | 'boot' | 'bumper';
