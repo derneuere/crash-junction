@@ -33,10 +33,44 @@
     "checksums": "ignore"
   },
   {
+    "file": "ram-debris-self-crash.json",
+    "name": "race: debris shed by a ram is not a wall — winning a shunt must not wreck the rammer (report 2026-06-12)",
+    "assertMin": { "rivalShunts": 1 },
+    "assert": { "playerWrecks": 0 },
+    "checksums": "ignore"
+  },
+  {
+    "file": "live-wheel-pop.json",
+    "name": "race: hard rams must not strip a LIVE car's wheels — three takedowns left an undriveable never-crashed hulk (report 2026-06-12)",
+    "assertMin": { "takedowns": 3 },
+    "assert": { "playerPopped": 0 },
+    "checksums": "ignore"
+  },
+  {
+    "file": "ram-launch.json",
+    "name": "race: ramming through the pack at full boost must not launch the rammer — contact is a shunt, not a ramp (report 2026-06-12)",
+    "assertMin": { "rivalShunts": 2 },
+    "assert": { "maxUpwardSpeed": 3, "maxAltitude": 3.5, "finalOffTrack": 5 },
+    "checksums": "ignore"
+  },
+  {
+    "file": "corner-pileup-planted.json",
+    "name": "race: a corner pileup must not throw the player over the barrier (report 2026-06-12; ex offtrack-rescue tape — the planted-contact rule keeps it on the track, so the 5 s rescue is now defense-in-depth without tape coverage)",
+    "assertMin": { "rivalShunts": 1 },
+    "assert": { "maxUpwardSpeed": 3, "maxAltitude": 2, "finalOffTrack": 5 },
+    "checksums": "ignore"
+  },
+  {
     "file": "pad-jump-line.json",
     "name": "proving ground: diagonal hit on ramp 2 gives real but sane air (determinism pin)",
     "assertMin": { "maxAltitude": 5, "maxUpwardSpeed": 7 },
     "assert": { "maxAltitude": 11, "maxUpwardSpeed": 12.5, "maxTiltDeg": 181 },
     "checksums": "require"
+  },
+  {
+    "file": "gantry-grid-uturn.json",
+    "name": "race: every grid slot's first gate must lie AHEAD of it — gantry's five-deep grid out-reached section 1's radius and the front slots U-turned into the barrier (report 2026-06-12)",
+    "assert": { "rivalWallHits": 0, "playerWrecks": 0 },
+    "checksums": "ignore"
   }
 ]

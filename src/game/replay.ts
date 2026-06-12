@@ -113,6 +113,18 @@ export interface ReplayStats {
   playerSlams: number;
   /** Times the player won one — put a rival into shunt mode. */
   rivalShunts: number;
+  /** Times the player wrecked. Fixtures where the player should power
+   *  through (e.g. winning a ram) assert 0. */
+  playerWrecks: number;
+  /** Most wheels the player had popped off while LIVE (wreck-phase pops
+   *  don't count — repair zeroes them before the car drives again). A
+   *  live car must keep its wheels: losing them without wrecking is an
+   *  undriveable hulk with no crash respawn coming. */
+  playerPopped: number;
+  /** Walls/props met by a LIVE, un-destabilized rival — a car still under
+   *  AI steering. Rivals own the racing line: untouched, they never meet a
+   *  barrier (the gantry grid once U-turned its front slots into one). */
+  rivalWallHits: number;
 }
 
 export interface ReplayResult {

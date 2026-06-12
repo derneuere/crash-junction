@@ -26,18 +26,19 @@ export interface RaceSection {
 const wrapAngle = (a: number) => Math.atan2(Math.sin(a), Math.cos(a));
 const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
 
-/** Resample a closed waypoint polygon into evenly spaced sections with
- *  curvature-derived speed classes (slow apex, fast straight), brake
- *  distance propagated backwards so the AI slows BEFORE the corner. */
-export function buildLoopSections(waypoints: [number, number][], spacing: number): RaceSection[] {
-  // Catmull-Rom through the closed loop, finely sampled
+/** Catmull-Rom through the waypoints, finely sampled. Closed wraps the
+ *  control points around the seam; open clamps them at the ends (the
+ *  standard clamped spline) and lands exactly on the last waypoint. */
+function catmullFine(waypoints: [number, number][], closed: boolean): [number, number][] {
   const n = waypoints.length;
+  const at = (i: number) => waypoints[closed ? ((i % n) + n) % n : clamp(i, 0, n - 1)];
   const fine: [number, number][] = [];
-  for (let i = 0; i < n; i++) {
-    const p0 = waypoints[(i - 1 + n) % n];
-    const p1 = waypoints[i];
-    const p2 = waypoints[(i + 1) % n];
-    const p3 = waypoints[(i + 2) % n];
+  const segs = closed ? n : n - 1;
+  for (let i = 0; i < segs; i++) {
+    const p0 = at(i - 1);
+    const p1 = at(i);
+    const p2 = at(i + 1);
+    const p3 = at(i + 2);
     for (let s = 0; s < 20; s++) {
       const t = s / 20;
       const t2 = t * t;
@@ -48,13 +49,21 @@ export function buildLoopSections(waypoints: [number, number][], spacing: number
       ]);
     }
   }
-  // walk the arc length, dropping a section every `spacing` metres
+  if (!closed) fine.push([waypoints[n - 1][0], waypoints[n - 1][1]]);
+  return fine;
+}
+
+/** Walk the fine polyline's arc length, dropping a point every `spacing`
+ *  metres. Closed wraps back to the seam (and drops a too-close duplicate);
+ *  open must END at the final waypoint — that's where the exit gate lives. */
+function resampleEvery(fine: [number, number][], spacing: number, closed: boolean): [number, number][] {
   const pts: [number, number][] = [];
   let acc = 0;
   let prev = fine[0];
   pts.push(prev);
-  for (let i = 1; i <= fine.length; i++) {
-    const cur = fine[i % fine.length];
+  const last = closed ? fine.length : fine.length - 1;
+  for (let i = 1; i <= last; i++) {
+    const cur = fine[closed ? i % fine.length : i];
     acc += Math.hypot(cur[0] - prev[0], cur[1] - prev[1]);
     prev = cur;
     if (acc >= spacing) {
@@ -62,39 +71,93 @@ export function buildLoopSections(waypoints: [number, number][], spacing: number
       acc = 0;
     }
   }
-  if (pts.length > 2 && Math.hypot(pts[pts.length - 1][0] - pts[0][0], pts[pts.length - 1][1] - pts[0][1]) < spacing * 0.6) {
-    pts.pop(); // don't double up the seam
+  if (closed) {
+    if (pts.length > 2 && Math.hypot(pts[pts.length - 1][0] - pts[0][0], pts[pts.length - 1][1] - pts[0][1]) < spacing * 0.6) {
+      pts.pop(); // don't double up the seam
+    }
+  } else {
+    const end = fine[fine.length - 1];
+    const tail = pts[pts.length - 1];
+    const d = Math.hypot(end[0] - tail[0], end[1] - tail[1]);
+    if (d < spacing * 0.5 && pts.length > 1) pts[pts.length - 1] = end; // snap, don't stutter
+    else if (d > 1e-6) pts.push(end);
   }
+  return pts;
+}
+
+/** Shared tail of both resamplers: evenly spaced points → sections with
+ *  curvature speed classes and backward brake propagation. `closed` only
+ *  controls whether index math wraps (a loop) or clamps (an open branch) —
+ *  the clamped next() makes the open brake pass a self-min no-op at the
+ *  last section, so the same passes serve both shapes. */
+function finishSections(pts: [number, number][], spacing: number, closed: boolean): RaceSection[] {
   const N = pts.length;
+  const next = (i: number) => (closed ? (i + 1) % N : Math.min(i + 1, N - 1));
   const secs: RaceSection[] = pts.map((p, i) => {
-    const q = pts[(i + 1) % N];
+    const q = pts[next(i)];
     const dx = q[0] - p[0];
     const dz = q[1] - p[1];
     const l = Math.hypot(dx, dz) || 1;
     return { x: p[0], z: p[1], dirX: dx / l, dirZ: dz / l, v: 0 };
   });
+  if (!closed && N >= 2) {
+    // the final section has no portal of its own — keep the previous
+    // direction so the chain's last gate still faces down the branch
+    secs[N - 1].dirX = secs[N - 2].dirX;
+    secs[N - 1].dirZ = secs[N - 2].dirZ;
+  }
   // curvature → corner speed (v = sqrt(a_lat · R)), then brake backwards.
   // the lateral-accel budget is generous: corners are meant to be taken
   // flat-out (with a drift), never on the brakes
   for (let i = 0; i < N; i++) {
     const h0 = Math.atan2(secs[i].dirX, secs[i].dirZ);
-    const h1 = Math.atan2(secs[(i + 1) % N].dirX, secs[(i + 1) % N].dirZ);
+    const h1 = Math.atan2(secs[next(i)].dirX, secs[next(i)].dirZ);
     const R = spacing / Math.max(1e-4, Math.abs(wrapAngle(h1 - h0)));
     secs[i].v = clamp(Math.sqrt(16 * R), 18, 38);
   }
   for (let pass = 0; pass < 3; pass++) {
     for (let i = N - 1; i >= 0; i--) {
-      secs[i].v = Math.min(secs[i].v, secs[(i + 1) % N].v + 4); // brake zone
+      secs[i].v = Math.min(secs[i].v, secs[next(i)].v + 4); // brake zone
     }
   }
   return secs;
 }
+
+/** Resample a closed waypoint polygon into evenly spaced sections with
+ *  curvature-derived speed classes (slow apex, fast straight), brake
+ *  distance propagated backwards so the AI slows BEFORE the corner. */
+export function buildLoopSections(waypoints: [number, number][], spacing: number): RaceSection[] {
+  return finishSections(resampleEvery(catmullFine(waypoints, true), spacing, true), spacing, true);
+}
+
+/** The same resampler for an OPEN polyline (shortcut branch ribbons):
+ *  clamped spline endpoints, no wrap — the final section keeps the previous
+ *  section's direction so its gate still faces down the branch. */
+export function buildOpenSections(waypoints: [number, number][], spacing: number): RaceSection[] {
+  return finishSections(resampleEvery(catmullFine(waypoints, false), spacing, false), spacing, false);
+}
+
+/** Section spacing for shortcut chains — the GDD's main-loop request, so a
+ *  branch corridor samples about as densely as the road it forks from.
+ *  environment.ts builds the visual ribbons from the same chains. */
+export const SHORTCUT_SPACING = 8;
 
 const AI_YAW = 1.35; // rad/s steering authority (a touch under the player's drift)
 const AI_ACC = 13;
 const AI_BRAKE = 20;
 const RESPAWN_AFTER = 2.5; // s wrecked before the reset pair kicks in
 const RESET_SPEED = 10; // "SLOW" EResetSpeedType
+const SHORTCUT_SLACK = 4; // corridor slack (m) — same half-spacing slack as the main road
+
+/** A shortcut's resampled section chain plus where it hands progress back.
+ *  Player-only: rivals NEVER take shortcuts — BP-style, the AI owns the
+ *  main racing line; branches are the player's knowledge reward (and risk),
+ *  so AI paths and the pack's pace are untouched by them. */
+interface ShortcutChain {
+  exit: number; // main-loop section index where the branch rejoins
+  halfW: number;
+  secs: RaceSection[];
+}
 
 interface RacerState {
   a: Actor;
@@ -119,6 +182,8 @@ export class RaceDirector {
   private playerPos = 1;
   private finished = false;
   private lastEmit = '';
+  private shortcuts: ShortcutChain[] = [];
+  private onShortcut = -1; // index into shortcuts while the player runs a branch
 
   constructor(
     race: RaceDef,
@@ -132,6 +197,12 @@ export class RaceDirector {
     this.secs = race.sections;
     this.N = this.secs.length;
     this.width = race.width;
+    // shortcut chains: same Catmull resample as the loop, open-ended —
+    // built here (plain numbers in, deterministic out) so player tracking
+    // and the off-track rescue can measure against them every step
+    for (const sc of race.shortcuts ?? []) {
+      this.shortcuts.push({ exit: sc.exit, halfW: sc.width / 2, secs: buildOpenSections(sc.waypoints, SHORTCUT_SPACING) });
+    }
     // grid: stagger the rivals AHEAD of the start line (section 0) — the
     // player starts last and fights their way to the top
     const s0 = this.secs[0];
@@ -146,7 +217,17 @@ export class RaceDirector {
       actor.q0.copy(actor.body.quaternion);
       actor.body.wakeUp();
       actor.started = true;
-      this.racers.push({ a: actor, heading, speed: 0, target: 1, lap: 1, respawnT: 0, skill, progress: 0, loose: false });
+      // initial target: the first portal plane still ahead of this slot. A
+      // deep grid (gantry runs five slots, 35 m) outreaches section 1's
+      // gate radius — a racer whose only gate is BEHIND it U-turns off the
+      // grid at full throttle and finds the barrier.
+      const bx = actor.body.position.x;
+      const bz = actor.body.position.z;
+      let target = 1;
+      while (target + 1 < this.N && (bx - this.secs[target].x) * this.secs[target].dirX + (bz - this.secs[target].z) * this.secs[target].dirZ > 0) {
+        target++;
+      }
+      this.racers.push({ a: actor, heading, speed: 0, target, lap: 1, respawnT: 0, skill, progress: 0, loose: false });
     });
   }
 
@@ -157,6 +238,7 @@ export class RaceDirector {
     if (!racing) return;
 
     for (const r of this.racers) this.stepRival(r, dt);
+    this.updatePlayerShortcut();
     this.trackPlayer();
     this.rank();
 
@@ -248,20 +330,81 @@ export class RaceDirector {
     b.quaternion.setFromAxisAngle(UP, r.heading + Math.PI); // hull forward is -z
   }
 
+  /** Gate-reached test, shared by main-loop tracking and shortcut rejoin:
+   *  a drift can sweep wide of a section centre, so crossing the section's
+   *  portal plane (within track width) counts too. */
+  private reachedGate(s: RaceSection, x: number, z: number): boolean {
+    const dx = x - s.x;
+    const dz = z - s.z;
+    const along = dx * s.dirX + dz * s.dirZ;
+    const lat = Math.abs(dx * s.dirZ - dz * s.dirX);
+    return Math.hypot(dx, dz) < this.width * 0.9 || (along > 0 && along < 14 && lat < this.width);
+  }
+
+  /** Nearest-centre distance from the player to a shortcut chain. */
+  private chainDistance(c: ShortcutChain): number {
+    const p = this.player.body.position;
+    let best = Infinity;
+    for (const s of c.secs) {
+      const d = Math.hypot(p.x - s.x, p.z - s.z);
+      if (d < best) best = d;
+    }
+    return best;
+  }
+
+  /** Branch progress hand-back. trackPlayer only scans 2 sections ahead, so
+   *  a long cut (Harbor Run skips ~37) would strand playerTarget at the
+   *  entry forever; and the corridor sits well off the main centreline, so
+   *  without the on-branch flag the 5 s off-track rescue in modes/race.ts
+   *  would teleport the player mid-shortcut. */
+  private updatePlayerShortcut(): void {
+    if (this.finished || this.player.crashed) {
+      // a wreck in the cut pays the documented price: the reset pair drops
+      // you back on the MAIN loop at the fork, at SLOW — the detour wins
+      this.onShortcut = -1;
+      return;
+    }
+    const b = this.player.body;
+    if (this.onShortcut < 0) {
+      for (let i = 0; i < this.shortcuts.length; i++) {
+        const c = this.shortcuts[i];
+        if (this.chainDistance(c) <= c.halfW + SHORTCUT_SLACK) {
+          this.onShortcut = i;
+          break;
+        }
+      }
+      if (this.onShortcut < 0) return;
+    }
+    const c = this.shortcuts[this.onShortcut];
+    // rejoin: test main sections exit-1 … exit+3 for gate-reach (a jump cut
+    // can land PAST its exit section — the Flyover carries ~43 m) and snap
+    // playerTarget to just past the reached gate. The ShortcutDef contract
+    // (entry < exit, both ≥4 from the line) guarantees exit+3 < N, so the
+    // snap never crosses section 0 — lap counting (which only increments in
+    // trackPlayer's one-by-one walk through target 1) stays safe.
+    for (let k = 3; k >= -1; k--) {
+      const idx = c.exit + k;
+      if (idx >= this.N || !this.reachedGate(this.secs[idx], b.position.x, b.position.z)) continue;
+      const target = (idx + 1) % this.N;
+      const ahead = (target - this.playerTarget + this.N) % this.N;
+      // forward-only: re-entering the corridor mouth from the main road
+      // must never drag an already-advanced target backwards
+      if (ahead > 0 && ahead < this.N / 2) this.playerTarget = target;
+      this.onShortcut = -1;
+      return;
+    }
+    // drifted out of the corridor without rejoining — back on the main road
+    // (trackPlayer picks them up) or in the weeds (the rescue timer runs)
+    if (this.chainDistance(c) > c.halfW + SHORTCUT_SLACK) this.onShortcut = -1;
+  }
+
   private trackPlayer(): void {
     if (this.finished || this.player.crashed) return;
     const b = this.player.body;
-    // a drift can sweep wide of a section centre — count crossing the
-    // section's portal plane (within track width) too, and scan a couple
-    // of sections ahead so a wide arc can't lose race progress
+    // scan a couple of sections ahead so a wide arc can't lose race progress
     for (let k = 2; k >= 0; k--) {
       const idx = (this.playerTarget + k) % this.N;
-      const s = this.secs[idx];
-      const dx = b.position.x - s.x;
-      const dz = b.position.z - s.z;
-      const along = dx * s.dirX + dz * s.dirZ;
-      const lat = Math.abs(dx * s.dirZ - dz * s.dirX);
-      if (Math.hypot(dx, dz) < this.width * 0.9 || (along > 0 && along < 14 && lat < this.width)) {
+      if (this.reachedGate(this.secs[idx], b.position.x, b.position.z)) {
         for (let j = 0; j <= k; j++) {
           this.playerTarget = (this.playerTarget + 1) % this.N;
           if (this.playerTarget === 1) {
@@ -307,6 +450,7 @@ export class RaceDirector {
    *  `speed` lets the takedown-cam handback keep the player's earned pace
    *  instead of the crash respawn's SLOW start. */
   respawnPlayer(control: PlayerControl, speed = RESET_SPEED): void {
+    this.onShortcut = -1; // every reset pair lands on the MAIN loop
     const idx = (this.playerTarget - 1 + this.N) % this.N;
     this.placeAt(this.player, idx);
     const heading = Math.atan2(this.secs[idx].dirX, this.secs[idx].dirZ);
@@ -322,8 +466,12 @@ export class RaceDirector {
 
   /** Metres the player sits beyond the road edge (0 = on the track). The
    *  centreline is sampled at section spacing, so the nearest-centre check
-   *  carries a half-spacing slack. */
+   *  carries a half-spacing slack. A player inside a shortcut corridor is
+   *  ON a road: without the on-branch zero the Harbor lane (20-30 m off the
+   *  main centreline) would read as stranded and the 5 s rescue in
+   *  modes/race.ts would teleport them mid-shortcut. */
   playerOffTrackDistance(): number {
+    if (this.onShortcut >= 0) return 0;
     const p = this.player.body.position;
     let best = Infinity;
     for (const s of this.secs) {

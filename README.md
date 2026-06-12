@@ -27,6 +27,7 @@ npm test         # replay regression suite (needs installed Chrome or Edge)
 | Arrow keys (after crashing) | Aftertouch — steer the wreck mid-flight |
 | **E** | **Crashbreaker** — detonate your wreck (1 charge) |
 | B | Sandbox test explosion near the junction center |
+| M | Mute / unmute |
 | Enter | Restart |
 | **R** | **Save a physics bug report** (deterministic replay JSON — see below) |
 | Esc | Exit a running replay |
@@ -70,14 +71,18 @@ src/
     pickups.ts             floating score-multiplier rings
     environment.ts         roads, markings, buildings, ramps, height sampler
     camera.ts              idle orbit / chase cam / crash orbit + shake
-    audio.ts               synthesized thumps, booms and pickup chimes
+    audio/                 recorded CC0 one-shots (public/sounds/ — crashes,
+                           glass, explosions, horns…) + synthesized loops
+                           (engine, drift squeal, boost, wind) over a 3D
+                           positional mix; crashtime warps pitch + lowpass
     effects/               pooled VFX: sparks, smoke, debris, scorch,
                            explosion (fireball/shockwave/light), index.ts
     levels/                data-driven levels + the LEVELS registry:
-                           level1 (crash junction), driftTrack (practice pad)
+                           level1 (crash junction), driftTrack (practice pad),
+                           raceway + gantryPoint (race circuits)
 ```
 
-Two levels ship, selectable on the idle screen:
+Four levels ship, selectable on the idle screen:
 
 - **CRASH JUNCTION** — the crash-mode event: ramps, traffic, the tanker,
   medals.
@@ -87,6 +92,15 @@ Two levels ship, selectable on the idle screen:
   means you can never wreck — blasts and crashes scuff the car and rip
   panels, but you keep driving (tipped cars right themselves after a
   beat). R resets.
+- **SILVER LAKE RING** — the race mode: three laps against AI rivals on a
+  walled circuit of flat-out sweepers, the racing line decided by who
+  shoves whom into the wall (a shoved rival wrecking on it is a TAKEDOWN).
+- **GANTRY POINT** — a two-lap coastal ring around a working port island:
+  four risk-vs-reward **shortcuts** rivals never take (blast a container
+  canyon past the port detour, jump the flyover, run the cliff ledge,
+  sweep the beach) and four named **signature takedown** theatres — put a
+  rival into the crane legs and the wreck flashes CRANE SMASH instead of
+  TAKEDOWN. Design notes: [the GANTRY POINT GDD](docs/gantry-point-gdd.md).
 
 Adding a level = adding a `LevelDef` (no engine changes): traffic spawns
 with direction/speed/`delay`, barrel and pole positions, ramps, buildings,
@@ -161,6 +175,24 @@ In-game triggers:
 - red barrels detonate on hard impact or nearby blasts
 - the fuel tanker cooks off after enough accumulated damage (or one huge hit)
 - **E** fires the player's Crashbreaker once crashed
+
+## Asset credits
+
+Vehicles are Quaternius CC0 packs (`public/models/`); sounds are recorded
+CC0 one-shots (`public/sounds/`); GANTRY POINT's set dressing lives in
+`public/models/props/` — per-pack sources, licenses and model notes in each
+folder's `manifest.md`. Kenney kits (racing, nature, pirate, city-industrial,
+factory) and the Quaternius cargo set are CC0, as is the self-made
+`cliff-roadside` pack (chevron boards generated in-repo). A handful of
+models are **CC-BY and require this attribution**:
+
+- Crane by J-Toastie [CC-BY] via Poly Pizza (https://poly.pizza/m/gCcpjaxFdv)
+- Crane by Max Hancock [CC-BY] via Poly Pizza (https://poly.pizza/m/aZFdGwasy60)
+- Forklift by KolosStudios [CC-BY] via Poly Pizza (https://poly.pizza/m/DTQBuenKJY)
+- Container Ship by Alex Safayan [CC-BY] via Poly Pizza (https://poly.pizza/m/3AmDGcCu6Ll)
+- "Lighthouse", "Boat" (×2 liveries), "Sailboat", "Beach umbrella",
+  "Life preserver" and "Hostel" (the motel) by Poly by Google, CC-BY 3.0
+  (https://creativecommons.org/licenses/by/3.0/), via poly.pizza
 
 ## Level 1 vs the old prototype
 

@@ -18,7 +18,9 @@ import { fileURLToPath } from 'node:url';
 import puppeteer from 'puppeteer-core';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const PORT = 5175;
+// REPLAY_PORT lets two checkouts/sessions run suites side by side — the
+// default collides (vite --strictPort) and the loser's run dies mid-suite
+const PORT = Number(process.env.REPLAY_PORT ?? 5175);
 
 if (parseInt(process.versions.node, 10) < 18) {
   console.error(`Node ${process.versions.node} is too old for the vite dev server — use Node 18+ (fnm use 22).`);

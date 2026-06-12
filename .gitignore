@@ -27,6 +27,9 @@ dist-ssr
 # Local debug-output dumps from the texture / shader probes
 debug_textures/
 
+# tools/refshot.mjs captures (regenerable; the reference art lives in docs/concept-art)
+screenshots/
+
 # Stryker mutation-testing reports + incremental cache
 reports/mutation/
 .stryker-tmp/

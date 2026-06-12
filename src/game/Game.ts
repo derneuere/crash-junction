@@ -8,6 +8,7 @@ import {
   EXPLOSION_RADIUS_BASE,
   EXPLOSION_RADIUS_PER_POWER,
   FIXED_DT,
+  LIVE_CAR_CONTACT_VY,
   LIVE_VY_GAIN_PER_STEP,
   RAMP_LAUNCH_VY_MAX,
   SLOWMO,
@@ -28,6 +29,7 @@ import { LEVELS, type LevelId } from './levels';
 import { createMode, type GameMode, type ModeHost } from './modes/mode';
 import { createPhysics, type PhysicsContext } from './physics';
 import { buildEnvironment, makeHeightSampler } from './environment';
+import { loadLevelProps } from './props';
 import { BRAKE_INTENSITY, charActor, createBarrel, createPole, createVehicle, deformActor, popWheel, repairVehicle, shatterGlass, type LoosePart } from './vehicles';
 import { applyCarEnvScale, setCarEnvMap } from './geometry';
 import { applyTimeOfDay, type TimeOfDay } from './daynight';
@@ -39,7 +41,7 @@ import { applySuspension, type HeightSampler } from './suspension';
 import { PlayerControl, BOOST_CAP } from './control';
 import { Pickups } from './pickups';
 import { Effects } from './effects';
-import { GameAudio } from './audio';
+import { GameAudio, type AudioFrameState } from './audio';
 import { CameraDirector } from './camera';
 
 interface DeformJob {
@@ -65,6 +67,7 @@ const _hood = new THREE.Vector3();
 const _pp = new THREE.Vector3();
 const UP = new THREE.Vector3(0, 1, 0);
 const _atF = new CANNON.Vec3();
+const _contactIds = new Set<number>(); // bodies with solver contacts this step
 const NO_CMDS: Command[] = []; // shared empty — never mutated
 
 /** The reflection world the cars see: a bright sky ceiling with one hot
@@ -189,6 +192,7 @@ export class Game {
   private pickups: Pickups;
   private control = new PlayerControl();
   private lastEmittedBoost = -1;
+  private audioFrame!: AudioFrameState; // persistent — refilled every rendered frame
 
   private aftertouchActive = false;
   private lastGlance = -9; // simTime of the last wall-glance reroute
@@ -198,7 +202,12 @@ export class Game {
   private pairCooldown = new Map<string, number>();
   private checked = new Map<number, number>(); // bodyId → simTime of the shunt
   private playerWallGraceUntil = 0; // takedown wall-grace (TAKEDOWN_WALL_GRACE)
-  private keys: Record<string, boolean> = {};
+  private keys: Record<string, boolean> = {}; // live key state (events land here any time)
+  // The key state the SIM reads — frozen at frame start to exactly the mask
+  // the recorder writes, so record == replay by construction. Without the
+  // freeze, a key dispatched mid-advance (record scripts drive input from
+  // onStep) steers the live take a substep before the tape says it did.
+  private simKeys: Record<string, boolean> = {};
 
   // bug-report capture: the tape is always rolling (see replay.ts)
   private levelId: LevelId;
@@ -310,11 +319,23 @@ export class Game {
     this.heightAt = makeHeightSampler(level);
     this.phys = createPhysics();
     buildEnvironment(this.scene, this.phys, level);
+    // prop colliders are synchronous and must exist before the first
+    // physics step (their GLB visuals stream in whenever — see props.ts)
+    loadLevelProps(this.scene, this.phys, level);
     this.fx = new Effects(this.scene);
     this.pickups = new Pickups(this.scene, level.pickups);
     this.control.reset(Math.atan2(level.player.dir.x, level.player.dir.z));
     this.beginTake();
     this.buildActors();
+
+    // sound: fetch the recorded clips now (no AudioContext needed) so
+    // they're decoded and ready by the first user gesture
+    this.audio.prefetch();
+    this.audioFrame = {
+      dt: 0, timeScale: 1, cam: this.camera, driving: false, speed: 0,
+      throttle: false, boosting: false, drifting: false, slip: 0, grounded: true, vy: 0,
+      actors: this.actors, player: null,
+    };
 
     addEventListener('keydown', this.onKeyDown);
     addEventListener('keyup', this.onKeyUp);
@@ -379,7 +400,7 @@ export class Game {
     this.fx.sparks.spawn(p, 70, 8 + 5 * power);
     this.fx.debris.spawn(p, 14 + Math.round(6 * power), 9 * power);
     this.fx.scorch.add(p.x, p.z, 1.4 + 0.8 * power);
-    this.audio.boom(power, this.timeScale);
+    this.audio.explosion(power, p);
     this.director.addShake(0.7 + 0.4 * power);
     this.director.focusTarget.copy(p);
 
@@ -428,6 +449,7 @@ export class Game {
         if (fall > 0.45 && shatterGlass(a, p, 999) > 8) {
           _impact.set(a.body.position.x, a.body.position.y + 0.9, a.body.position.z);
           this.fx.glass.spawn(_impact, 26, 3 + power);
+          this.audio.glassBreak(_impact, true);
         }
         if (fall > 0.55 && a.popped < 3 && a.crashed && simRand() < 0.5) this.popLooseWheel(a, p);
         this.mode.score?.blastDraw(a, power, fall);
@@ -458,6 +480,7 @@ export class Game {
     this.state = GameState.Launch;
     this.events.emit('state', this.state);
     this.audio.resume();
+    this.audio.launch();
   }
 
   reset(): void {
@@ -526,6 +549,7 @@ export class Game {
     this.renderer.forceContextLoss(); // dispose() alone leaks the WebGL
     // context; repeated HMR remounts would hit the browser's context cap
     this.renderer.domElement.remove();
+    this.audio.dispose(); // AudioContexts are capped per page too
     this.events.clear();
   }
 
@@ -605,6 +629,11 @@ export class Game {
   // ---------- input ----------
 
   private onKeyDown = (e: KeyboardEvent): void => {
+    if (e.code === 'KeyM') {
+      // mute is pure presentation — fine to flip even while a tape plays
+      this.events.emit('flash', this.audio.toggleMute() ? 'MUTED' : 'SOUND ON');
+      return;
+    }
     if (this.replay) {
       // the tape is driving — live input would desync it
       if (e.code === 'Escape') this.stopReplay(true);
@@ -682,8 +711,22 @@ export class Game {
     const impact = Math.abs(e.contact.getImpactVelocityAlongNormal());
     const scenery = this.phys.noCrashIds.has(other.id); // ground, curbs, ramps
 
-    if (impact > 2.2 && !scenery) {
-      const oa = this.byBody.get(other.id);
+    const oa = this.byBody.get(other.id);
+    // loose parts (torn panels, popped wheels) are dynamic and ownerless —
+    // passed to the mode as `other: null` they'd be judged as a WALL. A
+    // door shed by the player's own ram once read as a 14 m/s wall touch
+    // and the glance rerouted the car 90° into the real barrier. Debris
+    // pelts the bodywork (sparks + payout below), it never judges.
+    const debris = !oa && other.type === CANNON.Body.DYNAMIC;
+
+    let takedown = false;
+    if (impact > 2.2 && !scenery && !debris) {
+      // a wall met by a LIVE rival nobody knocked loose means the AI steered
+      // it there — fixtures pin this at zero (shoved rivals are destabilized
+      // first, so an earned slam into the barrier never counts)
+      if (this.replay && !oa && self.kind === 'vehicle' && !self.isPlayer && !self.crashed && self.destabilized <= 0) {
+        this.replay.stats.rivalWallHits++;
+      }
       // poles and barrels are smashables — they get batted aside and never
       // trigger the crash sequence; the rules per mode live in collision.ts
       const wallDir = oa ? null : (this.phys.wallDirs.get(other.id) ?? null);
@@ -697,15 +740,21 @@ export class Game {
         playerWallGraceUntil: this.playerWallGraceUntil,
       });
       if (out.takedown) {
-        this.events.emit('flash', 'TAKEDOWN');
+        takedown = true;
+        // junction: the shunted car; race: the rival that just met the wall
+        const victim = out.wreckSelf && !self.isPlayer ? self : oa;
+        // signature zones (CRANE SMASH, CLIFF CRASH, …): scoring-only
+        // circles in the race def — a takedown whose victim lies inside one
+        // flashes the zone's name instead. Pure presentation, judged at the
+        // victim's position (the slam is where the wreck lands).
+        this.events.emit('flash', victim ? this.signatureName(victim) : 'TAKEDOWN');
+        this.audio.kaching(); // takedowns pay — ring it up
         this.playerWallGraceUntil = this.simTime + TAKEDOWN_WALL_GRACE;
         if (this.replay) {
           this.replay.stats.takedowns++;
           this.replay.lastTakedownAt = this.simTime;
         }
         this.control.boostMeter = BOOST_CAP; // takedowns steal their boost
-        // junction: the shunted car; race: the rival that just met the wall
-        const victim = out.wreckSelf && !self.isPlayer ? self : oa;
         if (victim) {
           if (out.graceOther && oa) this.checked.set(oa.body.id, this.simTime);
           _impact.set(victim.body.position.x, victim.body.position.y + 1, victim.body.position.z);
@@ -817,7 +866,10 @@ export class Game {
       // windows near the hit let go in a glitter burst
       if (impact > 5.5) {
         const broken = shatterGlass(self, p, 0.5 + impact * 0.09);
-        if (broken > 6) this.fx.glass.spawn(p, Math.min(40, broken >> 1), impact * 0.45);
+        if (broken > 6) {
+          this.fx.glass.spawn(p, Math.min(40, broken >> 1), impact * 0.45);
+          this.audio.glassBreak(p);
+        }
       }
       // axle sag: a heavy hit close to a corner bends it — that corner
       // carries less spring load from now on, so the wreck settles leaning
@@ -836,10 +888,19 @@ export class Game {
       this.fx.smoke.spawn(p, {});
     }
     if (impact > 9 && p.y < 1.6) this.fx.scorch.add(p.x, p.z);
-    if (impact > 9.5 && self.kind === 'vehicle' && self.popped < 3 && simRand() < 0.75) this.popLooseWheel(self, p);
+    // wheels belong to wrecks, like the crumple/panel ledger above — an
+    // un-gated pop let every hard ram strip a LIVE car (three takedowns =
+    // three of the player's own wheels gone = an undriveable hulk that
+    // never gets the crash respawn)
+    if (impact > 9.5 && self.kind === 'vehicle' && self.crashed && self.popped < 3 && simRand() < 0.75) {
+      this.popLooseWheel(self, p);
+    }
 
-    this.audio.thump(impact, this.timeScale);
-    this.director.addShake(impact * 0.045);
+    this.audio.crash(impact, p, scenery);
+    // shake is the player's haptics — only their own contacts (or a takedown
+    // they earned via a chain) rattle the camera; rival-on-rival hits and
+    // rivals finding walls across the junction stay audible-only
+    if (self.isPlayer || oa?.isPlayer || takedown) this.director.addShake(impact * 0.045);
     if (impact > 5) this.director.focusTarget.copy(p);
 
     // crashtime extension (the trigger lives in the crash-marking block)
@@ -848,12 +909,27 @@ export class Game {
     }
   }
 
+  /** The takedown's flash text: the name of the signature zone the victim
+   *  sits in, or plain TAKEDOWN. Zones are circles in the race def with no
+   *  colliders — the red/white wall stays the actual wrecking surface. */
+  private signatureName(victim: Actor): string {
+    const sigs = this.level.mode.kind === 'race' ? this.level.mode.race.signatures : undefined;
+    if (sigs) {
+      const p = victim.body.position;
+      for (const z of sigs) {
+        if (Math.hypot(p.x - z.x, p.z - z.z) <= z.r) return z.name;
+      }
+    }
+    return 'TAKEDOWN';
+  }
+
   /** Wreck an actor: the full collision mask returns (wrecks tumble over
    *  ramps and plinths) and each non-player vehicle charges the
    *  crashbreaker a step, Burnout-Revenge style. */
   private markCrashed(a: Actor): void {
     if (a.crashed) return;
     if (a.isPlayer && this.replay) {
+      this.replay.stats.playerWrecks++;
       const dt = this.simTime - this.replay.lastTakedownAt;
       if (dt < this.replay.stats.takedownToPlayerCrashMin) this.replay.stats.takedownToPlayerCrashMin = +dt.toFixed(3);
     }
@@ -908,7 +984,10 @@ export class Game {
 
   private popLooseWheel(actor: Actor, p: THREE.Vector3): void {
     const part = popWheel(actor, p, this.scene, this.phys.world, this.phys.matCar);
-    if (part) this.looseParts.push(part);
+    if (part) {
+      this.looseParts.push(part);
+      this.audio.wheelPop(p);
+    }
   }
 
   /** A panel crossed its detach threshold: door/bonnet/boot flies off. */
@@ -919,12 +998,13 @@ export class Game {
     this.looseParts.push({ mesh: panel.mesh, body });
     panel.mesh.getWorldPosition(_panelPos);
     this.fx.sparks.spawn(_panelPos, 12, 4);
+    this.audio.clank(_panelPos);
   };
 
   private collectMultiplier(mult: number, pos: THREE.Vector3): void {
     this.mode.score?.raiseMultiplier(mult);
     this.fx.sparks.spawn(pos, 30, 4);
-    this.audio.ding();
+    this.audio.ding(pos);
     this.mode.score?.floatAt(pos, `x${mult} MULTIPLIER`);
   }
 
@@ -956,6 +1036,7 @@ export class Game {
     this.state = GameState.Done;
     this.events.emit('state', this.state);
     this.events.emit('report', report);
+    this.audio.fanfare(report.medal);
   }
 
   private updateTimeScale(dt: number): void {
@@ -1009,8 +1090,8 @@ export class Game {
       // physics-owned but the player can lean on it a little
       if (a.isPlayer && !a.crashed) {
         const steer =
-          (this.keys['ArrowRight'] || this.keys['KeyD'] ? 1 : 0) -
-          (this.keys['ArrowLeft'] || this.keys['KeyA'] ? 1 : 0);
+          (this.simKeys['ArrowRight'] || this.simKeys['KeyD'] ? 1 : 0) -
+          (this.simKeys['ArrowLeft'] || this.simKeys['KeyA'] ? 1 : 0);
         if (steer) {
           const v = a.body.velocity;
           const sp = Math.hypot(v.x, v.z);
@@ -1045,11 +1126,11 @@ export class Game {
     if (p && !p.crashed && p.destabilized <= 0 && this.state !== GameState.Idle && this.state !== GameState.Done) {
       let input = {
         steer:
-          (this.keys['ArrowRight'] || this.keys['KeyD'] ? 1 : 0) -
-          (this.keys['ArrowLeft'] || this.keys['KeyA'] ? 1 : 0),
-        throttle: !!(this.keys['ArrowUp'] || this.keys['KeyW']),
-        boost: !!(this.keys['Space'] || this.keys['ShiftLeft'] || this.keys['ShiftRight']),
-        brake: !!(this.keys['ArrowDown'] || this.keys['KeyS']),
+          (this.simKeys['ArrowRight'] || this.simKeys['KeyD'] ? 1 : 0) -
+          (this.simKeys['ArrowLeft'] || this.simKeys['KeyA'] ? 1 : 0),
+        throttle: !!(this.simKeys['ArrowUp'] || this.simKeys['KeyW']),
+        boost: !!(this.simKeys['Space'] || this.simKeys['ShiftLeft'] || this.simKeys['ShiftRight']),
+        brake: !!(this.simKeys['ArrowDown'] || this.simKeys['KeyS']),
       };
       if (this.takedownCamT > 0) {
         // takedown cam: the autopilot holds the middle of the road while
@@ -1070,10 +1151,10 @@ export class Game {
     if ((this.state === GameState.Crash || this.state === GameState.Settle) && this.player?.crashed) {
       let ix = 0;
       let iz = 0;
-      if (this.keys['ArrowUp']) iz += 1;
-      if (this.keys['ArrowDown']) iz -= 1;
-      if (this.keys['ArrowLeft']) ix -= 1;
-      if (this.keys['ArrowRight']) ix += 1;
+      if (this.simKeys['ArrowUp']) iz += 1;
+      if (this.simKeys['ArrowDown']) iz -= 1;
+      if (this.simKeys['ArrowLeft']) ix -= 1;
+      if (this.simKeys['ArrowRight']) ix += 1;
       if (ix || iz) {
         this.aftertouchActive = true;
         this.camera.getWorldDirection(_fwd);
@@ -1183,6 +1264,7 @@ export class Game {
         a.smokeT = 0.3 + Math.random() * 0.25;
         _hood.set(0, 0.7, -(a.spec ? a.spec.length * 0.3 : 1.4));
         this.fx.smoke.spawn(a.group.localToWorld(_hood.clone()), { dark: true });
+        if (Math.random() < 0.35) this.audio.crackle(a.group.position);
       }
     }
   }
@@ -1262,11 +1344,13 @@ export class Game {
       stats: {
         maxAltitude: 0, maxUpwardSpeed: 0, maxTiltDeg: 0,
         takedowns: 0, takedownToPlayerCrashMin: 999, finalOffTrack: 0,
-        playerSlams: 0, rivalShunts: 0,
+        playerSlams: 0, rivalShunts: 0, playerWrecks: 0, playerPopped: 0,
+        rivalWallHits: 0,
       },
     };
     this.pendingCmds.length = 0;
     this.keys = {};
+    this.simKeys = {};
     this.reset(); // beginTake() sees this.replay: recorded seed, recorder disarmed
     this.events.emit('replay', true);
     this.events.emit('flash', fast ? 'VERIFYING REPLAY' : 'REPLAY');
@@ -1281,6 +1365,7 @@ export class Game {
     }
     r.frame++;
     this.keys = keysFromMask(r.file.keyMasks[f]);
+    this.simKeys = this.keys; // nothing mutates keys mid-frame during a replay
     let cmds: Command[] = NO_CMDS;
     while (r.cmdIdx < r.file.commands.length && r.file.commands[r.cmdIdx].f === f) {
       if (cmds === NO_CMDS) cmds = [];
@@ -1296,6 +1381,7 @@ export class Game {
     r.stats.finalOffTrack = +this.mode.playerOffTrackDistance().toFixed(1);
     this.replay = null;
     this.keys = {};
+    this.simKeys = {};
     const result: ReplayResult = {
       ok: !aborted && !r.diverged,
       aborted,
@@ -1346,6 +1432,7 @@ export class Game {
     const uy = 1 - 2 * (b.quaternion.x * b.quaternion.x + b.quaternion.z * b.quaternion.z);
     const tilt = (Math.acos(Math.max(-1, Math.min(1, uy))) * 180) / Math.PI;
     if (tilt > r.stats.maxTiltDeg) r.stats.maxTiltDeg = tilt;
+    if (!p.crashed && p.popped > r.stats.playerPopped) r.stats.playerPopped = p.popped;
   }
 
   /** Record (live) or verify (replay) the world hash at checksum cadence. */
@@ -1421,6 +1508,25 @@ export class Game {
         // a barrier at forced speed slowly pole-vaults off its top edge)
         if (a.body.velocity.y > RAMP_LAUNCH_VY_MAX) a.body.velocity.y = RAMP_LAUNCH_VY_MAX;
       }
+      // a LIVE car in solver contact with ANYTHING stays planted. Designed
+      // jumps come from the suspension ground-follow — live chassis don't
+      // even collide with ramps (décor-filtered) — so every upward kick a
+      // contact equation produces is an artifact: climbing a rival's
+      // bodywork (or the wreck it just became, or a shed panel), and the
+      // wall-top box-corner pole-vault the old per-step budget only
+      // bounded. A 48 m/s rammer rode all three 6 m over the barrier.
+      // Crashed cars are exempt (flings belong to wrecks — a junction
+      // player plowing into a pileup is wrecked by the judgment before
+      // the fling); batted poles/barrels aren't vehicles and still fly.
+      _contactIds.clear();
+      for (const c of this.phys.world.contacts) {
+        _contactIds.add(c.bi.id);
+        _contactIds.add(c.bj.id);
+      }
+      for (const a of this.actors) {
+        if (a.kind !== 'vehicle' || a.crashed || !_contactIds.has(a.body.id)) continue;
+        if (a.body.velocity.y > LIVE_CAR_CONTACT_VY) a.body.velocity.y = LIVE_CAR_CONTACT_VY;
+      }
       this.updateFuses(FIXED_DT);
       this.simTime += FIXED_DT;
       this.accumulator -= FIXED_DT;
@@ -1478,16 +1584,35 @@ export class Game {
       const hidden = document.hidden;
       const dt = Math.min(elapsed, hidden ? 1.2 : 0.05);
       const cmds = this.pendingCmds.length ? this.pendingCmds.splice(0) : NO_CMDS;
-      this.recorder.frame(dt, maskFromKeys(this.keys), hidden, cmds);
+      const mask = maskFromKeys(this.keys);
+      this.recorder.frame(dt, mask, hidden, cmds);
+      this.simKeys = keysFromMask(mask);
       this.advance(dt, hidden, cmds);
     }
 
-    // engine note: revs saw through the gears, drop on every upshift
-    const driving = this.state === GameState.Launch && this.player && !this.player.crashed;
-    this.audio.engine(
-      this.control.rpm,
-      driving ? (this.control.boosting ? 0.11 : this.keys['ArrowUp'] || this.keys['KeyW'] ? 0.085 : 0.05) : 0,
-    );
+    // audio: one sim readout per rendered frame — engine/skid/boost/wind
+    // loops, the slow-mo warp, landing thumps and near-miss whooshes all
+    // hang off it. Presentation only: reads state, never writes back.
+    const p = this.player;
+    const af = this.audioFrame;
+    af.dt = Math.min(elapsed, 0.1);
+    af.timeScale = this.timeScale;
+    af.driving = this.state === GameState.Launch && !!p && !p.crashed;
+    af.speed = this.control.speed;
+    af.throttle = !!(this.keys['ArrowUp'] || this.keys['KeyW']);
+    af.boosting = this.control.boosting;
+    af.drifting = this.control.drifting;
+    const slipA = this.control.heading - this.control.velAngle;
+    const slip = Math.abs(Math.atan2(Math.sin(slipA), Math.cos(slipA))) / 0.7; // 0.7 rad ≈ the 40° drift cap
+    af.slip = this.control.drifting
+      ? Math.min(1, slip)
+      : (this.keys['ArrowDown'] || this.keys['KeyS']) && this.control.speed > 15
+        ? 0.3 // hard braking at speed chirps the tyres
+        : 0;
+    af.grounded = !p || p.crashed || p.susp.some((s) => s.grounded);
+    af.vy = p ? p.body.velocity.y : 0;
+    af.player = p;
+    this.audio.frame(af);
     this.renderer.render(this.scene, this.camera);
   };
 }

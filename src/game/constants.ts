@@ -44,6 +44,15 @@ export const DOWNFORCE_CAP = 1.0; // downforce ceiling (g)
 // solver catapults from chassis-box/ground contacts get eaten (hard landings
 // would otherwise relaunch off the box corner; see the boost-jump fixture).
 export const LIVE_VY_GAIN_PER_STEP = 1.0; // m/s per fixed step
+// Upward-velocity ceiling for a LIVE car during any solver contact.
+// Designed jumps ride the suspension ground-follow (live chassis are
+// décor-filtered off the ramps entirely), so contact-equation lift is
+// always an artifact: the per-step gain cap above still allows 120 m/s²,
+// and a 48 m/s rammer used it to climb a rival's bodywork, then the
+// wreck it became, then the wall top — 6 m over the barrier. Contact is
+// a shunt or a scrape, not a ramp: same 1.5 the destabilized-slide rule
+// uses. Crashed cars are exempt — flings belong to wrecks.
+export const LIVE_CAR_CONTACT_VY = 1.5; // m/s
 // Ceiling on the vy the kinematic ground-follow hands a car riding a rising
 // height field. The per-surface √(4·g·height) bound is what keeps kerbs and
 // ramp side-skirts (which read as 30+ m/s rises when crossed at speed) down
@@ -70,3 +79,9 @@ export const CRASHBREAKER_POWER = 1.9;
 // glances (speed still scrubs) and the victim's debris can't destabilize.
 // Sized to outlast the 1.7 s camera beat.
 export const TAKEDOWN_WALL_GRACE = 2.0;
+
+// A pileup launch can throw a live car clean over the barrier; it
+// self-rights on the grass but the circuit is walled — there is no way
+// back. After this long continuously off the track, the reset-pair
+// respawn brings the player home.
+export const OFF_TRACK_RESCUE_SECS = 5;
