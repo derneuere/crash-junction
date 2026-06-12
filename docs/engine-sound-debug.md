@@ -1,5 +1,15 @@
 # Engine-sound pipeline debugging
 
+> **2026-06-12, culprit found:** `lockRpm` still sounded weird → the RPM
+> sweep was baked into the loop files themselves. The demos accelerate /
+> decelerate almost everywhere; the first cut windows rode those sweeps
+> (the V8 one sat right on the 25–32s crest of its demo). All loops were
+> re-cut from spectrogram-verified flat holds (V8 = the 13–25s maintained
+> cruise, V10 = held revs + the settled tail idle). Lesson: a "steady"
+> verdict from a drifting-tolerance pitch tracker is not steady — fit a
+> line and demand <1%/s, and read the harmonic ladder on a
+> `showspectrumpic` render before cutting.
+
 The recorded V10/V8 engines pass through these stages, in order. Each one
 can be bypassed at runtime to find which is hurting the sound:
 

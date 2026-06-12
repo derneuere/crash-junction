@@ -47,18 +47,19 @@ interface EngineSpec {
 }
 
 const ENGINES: Record<EngineFlavor, EngineSpec> = {
-  // V10: lumpy idle + steady high-rev loop, crossfaded across the band
+  // V10: settled idle + held cruise, both cut from spectrogram-verified
+  // flat-pitch holds (the demos mostly sweep — see engine-sound-debug.md)
   v10: {
     layers: [
-      { url: '/sounds/engine_v10_low.wav', f0: 47.5 },
-      { url: '/sounds/engine_v10_high.wav', f0: 90 },
+      { url: '/sounds/engine_v10_low.wav', f0: 30.2 },
+      { url: '/sounds/engine_v10_high.wav', f0: 90.3 },
     ],
-    fLo: 46,
+    fLo: 31,
     fHi: 120,
   },
-  // V8: one rumbly loop swept across the whole rev range
+  // V8: one flat cruise hold swept across the whole rev range
   v8: {
-    layers: [{ url: '/sounds/engine_v8.wav', f0: 46 }],
+    layers: [{ url: '/sounds/engine_v8.wav', f0: 47.7 }],
     fLo: 44,
     fHi: 96,
   },
@@ -258,7 +259,7 @@ export class GameAudio {
       const wi =
         this.engSrcs.length === 1
           ? 1
-          : Math.max(0.0001, 1 - Math.abs(Math.log2(target / l.f0)) / 1.2);
+          : Math.max(0.0001, 1 - Math.abs(Math.log2(target / l.f0)) / 1.0);
       w.push(wi);
       total += wi;
     }

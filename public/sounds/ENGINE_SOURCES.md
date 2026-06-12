@@ -8,11 +8,15 @@ Data" (https://www.youtube.com/watch?v=sUdnJTC2w9I), the "Tube Junctions
 open-source engine simulator (https://github.com/ange-yaghi/engine-sim).
 Personal prototype use only.
 
-| file                | content          | source cut (video time) | loop f0 |
-| ------------------- | ---------------- | ----------------------- | ------- |
-| engine_v10_low.wav  | V10 lumpy idle   | 1481.4s – 1482.6s       | ~47 Hz  |
-| engine_v10_high.wav | V10 steady revs  | 1468.5s – 1471.3s       | ~90 Hz  |
-| engine_v8.wav       | V8 rumble        | 1525.6s – 1528.8s       | ~46 Hz  |
+| file                | content           | source cut (video time) | loop f0 |
+| ------------------- | ----------------- | ----------------------- | ------- |
+| engine_v10_low.wav  | V10 settled idle  | 1489.0s – 1492.3s       | ~30 Hz  |
+| engine_v10_high.wav | V10 held revs     | 1467.4s – 1470.8s       | ~90 Hz  |
+| engine_v8.wav       | V8 cruise hold    | 1514.8s – 1520.3s       | ~48 Hz  |
+
+(Re-cut 2026-06-12: the first windows had RPM sweeps baked in — flagged by
+ear with engineDebug.lockRpm, confirmed on spectrograms. These cuts come
+from holds verified flat by linear-fit pitch tracking, <1%/s drift.)
 
 Each loop is made seamless by crossfading its tail into its head (qsin,
 0.35–0.6s), loudness-normalized to −16 LUFS, and stored as 24 kHz mono WAV —
