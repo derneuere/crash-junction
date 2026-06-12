@@ -213,13 +213,30 @@ export function resolveRaceContact(ctx: ContactContext): ContactOutcome {
     // chain shunt (#1): rival AI is velocity-driven and would soak a sliding
     // car's momentum dead — instead the slide knocks the blocker loose too.
     // Player credit propagates (Game), so a chained wall wreck still pays
-    // out as a TAKEDOWN, Burnout style.
+    // out as a TAKEDOWN, Burnout style. The destabilizedBy guard keeps the
+    // car that WON the contact from being read as a blocker by its own
+    // victim's mirrored collide event.
     !self.isPlayer && self.kind === 'vehicle' && !self.crashed && self.destabilized > 0 &&
     other?.kind === 'vehicle' && !other.isPlayer && !other.crashed && other.destabilized <= 0 &&
+    other.body.id !== self.destabilizedBy &&
     impact > 3
   ) {
     out.destabilizeOther = 1.4;
     out.shoveOther = Math.min(8, 3 + impact * 0.4);
+  } else if (
+    // rival-on-rival combat: two clean AI cars trading paint get the same
+    // aggressor judgment as the player — the loser picks up shunt mode and
+    // the kick. Only the winner's collide event applies it (the judgment is
+    // anti-symmetric), so the pair resolves exactly once. No takedown cam,
+    // no player credit — just rivals feuding in the mirrors, B3 style.
+    !self.isPlayer && self.kind === 'vehicle' && !self.crashed && self.destabilized <= 0 &&
+    other?.kind === 'vehicle' && !other.isPlayer && !other.crashed && other.destabilized <= 0 &&
+    impact > 4.5
+  ) {
+    if (judgeAggressor(self, other) === 'self') {
+      out.destabilizeOther = 1.5;
+      out.shoveOther = Math.min(9, 3.5 + impact * 0.45);
+    }
   }
   return out;
 }

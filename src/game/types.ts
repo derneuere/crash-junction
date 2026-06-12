@@ -69,7 +69,9 @@ export interface RaceDef {
   laps: number;
   width: number; // track ribbon width (m)
   sections: { x: number; z: number; dirX: number; dirZ: number; v: number }[];
-  rivals: { color: number; skill: number }[];
+  /** skill = corner-speed multiplier <1 (what makes them beatable);
+   *  aggression = appetite for shunts and slams, 0 (clean) … 1 (B3 bully). */
+  rivals: { color: number; skill: number; aggression: number }[];
 }
 
 /** What kind of run a level is — each arm carries only the data that mode
@@ -200,6 +202,11 @@ export interface Actor {
    *  wreck; if the player caused it, that wreck is a TAKEDOWN. */
   destabilized: number;
   destabilizedByPlayer: boolean;
+  /** Body id of the car whose ram caused the current destabilization (0 =
+   *  none). Stops the same contact pair from echoing: collide events fire on
+   *  BOTH bodies, and without this the loser's event would read its fresh
+   *  shunt mode as "a sliding car hit me" and knock the winner loose too. */
+  destabilizedBy: number;
   popped: number;
   damageLvl: number;
   smokeT: number;

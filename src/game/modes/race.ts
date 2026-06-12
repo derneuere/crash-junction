@@ -19,7 +19,7 @@ export class RaceMode implements GameMode {
       a.scripted = null; // rivals are driven by the RaceDirector, not traffic AI
       a.body.allowSleep = false; // a dozing racer ignores velocity writes
       a.body.wakeUp();
-      return { actor: a, skill: r.skill };
+      return { actor: a, skill: r.skill, aggression: r.aggression };
     });
     this.director = new RaceDirector(
       def, host.player, rivals, host.events,

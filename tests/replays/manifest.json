@@ -14,20 +14,20 @@
   },
   {
     "file": "takedown-self-crash.json",
-    "name": "race: a takedown must not wreck the player at the takedown site (report 2026-06-11)",
+    "name": "race: a takedown must not wreck the player at the takedown site (report 2026-06-11, re-recorded 2026-06-12 for the rival AI rework)",
     "assertMin": { "takedowns": 1, "takedownToPlayerCrashMin": 1.5 },
     "checksums": "ignore"
   },
   {
     "file": "takedown-cam-throw.json",
-    "name": "race: the takedown cam must not strand the player off the track (report 2026-06-11)",
+    "name": "race: the takedown cam must not strand the player off the track (report 2026-06-11, re-recorded 2026-06-12 for the rival AI rework)",
     "assertMin": { "takedowns": 1 },
     "assert": { "finalOffTrack": 5 },
     "checksums": "ignore"
   },
   {
     "file": "slam-misjudge.json",
-    "name": "race: a faster player winning a door-to-door is a shunt, not a SLAMMED (report 2026-06-11)",
+    "name": "race: a faster player winning a door-to-door is a shunt, not a SLAMMED (report 2026-06-11, re-recorded 2026-06-12 for the rival AI rework)",
     "assertMin": { "rivalShunts": 1 },
     "assert": { "playerSlams": 1 },
     "checksums": "ignore"
