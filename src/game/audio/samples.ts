@@ -1,5 +1,5 @@
-// Internet-sourced one-shots (public/sounds/, all CC0 — see LICENSES.md
-// there for the freesound/kenney provenance of every file).
+// Internet-sourced one-shots (public/sounds/, CC0 except the engine-sim
+// flavor WAVs — see LICENSES.md there for the provenance of every file).
 //
 // Clips are analyzed at decode time: leading silence is skipped via a
 // per-clip start offset and the peak is measured for a normalization
@@ -30,6 +30,13 @@ const MANIFEST = {
   engine_low: ['engine_low.mp3'],
   engine_mid: ['engine_mid.mp3'],
   engine_high: ['engine_high.mp3'],
+  // V10/V8 engine flavors (synths.ts ENGINE_FLAVORS), sampled from
+  // AngeTheGreat's engine simulator — see ENGINE_SOURCES.md alongside the
+  // files. Deliberately WAV: the seam crossfade is baked in and mp3
+  // encoder padding would break gapless decodeAudioData looping.
+  engine_v10_low: ['engine_v10_low.wav'],
+  engine_v10_high: ['engine_v10_high.wav'],
+  engine_v8: ['engine_v8.wav'],
   boost_loop: ['boost_loop.mp3'],
   shift: ['shift_0.mp3', 'shift_1.mp3', 'shift_2.mp3'],
 } as const;

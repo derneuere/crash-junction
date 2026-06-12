@@ -16,7 +16,9 @@
 
 import type { Actor } from '../types';
 import { SampleBank, type SampleName } from './samples';
-import { BoostLoop, EngineSound, SkidLoop, TrafficHum, WindLoop, makeImpulseResponse, makeNoiseBuffer } from './synths';
+import { BoostLoop, EngineSound, type EngineFlavor, SkidLoop, TrafficHum, WindLoop, makeImpulseResponse, makeNoiseBuffer } from './synths';
+
+export type { EngineFlavor };
 
 interface XYZ {
   x: number;
@@ -64,6 +66,7 @@ export class GameAudio {
   private bank = new SampleBank();
 
   private engine: EngineSound | null = null;
+  private engineFlavor: EngineFlavor = 'stock'; // App may set it before init()
   private skid: SkidLoop | null = null;
   private boost: BoostLoop | null = null;
   private wind: WindLoop | null = null;
@@ -127,6 +130,7 @@ export class GameAudio {
       wet.connect(this.masterIn);
 
       this.engine = new EngineSound(ctx, this.masterIn, this.noise, (n) => this.bank.pick(n));
+      this.engine.setFlavor(this.engineFlavor);
       this.skid = new SkidLoop(ctx, this.masterIn, this.noise, () => this.bank.pick('skid'));
       this.boost = new BoostLoop(ctx, this.masterIn, this.noise, () => this.bank.pick('boost_loop'));
       this.wind = new WindLoop(ctx, this.masterIn, this.noise);
@@ -140,6 +144,14 @@ export class GameAudio {
 
   resume(): void {
     if (this.ctx?.state === 'suspended') void this.ctx.resume();
+  }
+
+  /** Which recorded engine the player's car runs (HUD toggle). Live-swaps
+   *  the loop set; safe before init() too — the choice is applied when the
+   *  engine voice is built. */
+  setEngineFlavor(f: EngineFlavor): void {
+    this.engineFlavor = f;
+    this.engine?.setFlavor(f);
   }
 
   /** HMR remounts must not leak contexts — browsers cap them per page. */

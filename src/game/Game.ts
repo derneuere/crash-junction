@@ -41,7 +41,7 @@ import { applySuspension, type HeightSampler } from './suspension';
 import { PlayerControl, BOOST_CAP } from './control';
 import { Pickups } from './pickups';
 import { Effects } from './effects';
-import { GameAudio, type AudioFrameState } from './audio';
+import { GameAudio, type AudioFrameState, type EngineFlavor } from './audio';
 import { CameraDirector } from './camera';
 
 interface DeformJob {
@@ -349,6 +349,12 @@ export class Game {
 
     // dev console handle: window.__game.explode(...), inspect state, etc.
     (window as unknown as { __game: Game }).__game = this;
+  }
+
+  /** Engine sound flavor (stock onboard recording / sampled V10 / V8).
+   *  Pure audio — the sim, and so replay determinism, never sees it. */
+  setEngineFlavor(f: EngineFlavor): void {
+    this.audio.setEngineFlavor(f);
   }
 
   /** Day/night toggle: relights the scene, swaps sun ↔ moon, lights the

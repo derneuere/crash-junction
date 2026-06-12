@@ -1,6 +1,9 @@
 # Sound licenses
 
-All sounds are Creative Commons 0 (public domain). Sources:
+All sounds below are Creative Commons 0 (public domain). Exception: the
+`engine_v10_*.wav` / `engine_v8.wav` flavor loops are sampled from
+AngeTheGreat's engine-sound-simulator demos — personal prototype use only,
+provenance in ENGINE_SOURCES.md. Sources:
 
 ## freesound.org (CC0)
 

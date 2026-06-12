@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Game } from './game/Game';
+import type { EngineFlavor } from './game/audio';
 import type { TimeOfDay } from './game/daynight';
 import { LEVELS, type LevelId } from './game/levels';
 import { GameState } from './game/types';
@@ -29,6 +30,12 @@ export default function App() {
     localStorage.getItem('cj-tod') === 'night' ? 'night' : 'day',
   );
   const todRef = useRef(timeOfDay); // the remount effect reads the live value
+  const [engineSound, setEngineSoundState] = useState<EngineFlavor>(() => {
+    const saved = localStorage.getItem('cj-engine');
+    // default = stock (the pre-flavor behavior — switching voices is opt-in)
+    return saved === 'v10' || saved === 'v8' ? saved : 'stock';
+  });
+  const engineRef = useRef(engineSound);
 
   const setTimeOfDay = useCallback((t: TimeOfDay) => {
     setTimeOfDayState(t);
@@ -37,9 +44,17 @@ export default function App() {
     gameRef.current?.setTimeOfDay(t);
   }, []);
 
+  const setEngineSound = useCallback((f: EngineFlavor) => {
+    setEngineSoundState(f);
+    engineRef.current = f;
+    localStorage.setItem('cj-engine', f);
+    gameRef.current?.setEngineFlavor(f);
+  }, []);
+
   useEffect(() => {
     const game = new Game(containerRef.current!, LEVELS[levelId]);
     game.setTimeOfDay(todRef.current);
+    game.setEngineFlavor(engineRef.current);
     gameRef.current = game;
     levelRef.current = levelId;
     // a new engine instance always starts idle — resync the HUD
@@ -163,6 +178,8 @@ export default function App() {
         cineCam={cineCam}
         timeOfDay={timeOfDay}
         onSetTimeOfDay={setTimeOfDay}
+        engineSound={engineSound}
+        onSetEngineSound={setEngineSound}
         onCashDone={(id) => setCash((list) => list.filter((c) => c.id !== id))}
       />
     </>
