@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import * as CANNON from 'cannon-es';
-import { CRUSH_MAX, CRUSH_SCALE, GRAVITY, SUSP_MAX_COMP, SUSP_SAG, SUSP_ZETA } from './constants';
+import { CRUSH_MAX, CRUSH_VISUAL, GRAVITY, SUSP_MAX_COMP, SUSP_SAG, SUSP_ZETA } from './constants';
 import type { Actor, CollideEvent, DeformablePart, SuspensionCorner, VehicleSpawn, VehicleSpec, Variant } from './types';
 import { GROUP_DECOR, type PhysicsContext } from './physics';
 import { simRand } from './rng';
@@ -399,11 +399,11 @@ export function deformActor(actor: Actor, worldPoint: THREE.Vector3, strength: n
         if (_dir.lengthSq() < 0.001) _dir.set(0, -1, 0);
         _dir.normalize().negate(); // push toward hull core
         if (hasDir) _dir.multiplyScalar(0.4).addScaledVector(_ldir, 0.85).normalize();
-        const amt = strength * CRUSH_SCALE * f * (0.75 + Math.random() * 0.5);
+        const amt = strength * CRUSH_VISUAL * f * (0.75 + Math.random() * 0.5);
         _v.addScaledVector(_dir, amt);
-        _v.x += (Math.random() - 0.5) * 0.06 * f; // crumple jitter
-        _v.y += (Math.random() - 0.5) * 0.06 * f;
-        _v.z += (Math.random() - 0.5) * 0.06 * f;
+        _v.x += (Math.random() - 0.5) * 0.03 * f; // crumple jitter
+        _v.y += (Math.random() - 0.5) * 0.03 * f;
+        _v.z += (Math.random() - 0.5) * 0.03 * f;
 
         const bx = base[i * 3];
         const by = base[i * 3 + 1];

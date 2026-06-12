@@ -11,7 +11,12 @@ export const LAUNCH_SPEED = 39; // player top speed (m/s)
 export const LAUNCH_ACCEL = 34;
 
 export const CRUSH_MAX = 0.55; // max vertex crumple depth (m)
-export const CRUSH_SCALE = 0.1; // crumple amount per impact unit
+// Panel-damage sensor scale (BP-style detach thresholds are tuned to it).
+export const CRUSH_SCALE = 0.1;
+// Visual vertex crumple per impact unit — half the sensor scale: at full
+// scale a parking-speed tap already caved half the bodywork in. Hard
+// crashes still reach CRUSH_MAX, it just takes real hits to get there.
+export const CRUSH_VISUAL = 0.05;
 export const AFTERTOUCH_F = 9000; // aftertouch force (N) — sized to the 1.45 t sedan
 
 // ---- suspension + downforce (see suspension.ts) ----
