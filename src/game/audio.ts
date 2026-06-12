@@ -11,6 +11,33 @@ interface EngineLayer {
   url: string;
   f0: number;
   buffer?: AudioBuffer;
+  /** 48 kHz stereo variant of the same loop (the `_hifi` file) — only
+   *  played when engineDebug.hifi is set. */
+  bufferHifi?: AudioBuffer;
+}
+
+/** Console-tweakable A/B switches for hunting engine-sound quality
+ *  problems (`__game.audio.engineDebug.lockRate = true`, …). Every field
+ *  is re-read each frame, so changes apply instantly. Stage map and
+ *  listening recipes: docs/engine-sound-debug.md. */
+export interface EngineDebug {
+  /** Override the sim's rpm (0..1) to audition a fixed rev, parked. */
+  lockRpm: number | null;
+  /** Override the sim's volume (try 0.12 to hear it at the idle screen). */
+  lockVol: number | null;
+  /** Play every layer at its native pitch — disables the rpm pitch sweep. */
+  lockRate: boolean;
+  /** Play only this layer index (V10: 0 = idle loop, 1 = high loop). */
+  soloLayer: number | null;
+  /** Skip the rpm crossfade — every layer at full gain. */
+  noCrossfade: boolean;
+  /** Route the engine straight to the speakers, skipping the master
+   *  compressor (12:1 default ratio — a prime squash suspect). */
+  bypassCompressor: boolean;
+  /** Sample-path volume scale (ship value 2.5). */
+  gainScale: number;
+  /** Use the 48 kHz stereo loop files instead of 24 kHz mono. */
+  hifi: boolean;
 }
 
 interface EngineSpec {
@@ -47,6 +74,20 @@ export class GameAudio {
   private engFlavor: EngineFlavor = 'v10';
   private engSrcs: { src: AudioBufferSourceNode; gain: GainNode; f0: number }[] = [];
   private smpGain: GainNode | null = null;
+  private smpDirect = false; // current smpGain routing (true = past the compressor)
+  private engBufKey = ''; // flavor+fidelity the running sources were built from
+  private refSrc: AudioBufferSourceNode | null = null;
+  private refBufs = new Map<string, AudioBuffer>();
+  readonly engineDebug: EngineDebug = {
+    lockRpm: null,
+    lockVol: null,
+    lockRate: false,
+    soloLayer: null,
+    noCrossfade: false,
+    bypassCompressor: false,
+    gainScale: 2.5,
+    hifi: false,
+  };
 
   /** Call from a user gesture (autoplay policy). Safe to call repeatedly. */
   init(): void {
@@ -74,11 +115,18 @@ export class GameAudio {
     await Promise.all(
       Object.values(ENGINES)
         .flatMap((spec) => spec.layers)
-        .filter((layer) => !layer.buffer)
-        .map(async (layer) => {
+        .flatMap((layer) => [
+          { layer, hifi: false as const },
+          { layer, hifi: true as const },
+        ])
+        .filter(({ layer, hifi }) => (hifi ? !layer.bufferHifi : !layer.buffer))
+        .map(async ({ layer, hifi }) => {
           try {
-            const res = await fetch(layer.url);
-            layer.buffer = await ctx.decodeAudioData(await res.arrayBuffer());
+            const url = hifi ? layer.url.replace('.wav', '_hifi.wav') : layer.url;
+            const res = await fetch(url);
+            const buf = await ctx.decodeAudioData(await res.arrayBuffer());
+            if (hifi) layer.bufferHifi = buf;
+            else layer.buffer = buf;
           } catch {
             /* missing file → the synth engine keeps running */
           }
@@ -91,6 +139,10 @@ export class GameAudio {
   setEngineFlavor(f: EngineFlavor): void {
     if (f === this.engFlavor) return;
     this.engFlavor = f;
+    this.stopEngineSrcs(); // engine() rebuilds from the new flavor's loops
+  }
+
+  private stopEngineSrcs(): void {
     for (const l of this.engSrcs) {
       try {
         l.src.stop();
@@ -99,7 +151,48 @@ export class GameAudio {
       }
       l.gain.disconnect();
     }
-    this.engSrcs = []; // engine() rebuilds from the new flavor's loops
+    this.engSrcs = [];
+  }
+
+  /** A/B reference: play the untouched demo cut (48 kHz stereo, no loop,
+   *  no pitch-shift, no compressor) of the given engine — console use,
+   *  `__game.audio.playReference()`. */
+  playReference(flavor: EngineFlavor = this.engFlavor): void {
+    const ctx = this.ctx;
+    if (!ctx) return;
+    this.stopReference();
+    const url = `/sounds/ref_${flavor}_demo.mp3`;
+    const play = (buf: AudioBuffer) => {
+      const src = ctx.createBufferSource();
+      src.buffer = buf;
+      src.connect(ctx.destination);
+      src.start();
+      this.refSrc = src;
+    };
+    const cached = this.refBufs.get(url);
+    if (cached) {
+      play(cached);
+      return;
+    }
+    void fetch(url)
+      .then((r) => r.arrayBuffer())
+      .then((b) => ctx.decodeAudioData(b))
+      .then((buf) => {
+        this.refBufs.set(url, buf);
+        play(buf);
+      })
+      .catch(() => {
+        /* reference is a console-only tool, best-effort */
+      });
+  }
+
+  stopReference(): void {
+    try {
+      this.refSrc?.stop();
+    } catch {
+      /* already stopped */
+    }
+    this.refSrc = null;
   }
 
   resume(): void {
@@ -125,15 +218,27 @@ export class GameAudio {
    *  rpm; each layer pitch-shifts toward the target and the layers
    *  crossfade (equal-power) by log-pitch distance. */
   private sampleEngine(ctx: AudioContext, spec: EngineSpec, rpm: number, vol: number): void {
+    const dbg = this.engineDebug;
     if (!this.smpGain) {
       this.smpGain = ctx.createGain();
       this.smpGain.gain.value = 0;
       this.smpGain.connect(this.master!);
     }
+    if (this.smpDirect !== dbg.bypassCompressor) {
+      this.smpDirect = dbg.bypassCompressor;
+      this.smpGain.disconnect();
+      this.smpGain.connect(this.smpDirect ? ctx.destination : this.master!);
+    }
+    // rebuild the sources when the flavor or fidelity they were built
+    // from no longer matches (hifi only once all its variants decoded)
+    const useHifi = dbg.hifi && spec.layers.every((l) => l.bufferHifi);
+    const key = `${this.engFlavor}:${useHifi ? 'hifi' : 'std'}`;
+    if (this.engSrcs.length && this.engBufKey !== key) this.stopEngineSrcs();
     if (!this.engSrcs.length) {
+      this.engBufKey = key;
       for (const layer of spec.layers) {
         const src = ctx.createBufferSource();
-        src.buffer = layer.buffer!;
+        src.buffer = useHifi ? layer.bufferHifi! : layer.buffer!;
         src.loop = true;
         const gain = ctx.createGain();
         gain.gain.value = 0;
@@ -145,7 +250,8 @@ export class GameAudio {
     }
     const t = ctx.currentTime;
     this.engGain?.gain.setTargetAtTime(0, t, 0.05); // hand over from the synth
-    const target = spec.fLo * Math.pow(spec.fHi / spec.fLo, Math.min(1, Math.max(0, rpm)));
+    const r = Math.min(1, Math.max(0, dbg.lockRpm ?? rpm));
+    const target = spec.fLo * Math.pow(spec.fHi / spec.fLo, r);
     let total = 0;
     const w: number[] = [];
     for (const l of this.engSrcs) {
@@ -158,13 +264,16 @@ export class GameAudio {
     }
     for (let i = 0; i < this.engSrcs.length; i++) {
       const l = this.engSrcs[i];
-      const rate = Math.min(2.5, Math.max(0.5, target / l.f0));
+      const rate = dbg.lockRate ? 1 : Math.min(2.5, Math.max(0.5, target / l.f0));
+      let g = Math.sqrt(w[i] / total);
+      if (dbg.noCrossfade) g = 1;
+      if (dbg.soloLayer !== null) g = i === dbg.soloLayer ? 1 : 0;
       l.src.playbackRate.setTargetAtTime(rate, t, 0.03);
-      l.gain.gain.setTargetAtTime(Math.sqrt(w[i] / total), t, 0.06);
+      l.gain.gain.setTargetAtTime(g, t, 0.06);
     }
     // loops are loudness-normalized well below the raw oscillators —
     // scale vol so both paths sit at a comparable level
-    this.smpGain.gain.setTargetAtTime(vol * 2.5, t, 0.08);
+    this.smpGain.gain.setTargetAtTime((dbg.lockVol ?? vol) * dbg.gainScale, t, 0.08);
   }
 
   /** Oscillator fallback while the loops load (or if they never do). */

@@ -17,3 +17,8 @@ Personal prototype use only.
 Each loop is made seamless by crossfading its tail into its head (qsin,
 0.35–0.6s), loudness-normalized to −16 LUFS, and stored as 24 kHz mono WAV —
 mp3 encoder padding would break gapless looping in decodeAudioData.
+
+Debug companions (see docs/engine-sound-debug.md): `*_hifi.wav` = the same
+loops at 48 kHz stereo (engineDebug.hifi); `ref_v10_demo.mp3` /
+`ref_v8_demo.mp3` = the full untouched demo cuts for A/B reference
+(`__game.audio.playReference()`).
