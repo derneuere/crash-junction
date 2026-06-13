@@ -36,6 +36,15 @@ const POSES = {
   // meets the Preetham sky dome up top, and the cliff toe at frame-left to
   // confirm the waterline/foam seam reads. Frozen for the water art agent.
   water: { cam: [248, 20, 246], look: [338, -3, 322] },
+  // ART PASS — the SKY. Sky-dominant framing for the atmospheric-scattering
+  // pass (art-sky branch). Same open-water vantage as `water` but the eye is
+  // lifted and the look-at tilted UP toward the horizon so the upper two
+  // thirds of the frame are pure sky: the day→dusk→night gradient, the sun
+  // disc + glow, and the horizon haze band where the dome meets the sea. The
+  // sun preset azimuth is ~59.5° (down +x-ish); this vantage faces roughly
+  // SE so the dusk sun sits in-frame toward the right. Sea fills the lower
+  // third to confirm the env still reflects. LOCKED for the sky art agent.
+  sky: { cam: [248, 26, 246], look: [330, 22, 322] },
   // merge-pass seam views (NOT canonical — the four poses above are the
   // contract and stay frozen; these exist to eyeball zone-border stitching)
   // seam-1: the headland crag + the cliff→quay-wall coast seam + the
@@ -79,7 +88,7 @@ const TOD = todIdx >= 0 ? args[todIdx + 1] : 'day';
 const gfxIdx = args.indexOf('--gfx');
 const GFX = gfxIdx >= 0 ? args[gfxIdx + 1] : 'cine';
 if (!POSES[zone] || !Number.isInteger(PORT) || !['day', 'dusk', 'night'].includes(TOD) || !['cine', 'fast'].includes(GFX)) {
-  console.error('usage: node tools/refshot.mjs <dockyard|harbor|cliff|beach|water|seam-1|seam-2|sandwater|grass-sand> --port <port> [--tod day|dusk|night] [--gfx cine|fast]');
+  console.error('usage: node tools/refshot.mjs <dockyard|harbor|cliff|beach|water|sky|seam-1|seam-2|sandwater|grass-sand> --port <port> [--tod day|dusk|night] [--gfx cine|fast]');
   process.exit(1);
 }
 if (parseInt(process.versions.node, 10) < 18) {

@@ -457,9 +457,15 @@ export class Game {
     this.sun.intensity = p.sunInt;
 
     if (night) {
-      // no physical night sky — flat dark background, moon key light, and
-      // the lamp-glint showroom doubles as the world's (faint) IBL
-      this.skyRig.mesh.visible = false;
+      // night now has a real scattered-blue dome (deep-blue gradient + stars +
+      // a faint horizon glow) instead of a flat dark background, but the
+      // lamp-glint showroom still drives scene.environment — the moon is a weak
+      // key light and the dome's own IBL would be near-black, so cars/ocean
+      // keep reading the established night reflections. The sun preset puts the
+      // disc below the horizon (intensity 0), so the dome contributes only the
+      // night sky, not a stray sun. Moon key-light direction unchanged.
+      this.skyRig.mesh.visible = true;
+      this.skyRig.configure(SKY_PRESETS.night);
       this.sunDirUnit.set(-30, 48, -24).normalize();
       this.scene.environment = this.envTex.night!;
     } else {
