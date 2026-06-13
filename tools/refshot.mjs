@@ -73,6 +73,13 @@ const POSES = {
   // frame, the motel is out of frame to the right. LOCKED — do not move the
   // framing (art-grass-sand contract).
   'grass-sand': { cam: [-198, 8, -120], look: [-238, 0, -180] },
+  // grasslow / grasschase: TEMPORARY poses added by the grass-lush pass to judge
+  // chase-cam lushness at driving height (~2.4 m eye). grasslow sits low in open
+  // SW-island grass looking across the verge; grasschase mimics a chase cam a few
+  // metres up looking down the start straight. NOT canonical — added only to
+  // eyeball the FluffyGrass-look rebuild; keep or revert at will (grass agent).
+  grasslow: { cam: [-170, 2.4, -150], look: [-150, 1.4, -120] },
+  grasschase: { cam: [-30, 3.0, -226], look: [120, 1.0, -222] },
 };
 
 // ---- CLI ----
@@ -88,7 +95,7 @@ const TOD = todIdx >= 0 ? args[todIdx + 1] : 'day';
 const gfxIdx = args.indexOf('--gfx');
 const GFX = gfxIdx >= 0 ? args[gfxIdx + 1] : 'cine';
 if (!POSES[zone] || !Number.isInteger(PORT) || !['day', 'dusk', 'night'].includes(TOD) || !['cine', 'fast'].includes(GFX)) {
-  console.error('usage: node tools/refshot.mjs <dockyard|harbor|cliff|beach|water|sky|seam-1|seam-2|sandwater|grass-sand> --port <port> [--tod day|dusk|night] [--gfx cine|fast]');
+  console.error('usage: node tools/refshot.mjs <dockyard|harbor|cliff|beach|water|sky|seam-1|seam-2|sandwater|grass-sand|grasslow|grasschase> --port <port> [--tod day|dusk|night] [--gfx cine|fast]');
   process.exit(1);
 }
 if (parseInt(process.versions.node, 10) < 18) {

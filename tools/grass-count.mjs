@@ -54,6 +54,10 @@ const POSES = {
   'drive-roadblock': { cam: [-215, 3.2, 60], look: [-238, 1, 20] }, // chicane
   'drive-beach-fork': { cam: [-250, 3.2, -45], look: [-235, 1, -86] }, // beach fork
   'drive-village': { cam: [-150, 3.2, -100], look: [-130, 1, -150] }, // village snake
+  // grass-lush TEMP: a tight low closeup over a dense inland grass patch (NOT on
+  // the road), eye ~2.4 m looking slightly down across the verge — the truest
+  // judge of chase-cam carpet lushness vs the FluffyGrass demo. Keep or revert.
+  'grass-closeup': { cam: [-120, 2.4, -90], look: [-150, 0.6, -120] },
 };
 
 const args = process.argv.slice(2);
