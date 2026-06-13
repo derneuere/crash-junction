@@ -1336,7 +1336,7 @@ export function buildEnvironment(scene: THREE.Scene, phys: PhysicsContext, level
   // AUGMENTS the textured ground + dune fringe above (does not replace them).
   // Coast levels only (the band is GANTRY-specific); render-driven, pin-safe.
   // See grass.ts for the bounded-band + tier perf strategy and attribution.
-  if (level.coast) grass = buildGrass(scene);
+  if (level.coast) grass = buildGrass(scene, level);
 
   const roadMat = new THREE.MeshStandardMaterial({ color: 0x2e3138, roughness: 0.95 });
 

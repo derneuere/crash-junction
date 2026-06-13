@@ -2025,7 +2025,7 @@ export class Game {
 
     // presentation pixels only from here down — the sim never reads back
     this.sea?.update(af.dt); // animate the waves off RENDER time (pin-safe)
-    this.grass?.update(af.dt); // sway the blades off RENDER time (pin-safe)
+    this.grass?.update(af.dt, this.camera.position); // sway + distance-cull off RENDER time (pin-safe)
     this.updateShadowRig();
     this.sunFlare.update(this.camera, this.sunSprite.position, af.dt, this.sunSprite.visible, () => this.flareOccluded());
     if (this.cineActive()) {
