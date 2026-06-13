@@ -55,13 +55,16 @@ uniform float uNight;        // 0 day .. 1 night — blends in stars + night tin
 uniform vec3 uNightTint;     // deep scattered-blue night sky colour
 uniform float uStarStrength; // star field brightness (night only)
 
-// HALF-RES CLOUD BUFFER (skyenv.ts): premultiplied cloud RGBA, filled by the
-// cloud pass each frame. When uUseCloudBuffer > 0.5 the dome SAMPLES this (cheap
-// bilinear upscale) instead of running the per-pixel raymarch inline. The bake
-// path (and any buffer-less render) leaves it 0 and falls back to applyClouds().
-uniform sampler2D uCloudBuffer;
-uniform float uUseCloudBuffer; // 1 = sample the half-res buffer, 0 = inline march
-uniform vec2 uResolution;      // full-res target size, for the screen-space lookup
+// BAKED CLOUD PANORAMA (skyenv.ts): a high-res equirectangular texture holding
+// the FULL-RES, clean, per-tod cloud field (premultiplied RGBA), baked once per
+// time-of-day. When uUseCloudTex > 0.5 the dome SAMPLES this by view direction
+// (one texture2D — no raymarch) and composites premultiplied-over. The env-bake
+// path (and any texture-less render) leaves it 0 and falls back to applyClouds()
+// (with cloud density forced to 0 there anyway). uCloudDrift slowly scrolls the
+// azimuth lookup for a cheap sense of motion off a static bake (render-time).
+uniform sampler2D uCloudTex;
+uniform float uUseCloudTex;  // 1 = sample the baked panorama, 0 = inline march
+uniform float uCloudDrift;   // azimuth scroll of the lookup (render-clock driven)
 
 const float PI = 3.14159265359;
 
@@ -238,13 +241,17 @@ void main() {
   // Applied AFTER the sun disc so a cloud passing the sun dims its glow, and
   // BEFORE the horizon/night tint so the night blend darkens clouds too.
   //
-  // PERF: the heavy raymarch runs in a HALF-RES pass (skyenv.ts); here the dome
-  // just samples that premultiplied RGBA buffer (bilinear upscale — invisible on
-  // low-frequency clouds) and composites sky*(1-a)+rgb. The inline applyClouds()
-  // fallback runs only when no buffer is bound (the PMREM bake, which zeroes
-  // cloud density anyway).
-  if (uUseCloudBuffer > 0.5) {
-    vec4 c = texture2D(uCloudBuffer, gl_FragCoord.xy / uResolution);
+  // PERF: the heavy raymarch is PRERENDERED once per time-of-day into a high-res
+  // equirect panorama (skyenv.ts cloudBake); here the dome just samples it by
+  // view direction (one texture2D — full-res, clean, no per-frame march) and
+  // composites sky*(1-a)+rgb. uCloudDrift scrolls the azimuth lookup slowly for a
+  // sense of motion off the static bake. The inline applyClouds() fallback runs
+  // only when no panorama is bound (the PMREM env bake, which zeroes cloud
+  // density anyway).
+  if (uUseCloudTex > 0.5) {
+    vec2 cuv = dirToEquirectUv(rd);
+    cuv.x = fract(cuv.x + uCloudDrift); // slow azimuth scroll (wraps seamlessly)
+    vec4 c = texture2D(uCloudTex, cuv);
     sky = sky * (1.0 - c.a) + c.rgb;
   } else {
     sky = applyClouds(rd, sky, sunTrans);

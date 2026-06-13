@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { SKY_VERT, SKY_FRAG } from './skyscatter.glsl';
-import { CLOUD_PASS_VERT, CLOUD_PASS_FRAG } from './skyclouds.glsl';
+import { CLOUD_BAKE_VERT, CLOUD_BAKE_FRAG } from './skyclouds.glsl';
 
 // The world's image-based lighting. A custom atmospheric-scattering dome
 // (Rayleigh + Mie + ozone single-pass raymarch, ported from Sebastian Lague's
@@ -104,14 +104,11 @@ function toVec(c: THREE.ColorRepresentation): THREE.Vector3 {
   return new THREE.Vector3(_col.r, _col.g, _col.b);
 }
 
-/** scratch for reading the renderer's current drawing-buffer size */
-const _sizeTmp = new THREE.Vector2();
-
 // ---- sun transmittance at the eye (JS port of skyscatter.glsl) ----
 // The cloud march needs the sun's atmospheric transmittance at the eye — the
 // ONE scattering value it can't compute on its own (it carries no atmosphere
 // model). In the inline dome path the frag computes sunTransmittance(ro); the
-// half-res cloud pass instead receives it as a uniform. This is a faithful,
+// equirect cloud bake instead receives it as a uniform. This is a faithful,
 // byte-for-byte-intent port of skyscatter.glsl's sunTransmittance/getScattering
 // at ro = (0, groundRadius+0.2, 0): it depends only on the sun direction + the
 // (per-time-of-day) scattering coefficients, so it is computed ONCE per
@@ -182,18 +179,22 @@ export class SkyRig {
   private rt: THREE.WebGLRenderTarget | null = null;
   private readonly material: THREE.ShaderMaterial;
 
-  // ---- half-res cloud pass (the perf win) ----
-  /** Quarter-area HDR target the cloud march writes premultiplied RGBA into. */
-  private cloudRT: THREE.WebGLRenderTarget;
+  // ---- equirect cloud bake (the perf win) ----
+  /** High-res equirect HDR panorama; the cloud march fills it ONCE per tod with
+   *  a clean, full-res, premultiplied-RGBA cloud field. The dome samples it by
+   *  view direction every frame (a texture fetch, not a raymarch). */
+  private readonly cloudTex: THREE.WebGLRenderTarget;
   private readonly cloudMat: THREE.ShaderMaterial;
   private readonly cloudScene = new THREE.Scene();
   private readonly cloudCam = new THREE.Camera();
   private readonly cloudQuad: THREE.Mesh;
-  /** divisor on the full render size — 2 = half-res (quarter the pixels). */
-  private readonly CLOUD_DOWNSCALE = 2;
-  private readonly _invViewProj = new THREE.Matrix4();
-  private fullW = 1;
-  private fullH = 1;
+  /** equirect panorama resolution. 2048×1024 ≈ 5.7 px/° — crisp at the horizon,
+   *  no visible texel blur, while a full-res live raymarch is retired. */
+  private readonly CLOUD_TEX_W = 2048;
+  private readonly CLOUD_TEX_H = 1024;
+  /** view/light march steps for the HIGH-quality bake (no jitter, clean). */
+  private readonly BAKE_VIEW_STEPS = 48;
+  private readonly BAKE_LIGHT_STEPS = 12;
 
   constructor() {
     this.material = new THREE.ShaderMaterial({
@@ -218,22 +219,28 @@ export class SkyRig {
         uNight: { value: 0 },
         uNightTint: { value: new THREE.Vector3(0.04, 0.08, 0.19) },
         uStarStrength: { value: 0.9 },
-        // cloud layer (skyclouds.glsl.ts) — uCloudTime is driven per render
-        // frame off Game's RENDER clock (pin-safe, like the sea/grass drift)
-        uCloudTime: { value: 0 },
+        // cloud layer (skyclouds.glsl.ts)
         uCloudCoverage: { value: 0.42 },
         uCloudDensity: { value: 0.9 },
         // tile scale of the cloud field (bigger value = smaller, more numerous
         // clouds). Tuned so the sky pose shows a handful of readable cumulus.
         uCloudHeight: { value: 1.4 },
         uCloudTint: { value: new THREE.Vector3(0.72, 0.78, 0.84) },
-        // HALF-RES CLOUD BUFFER: the dome samples this premultiplied RGBA target
-        // (filled by renderClouds() each frame) instead of marching clouds
-        // inline. uUseCloudBuffer gates it; the bake path turns it off so the
-        // inline fallback runs (with cloud density forced to 0 anyway).
-        uCloudBuffer: { value: null as THREE.Texture | null },
-        uUseCloudBuffer: { value: 0 },
-        uResolution: { value: new THREE.Vector2(1, 1) },
+        // bake-quality knobs (the inline fallback only runs at env-bake time,
+        // where density is forced to 0, so a low count is fine here; the equirect
+        // bake material below overrides these with HIGH counts).
+        uViewSteps: { value: 24 },
+        uLightSteps: { value: 6 },
+        uCloudBake: { value: 0 },
+        // BAKED CLOUD PANORAMA: the dome samples this high-res equirect texture
+        // (premultiplied RGBA, baked once per tod by cloudBake()) by view
+        // direction instead of marching inline. uUseCloudTex gates it; the env
+        // PMREM bake turns it off so the inline fallback runs (density 0 anyway).
+        uCloudTex: { value: null as THREE.Texture | null },
+        uUseCloudTex: { value: 0 },
+        // azimuth scroll of the cloud lookup — driven per render frame off Game's
+        // RENDER clock (pin-safe, like the sea/grass drift) for cheap motion.
+        uCloudDrift: { value: 0 },
       },
     });
     // a unit sphere scaled large enough to enclose the camera path; the vertex
@@ -244,27 +251,29 @@ export class SkyRig {
     this.mesh.frustumCulled = false;
     this.mesh.renderOrder = -1; // draw the background first
 
-    // --- cloud pass setup ---
+    // --- equirect cloud bake setup ---
     // HDR target (HalfFloat) so the cloud march's >1 sunlit radiance + the
-    // composer's bloom survive; RGBA so the premultiplied colour + coverage
-    // alpha round-trip. Linear filtering gives the free bilinear upscale that
-    // makes half-res clouds read as full-res (they're low-frequency).
-    this.cloudRT = new THREE.WebGLRenderTarget(1, 1, {
+    // composer's bloom survive; RGBA so the premultiplied colour + coverage alpha
+    // round-trip. Linear filtering gives smooth bilinear sampling on the dome.
+    // ClampToEdge on v (poles), wrap on u so the azimuth drift scroll is seamless.
+    this.cloudTex = new THREE.WebGLRenderTarget(this.CLOUD_TEX_W, this.CLOUD_TEX_H, {
       type: THREE.HalfFloatType,
       format: THREE.RGBAFormat,
       minFilter: THREE.LinearFilter,
       magFilter: THREE.LinearFilter,
+      wrapS: THREE.RepeatWrapping,
+      wrapT: THREE.ClampToEdgeWrapping,
       depthBuffer: false,
       stencilBuffer: false,
     });
-    // the cloud-pass material shares the dome's cloud/sun uniform OBJECTS so a
-    // single configure()/setCloudTime() write drives both paths in lockstep —
-    // no risk of the buffer and the (fallback) inline march disagreeing.
+    // the bake material shares the dome's cloud/sun uniform OBJECTS so a single
+    // configure() write drives both in lockstep — but overrides the step/jitter
+    // knobs with HIGH-quality bake values (its own uniform entries).
     const du = this.material.uniforms;
     this.cloudMat = new THREE.ShaderMaterial({
-      name: 'CloudHalfResPass',
-      vertexShader: CLOUD_PASS_VERT,
-      fragmentShader: CLOUD_PASS_FRAG,
+      name: 'CloudEquirectBake',
+      vertexShader: CLOUD_BAKE_VERT,
+      fragmentShader: CLOUD_BAKE_FRAG,
       depthWrite: false,
       depthTest: false,
       uniforms: {
@@ -273,68 +282,61 @@ export class SkyRig {
         uSunTint: du.uSunTint,
         uSunIntensity: du.uSunIntensity,
         uNight: du.uNight,
-        uCloudTime: du.uCloudTime,
         uCloudCoverage: du.uCloudCoverage,
         uCloudDensity: du.uCloudDensity,
         uCloudHeight: du.uCloudHeight,
         uCloudTint: du.uCloudTint,
-        // cloud-pass only: the sun transmittance at the eye (computed per
-        // configure) + the camera reconstruction matrices (set per frame)
+        // bake-only HIGH-quality march: many steps, no jitter → clean field
+        uViewSteps: { value: this.BAKE_VIEW_STEPS },
+        uLightSteps: { value: this.BAKE_LIGHT_STEPS },
+        uCloudBake: { value: 1 },
+        // the sun transmittance at the eye (computed per configure)
         uSunTrans: { value: new THREE.Vector3(1, 1, 1) },
-        uInvViewProj: { value: new THREE.Matrix4() },
-        uCameraPos: { value: new THREE.Vector3() },
       },
     });
-    // a fullscreen triangle (oversized quad clipped to the viewport); the vertex
-    // shader ignores the projection and writes clip space directly.
+    // a fullscreen quad covering the equirect target; the vertex shader ignores
+    // the projection and writes clip space directly (uv spans the panorama).
     const quadGeo = new THREE.PlaneGeometry(2, 2);
     this.cloudQuad = new THREE.Mesh(quadGeo, this.cloudMat);
     this.cloudQuad.frustumCulled = false;
     this.cloudScene.add(this.cloudQuad);
   }
 
-  /** Render the half-res cloud buffer for THIS frame's camera, then point the
-   *  dome at it. Call once per frame from the render path, AFTER setCloudTime()
-   *  and BEFORE the main scene render. Presentation-only: it reads the render
-   *  camera + render clock and writes an offscreen texture — never sim state, so
-   *  it's pin-safe exactly like the sea/grass drift it sits beside. */
-  renderClouds(renderer: THREE.WebGLRenderer, camera: THREE.PerspectiveCamera): void {
-    // self-sync the full-res size to whatever the renderer is currently drawing
-    // at. The dome composites via gl_FragCoord.xy / uResolution, and gl_FragCoord
-    // is in DRAWING-BUFFER pixels (CSS size × pixelRatio), which is also the
-    // resolution the composer's RenderPass and the raw canvas render at — so
-    // uResolution + the cloud buffer must track the drawing-buffer size. This
-    // also keeps offscreen captures correct: refshot/probes call
-    // renderer.setSize()/setPixelRatio() directly, never onResize/setSize.
-    renderer.getDrawingBufferSize(_sizeTmp);
-    if (_sizeTmp.x !== this.fullW || _sizeTmp.y !== this.fullH) {
-      this.setSize(_sizeTmp.x, _sizeTmp.y);
-    }
-
-    // reconstruct the world-space view ray in the pass from inverse(P*V)
-    this._invViewProj.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse).invert();
-    (this.cloudMat.uniforms.uInvViewProj.value as THREE.Matrix4).copy(this._invViewProj);
-    (this.cloudMat.uniforms.uCameraPos.value as THREE.Vector3).setFromMatrixPosition(camera.matrixWorld);
-
+  /** Bake the cloud panorama for the CURRENT preset into the equirect texture,
+   *  then point the dome at it. Runs the HIGH-quality march (many steps, no
+   *  jitter) over the whole lat/long panorama ONCE — call right AFTER configure()
+   *  on a time-of-day change (Game.setTimeOfDay), NOT per frame. The dome then
+   *  samples the result by view direction every frame (a texture fetch, not a
+   *  raymarch). The render camera is irrelevant (clouds are at infinity →
+   *  camera-independent), so this needs no camera. Presentation-only — writes an
+   *  offscreen texture, never sim state; tod changes happen off the render path,
+   *  so it stays pin-safe. configure() must run first: it writes the shared sun/
+   *  cloud uniforms (incl. uSunTrans) the bake material reads. */
+  cloudBake(renderer: THREE.WebGLRenderer): void {
     const prevTarget = renderer.getRenderTarget();
-    renderer.setRenderTarget(this.cloudRT);
+    renderer.setRenderTarget(this.cloudTex);
     renderer.render(this.cloudScene, this.cloudCam);
     renderer.setRenderTarget(prevTarget);
-
-    // point the dome at the fresh buffer + enable the sample path
-    this.material.uniforms.uCloudBuffer.value = this.cloudRT.texture;
-    this.material.uniforms.uUseCloudBuffer.value = 1;
+    // point the dome at the fresh panorama + enable the sample path
+    this.material.uniforms.uCloudTex.value = this.cloudTex.texture;
+    this.material.uniforms.uUseCloudTex.value = 1;
   }
 
-  /** Size the cloud buffer + the dome's screen-lookup resolution to the full
-   *  render size. Half-res buffer = ceil(full / CLOUD_DOWNSCALE). */
-  setSize(width: number, height: number): void {
-    this.fullW = Math.max(1, width);
-    this.fullH = Math.max(1, height);
-    (this.material.uniforms.uResolution.value as THREE.Vector2).set(this.fullW, this.fullH);
-    const cw = Math.max(1, Math.ceil(this.fullW / this.CLOUD_DOWNSCALE));
-    const ch = Math.max(1, Math.ceil(this.fullH / this.CLOUD_DOWNSCALE));
-    this.cloudRT.setSize(cw, ch);
+  /** Back-compat no-op: clouds used to be re-rendered per frame into a half-res
+   *  buffer here; they are now PRERENDERED once per tod (cloudBake, called from
+   *  Game.setTimeOfDay). Per-frame the dome just samples the baked panorama, so
+   *  there is nothing to do each frame. Kept so the refshot/perf harnesses that
+   *  call g.skyRig.renderClouds(r, c) before a one-off render still work
+   *  unchanged — the panorama is already bound from the last cloudBake(). */
+  renderClouds(_renderer: THREE.WebGLRenderer, _camera: THREE.PerspectiveCamera): void {
+    /* intentionally empty — see cloudBake() */
+  }
+
+  /** No-op kept for the resize wiring (Game.onResize). The cloud panorama is a
+   *  fixed-resolution equirect (camera- and viewport-independent), so a window
+   *  resize no longer needs to re-size any cloud buffer. */
+  setSize(_width: number, _height: number): void {
+    /* equirect bake is fixed-res — nothing to resize */
   }
 
   configure(preset: SkyPreset): void {
@@ -359,7 +361,7 @@ export class SkyRig {
     u.uNight.value = preset.night ?? 0;
     (u.uNightTint.value as THREE.Vector3).copy(toVec(preset.nightTint ?? 0x0a1430));
     u.uStarStrength.value = preset.starStrength ?? 0.9;
-    // cloud layer per-tod knobs (uCloudTime is set every frame, not here)
+    // cloud layer per-tod knobs (uCloudDrift is scrolled every frame, not here)
     u.uCloudCoverage.value = preset.cloudCoverage ?? 0.42;
     u.uCloudDensity.value = preset.cloudDensity ?? 0.9;
     (u.uCloudTint.value as THREE.Vector3).copy(toVec(preset.cloudTint ?? 0xb9c6d6));
@@ -374,7 +376,7 @@ export class SkyRig {
     // Cloud pass: the sun transmittance at the eye is constant over the dome and
     // depends only on the sun dir + the scattering coefficients just written —
     // compute it ONCE here (the inline dome path computes the same value in the
-    // frag). Feeds the half-res cloud march's warm-rim colour at dusk.
+    // frag). Feeds the equirect cloud bake's warm-rim colour at dusk.
     const sunTrans = computeSunTransmittance(
       this.sunDir,
       u.uRayleighCoeff.value as THREE.Vector3,
@@ -384,11 +386,15 @@ export class SkyRig {
     (this.cloudMat.uniforms.uSunTrans.value as THREE.Vector3).copy(sunTrans);
   }
 
-  /** Advance the cloud drift clock. Driven off Game's RENDER time (the same
-   *  pin-safe source the sea/grass use), never sim time — so clouds drift
-   *  smoothly but never perturb replay determinism. Visual-only. */
+  /** Advance the cloud drift clock. The baked panorama is static; the dome adds a
+   *  cheap sense of motion by slowly scrolling its azimuth lookup (uCloudDrift).
+   *  Driven off Game's RENDER time (the same pin-safe source the sea/grass use),
+   *  never sim time — so clouds drift smoothly but never perturb replay
+   *  determinism. CLOUD_DRIFT_RATE is in panorama-widths/sec (tiny → distant,
+   *  lazy cumulus); fract() in the shader wraps it seamlessly. Visual-only. */
   setCloudTime(t: number): void {
-    this.material.uniforms.uCloudTime.value = t;
+    const CLOUD_DRIFT_RATE = 0.0008; // panorama widths per second (~21 min/lap)
+    this.material.uniforms.uCloudDrift.value = t * CLOUD_DRIFT_RATE;
   }
 
   /** PMREM-capture the configured sky for scene.environment. The dome is
@@ -407,12 +413,13 @@ export class SkyRig {
     const parent = this.mesh.parent;
     const wasVisible = this.mesh.visible;
     const cloudDensity = this.material.uniforms.uCloudDensity.value as number;
-    const useBuffer = this.material.uniforms.uUseCloudBuffer.value as number;
+    const useTex = this.material.uniforms.uUseCloudTex.value as number;
     this.material.uniforms.uCloudDensity.value = 0; // dome-only: no clouds in env
-    // bake reads the dome through the PMREM cube faces, NOT this frame's
-    // screen-space cloud buffer — force the inline (density-0 → empty) path so
-    // the bake never samples a stale/mis-sized buffer at the cube-face UVs.
-    this.material.uniforms.uUseCloudBuffer.value = 0;
+    // the env reads the dome through the PMREM cube faces — force the inline
+    // (density-0 → empty) cloud path so the env never bakes the cloud panorama
+    // into the reflections (a frozen cloud pattern in every reflection while the
+    // sky drifts reads as broken; clouds stay dome-only). Same contract as before.
+    this.material.uniforms.uUseCloudTex.value = 0;
     this.mesh.visible = true; // bake even if the live dome is hidden (night)
     const bakeScene = new THREE.Scene();
     bakeScene.add(this.mesh);
@@ -421,7 +428,7 @@ export class SkyRig {
     pmrem.dispose();
     if (parent) parent.add(this.mesh); // reclaim from the bake scene
     this.material.uniforms.uCloudDensity.value = cloudDensity; // restore for the live dome
-    this.material.uniforms.uUseCloudBuffer.value = useBuffer; // restore sample path
+    this.material.uniforms.uUseCloudTex.value = useTex; // restore sample path
     this.mesh.visible = wasVisible;
     this.rt?.dispose();
     this.rt = rt;
@@ -431,7 +438,7 @@ export class SkyRig {
   dispose(): void {
     this.rt?.dispose();
     this.rt = null;
-    this.cloudRT.dispose();
+    this.cloudTex.dispose();
     this.cloudMat.dispose();
     this.cloudQuad.geometry.dispose();
     this.material.dispose();

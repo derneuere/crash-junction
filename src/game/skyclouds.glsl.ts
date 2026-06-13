@@ -47,9 +47,11 @@
 //   * Powder    : Schneider's powder term (1 - exp(-2·density)) multiplies the
 //                 in-scatter so the cloud's lit edges get the dark-rim "powder"
 //                 sugar look — the cue that sells fluffy cumulus.
-//   * Drift     : the noise sample positions scroll by uCloudTime (RENDER clock),
-//                 exactly like Lague's _Time-driven shapeOffset/detailOffset, so
-//                 clouds drift without ever touching sim state.
+//   * Drift     : Lague scrolls the noise sample positions by _Time. Because we
+//                 BAKE the field once per tod (see PERFORMANCE below), the bake
+//                 itself is static; the sense of motion is instead a slow scroll
+//                 of the dome's equirect LOOKUP (uCloudDrift, RENDER clock) —
+//                 cheaper than re-marching and still never touches sim state.
 //
 // COLOUR / TIME-OF-DAY: clouds are lit by the SAME uSunTint·uSunIntensity the
 // dome's sun disc uses (warm gold at dusk, zero at night) and filled by an
@@ -62,33 +64,45 @@
 // reads bright but never blooms into a white blob; only the thin sun-struck
 // silver lining is allowed to approach the cap.
 //
-// PERFORMANCE: this is a real volumetric raymarch (view march × per-step sun
-// light-march × procedural 3D noise). It is HEAVY by nature, so the cost is
-// decoupled from screen resolution: the raymarch runs in a SEPARATE HALF-RES
-// pass (skyenv.ts renders applyCloudsRGBA over a fullscreen triangle into a
-// quarter-area RGBA HDR target each frame) and the full-res sky dome simply
-// SAMPLES that buffer (bilinear upscale) and composites it. Clouds are
-// low-frequency, so half-res + upscale is visually indistinguishable but a ~4x
-// cloud-cost win. The march is still gated to the cloud band (so most of the
-// buffer — open sky, below-horizon, overhead seam — pays nothing), uses
-// per-pixel jitter to dither the reduced step count, and early-exits as
-// transmittance saturates. The full-res inline applyClouds() path is kept as a
-// fallback (used when no buffer is bound) so the dome shader still self-composes
-// correctly in isolation (e.g. the PMREM bake, which forces cloud density 0).
+// PERFORMANCE — PRERENDERED CLOUD BAKE (this is the win):
+// The raymarch is HEAVY by nature (view march × per-step sun light-march ×
+// procedural 3D noise) AND the clouds are distant sky-dome geometry that barely
+// changes frame-to-frame. So instead of marching every frame, we BAKE the whole
+// cloud layer ONCE per time-of-day into a high-res EQUIRECTANGULAR texture
+// (skyenv.ts cloudBake()): the march runs over a 2048×1024 lat/long panorama,
+// many steps, NO jitter → a clean, full-res, correctly-lit cloud field. The live
+// sky dome then just SAMPLES that texture by view direction (dirToEquirectUv +
+// one texture2D) and composites premultiplied-over — a texture fetch, not a
+// raymarch. The bake is camera-independent (clouds are at infinity), so the same
+// panorama serves every frame and every camera angle; it is re-baked only when
+// the time of day changes (3 states), exactly where skyRig already re-bakes the
+// PMREM env. Result: full-res quality (no half-res shimmer, no jitter grain) at
+// near-zero per-frame cost.
 //
-// The step counts below (NUM_STEPS_VIEW / NUM_STEPS_LIGHT) are the remaining
-// knobs; they are sized for the half-res pass + jitter.
+// DRIFT: a static bake would freeze the clouds, so the dome scrolls the equirect
+// lookup by a slow azimuth offset (uCloudDrift, RENDER-clock driven) — a free
+// sense of motion without re-marching or re-baking. Subtle, like distant cumulus.
 //
-// DETERMINISM: visual-only. uCloudTime is driven off RENDER time (Game's af.dt),
-// never sim time — same pin-safe contract as the sea/grass animation.
+// The bake march (cloudMarchRGBA) takes its step count as a uniform (uViewSteps/
+// uLightSteps) so the same code serves a HIGH-quality bake and any cheap inline
+// fallback; the bake path sets uCloudBake=1 to drop the dither jitter entirely.
+//
+// DETERMINISM: visual-only. uCloudDrift is driven off RENDER time (Game's af.dt),
+// never sim time — same pin-safe contract as the sea/grass animation. The bake
+// runs on tod change (also render-time), never inside the sim/replay loop.
 
 export const SKY_CLOUDS = /* glsl */ `
 // ---- cloud uniforms ----
-uniform float uCloudTime;      // render-clock seconds — scrolls the cloud noise
 uniform float uCloudCoverage;  // 0 clear .. 1 overcast (raises density offset)
 uniform float uCloudDensity;   // overall density multiplier of the layer
 uniform float uCloudHeight;    // tile scale of the noise (bigger = smaller clouds)
 uniform vec3  uCloudTint;      // ambient/shadow fill colour (sky-derived)
+// Bake-quality knobs: the equirect bake (skyenv.ts) runs HIGH step counts with
+// no jitter for a clean field; any inline fallback can run cheaper. uCloudBake=1
+// drops the dither jitter (the bake is dense + full-res, so it needs no dither).
+uniform float uViewSteps;      // view-march sample count (bake: high)
+uniform float uLightSteps;     // sun light-march sample count (bake: high)
+uniform float uCloudBake;      // 1 while baking → no jitter, clean march
 
 // ===================== procedural 3D Perlin–Worley noise =====================
 // Lague bakes NoiseTex (Perlin-Worley) + DetailNoiseTex (Worley) into 3D
@@ -209,9 +223,11 @@ float sampleCloudDensity(vec3 pos) {
       clamp(remap(heightPercent, 0.0, gMin, 0.0, 1.0), 0.0, 1.0) *
       clamp(remap(heightPercent, 1.0, gMax, 0.0, 1.0), 0.0, 1.0);
 
-  // drifting sample positions (Lague's shapeOffset + _Time·baseSpeed)
-  vec3 drift = vec3(uCloudTime * 0.9, 0.0, uCloudTime * 0.35);
-  vec3 sp = pos * (0.012 * uCloudHeight) + drift * 0.01;
+  // Static sample positions. The bake is a FROZEN cloud field (clean, full-res);
+  // the sense of motion is added cheaply at sample time by the dome scrolling its
+  // equirect lookup (uCloudDrift), so the density field itself carries no time
+  // term — that also keeps the bake deterministic and re-bakeable on tod change.
+  vec3 sp = pos * (0.012 * uCloudHeight);
 
   // base shape: Worley billows × low-freq Perlin envelope, gated by the height
   float shape = shapeFbm(sp);
@@ -227,7 +243,7 @@ float sampleCloudDensity(vec3 pos) {
 
   // detail erosion — high-freq Worley subtracted, weighted (1-shape)^3 so edges
   // erode far more than the dense centre → billowy cauliflower borders.
-  vec3 dp = pos * (0.05 * uCloudHeight) + drift.zyx * 0.04;
+  vec3 dp = pos * (0.05 * uCloudHeight);
   float detail = detailFbm(dp);
   float oneMinusShape = 1.0 - shape;
   float erodeWeight = oneMinusShape * oneMinusShape * oneMinusShape;
@@ -254,7 +270,9 @@ float cloudPhase(float a) {
 // =========================== Lague lightmarch() ==============================
 // Proportion of sunlight reaching pos: short march toward the sun, accumulate
 // density, Beer's law, floored at darknessThreshold so shadow never goes black.
-const int   NUM_STEPS_LIGHT = 6;
+// The step count is a uniform (uLightSteps) so the bake can run it HIGH for a
+// clean, well-shadowed field; MAX_STEPS_LIGHT is the compile-time loop bound.
+const int   MAX_STEPS_LIGHT = 16;
 const float LIGHT_ABSORPTION_SUN = 1.05;
 const float DARKNESS_THRESHOLD = 0.12;
 
@@ -269,10 +287,12 @@ float cloudLightmarch(vec3 pos) {
     dstInside = (pos.y - CLOUD_BOTTOM) / max(0.001, -dirY); // sun below: toward base
   }
   dstInside = min(dstInside, 120.0); // cap the light march length
-  float stepSize = dstInside / float(NUM_STEPS_LIGHT);
+  int steps = int(uLightSteps);
+  float stepSize = dstInside / uLightSteps;
   float totalDensity = 0.0;
   vec3 p = pos + uSunDir * stepSize * 0.5;
-  for (int i = 0; i < NUM_STEPS_LIGHT; i++) {
+  for (int i = 0; i < MAX_STEPS_LIGHT; i++) {
+    if (i >= steps) break;
     totalDensity += max(0.0, sampleCloudDensity(p) * stepSize);
     p += uSunDir * stepSize;
   }
@@ -286,12 +306,14 @@ float cloudLightmarch(vec3 pos) {
 //
 // cloudMarchRGBA() is the heavy core: it returns the cloud's PREMULTIPLIED
 // colour in .rgb and its coverage alpha in .a, with NO background mixed in —
-// so it can be rendered once into the half-res buffer (skyenv.ts) and composited
-// later over the full-res sky. The compositing rule is the standard
+// so it can be baked once into the equirect panorama (skyenv.ts cloudBake) and
+// composited later over the sky. The compositing rule is the standard
 // premultiplied-over: out = sky*(1-a) + rgb. sunTrans is the sun's atmospheric
-// transmittance at the eye (constant over the dome), passed in so the buffer
-// pass and the inline path agree on cloud colour.
-const int   NUM_STEPS_VIEW = 20; // sized for the half-res pass + jitter dither
+// transmittance at the eye (constant over the dome), passed in so the bake and
+// the inline fallback agree on cloud colour.
+// The view-march step count is a uniform (uViewSteps); MAX_STEPS_VIEW is the
+// compile-time loop bound. The bake runs it HIGH (clean), no jitter needed.
+const int   MAX_STEPS_VIEW = 64;
 const float LIGHT_ABSORPTION_CLOUD = 0.85;
 
 vec4 cloudMarchRGBA(vec3 rd, vec3 sunTrans) {
@@ -321,17 +343,19 @@ vec4 cloudMarchRGBA(vec3 rd, vec3 sunTrans) {
   float phaseVal = cloudPhase(cosAngle);
 
   // march the slab
-  float stepSize = dstThrough / float(NUM_STEPS_VIEW);
-  // per-pixel start jitter breaks up banding without a blue-noise texture
-  // (deterministic in view direction — render-time only, no sim state). With
-  // the reduced step count this dither is what keeps the reduced march smooth.
-  float jitter = cloudHash1(rd * 73.1) * stepSize;
+  int steps = int(uViewSteps);
+  float stepSize = dstThrough / uViewSteps;
+  // The bake runs a high step count with NO jitter → a clean field (uCloudBake).
+  // Any cheap inline fallback dithers the reduced march with a per-direction
+  // start jitter (deterministic in view direction — render-time only, no sim).
+  float jitter = (uCloudBake > 0.5) ? 0.0 : cloudHash1(rd * 73.1) * stepSize;
   float dstTravelled = jitter;
 
   float transmittance = 1.0;
   vec3 lightEnergy = vec3(0.0);
 
-  for (int i = 0; i < NUM_STEPS_VIEW; i++) {
+  for (int i = 0; i < MAX_STEPS_VIEW; i++) {
+    if (i >= steps) break;
     if (dstTravelled >= dstThrough) break;
     vec3 pos = ro + rd * (dstToSlab + dstTravelled);
     float density = sampleCloudDensity(pos);
@@ -375,38 +399,57 @@ vec4 cloudMarchRGBA(vec3 rd, vec3 sunTrans) {
 }
 
 // Inline full-res fallback: march + composite over skyCol in one call. Kept for
-// the PMREM bake (clouds forced to density 0 there) and any path that renders
-// the dome without first filling the half-res cloud buffer, so the dome shader
+// the PMREM env bake (clouds forced to density 0 there) and any path that
+// renders the dome without a baked cloud panorama bound, so the dome shader
 // still self-composes correctly in isolation.
 vec3 applyClouds(vec3 rd, vec3 skyCol, vec3 sunTrans) {
   vec4 c = cloudMarchRGBA(rd, sunTrans);
   // premultiplied-over: background attenuated by (1-alpha), cloud added.
   return skyCol * (1.0 - c.a) + c.rgb;
 }
+
+// ===================== equirectangular direction <-> uv ======================
+// The cloud bake stores the panorama as a lat/long (equirectangular) texture:
+// u = azimuth around the horizon (0..1 = -π..π), v = elevation (0 = down,
+// 1 = up). The dome samples it by view direction; the bake fills it by mapping
+// each texel back to a direction and marching that ray. Both sides MUST use this
+// one mapping so the lookup lands exactly where the march wrote.
+vec2 dirToEquirectUv(vec3 dir) {
+  float u = atan(dir.x, dir.z) / (2.0 * 3.14159265) + 0.5;
+  float v = asin(clamp(dir.y, -1.0, 1.0)) / 3.14159265 + 0.5;
+  return vec2(u, v);
+}
+vec3 equirectUvToDir(vec2 uv) {
+  float az = (uv.x - 0.5) * 2.0 * 3.14159265; // -π..π around the horizon
+  float el = (uv.y - 0.5) * 3.14159265;        // -π/2..π/2 elevation
+  float ce = cos(el);
+  return vec3(sin(az) * ce, sin(el), cos(az) * ce);
+}
 `;
 
 // ============================================================================
-// HALF-RES CLOUD PASS (the perf win)
+// EQUIRECTANGULAR CLOUD BAKE PASS (the perf win)
 // ----------------------------------------------------------------------------
-// A standalone fullscreen-triangle pass that runs ONLY the cloud raymarch
-// (cloudMarchRGBA above) and writes premultiplied cloud RGBA into a half-res
-// HDR target. The full-res sky dome then samples that target and composites it
-// (see the SAMPLE path injected into SKY_FRAG). Clouds are low-frequency, so the
-// half-res buffer upscales invisibly while the heavy march pays for a QUARTER of
-// the pixels.
+// A standalone fullscreen pass that runs the cloud raymarch (cloudMarchRGBA) over
+// a full LAT/LONG PANORAMA and writes premultiplied cloud RGBA into a high-res
+// HDR target. Each texel maps (via equirectUvToDir) back to a view direction;
+// the march fills that direction's cloud colour+alpha ONCE. The live sky dome
+// then samples this panorama by view direction (texture2D at dirToEquirectUv) —
+// a fetch, not a march. The bake is camera-independent (clouds are at infinity),
+// so the same panorama serves every camera angle and every frame; it is re-run
+// only when the time of day changes (skyenv.ts cloudBake()).
 //
-// The view ray is reconstructed from the camera's inverse view-projection (the
-// dome's vertex shader can't help us here — there is no dome, just a screen
-// triangle), matching normalize(worldPos - eye) exactly.
+// This pass marches HIGH step counts (uViewSteps/uLightSteps) with uCloudBake=1
+// (no jitter) → a clean, full-res, well-shadowed field, the whole point of the
+// bake: full quality up front so per-frame cost is just a texture sample.
 //
 // sunTrans (the sun's atmospheric transmittance at the eye, constant over the
 // dome) is the ONE value the march needs from the scattering model; it is
 // passed in as uSunTrans (computed once per time-of-day in skyenv.ts), so this
-// pass needs no atmosphere code and stays cheap.
+// pass needs no atmosphere code.
 
-export const CLOUD_PASS_VERT = /* glsl */ `
-// Fullscreen triangle (three feeds a unit quad; we expand to a triangle in
-// clip space). vUv spans 0..1 across the screen.
+export const CLOUD_BAKE_VERT = /* glsl */ `
+// Fullscreen quad covering the equirect target; vUv spans 0..1 = the panorama.
 varying vec2 vUv;
 void main() {
   vUv = uv;
@@ -414,7 +457,7 @@ void main() {
 }
 `;
 
-export const CLOUD_PASS_FRAG = /* glsl */ `
+export const CLOUD_BAKE_FRAG = /* glsl */ `
 precision highp float;
 varying vec2 vUv;
 
@@ -425,19 +468,11 @@ uniform float uSunIntensity;
 uniform float uNight;
 uniform vec3  uSunTrans;        // precomputed sun transmittance at the eye
 
-// camera reconstruction
-uniform mat4  uInvViewProj;     // inverse(projection * view)
-uniform vec3  uCameraPos;       // world-space eye
-
 ${SKY_CLOUDS}
 
 void main() {
-  // reconstruct the world-space view ray for this screen pixel
-  vec4 ndc = vec4(vUv * 2.0 - 1.0, 1.0, 1.0);
-  vec4 world = uInvViewProj * ndc;
-  world /= world.w;
-  vec3 rd = normalize(world.xyz - uCameraPos);
-
+  // this texel IS a view direction (equirect lat/long) — march it once
+  vec3 rd = normalize(equirectUvToDir(vUv));
   // premultiplied cloud RGBA — the dome compositor does sky*(1-a)+rgb
   gl_FragColor = cloudMarchRGBA(rd, uSunTrans);
 }
