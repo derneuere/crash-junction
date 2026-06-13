@@ -7,7 +7,11 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "test": "node tests/run-replay-tests.mjs"
+    "test": "node tests/run-replay-tests.mjs",
+    "bake": "node tools/bake-all.mjs",
+    "bake:list": "node tools/bake-all.mjs --list",
+    "bake:models": "node tools/convert-models.mjs",
+    "bake:ao": "node tools/bake-ao.mjs"
   },
   "dependencies": {
     "cannon-es": "^0.20.0",
@@ -24,6 +28,7 @@
     "@types/react-dom": "^18.3.1",
     "@types/three": "^0.170.0",
     "@vitejs/plugin-react": "^4.3.4",
+    "esbuild": "^0.25.0",
     "fbx2gltf": "^0.9.7-p1",
     "puppeteer-core": "^25.1.0",
     "typescript": "~5.6.3",

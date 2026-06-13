@@ -15,6 +15,69 @@ npm run build    # typecheck + production build into dist/
 npm test         # replay regression suite (needs installed Chrome or Edge)
 ```
 
+## Asset pipeline / baking
+
+Some assets are **baked offline** so the build and the runtime never have to:
+the vehicle models are converted from FBX to GLB, and the static environment's
+ambient occlusion is precomputed to a JSON the runtime folds into ambient light.
+These are the only offline asset-generation steps — everything else under
+`tools/` and `tests/` is a diagnostic or a test (see below). One driver runs
+them in dependency order:
+
+```
+npm run bake           # run the whole pipeline (skips steps already up to date)
+npm run bake:list      # list the steps and what each produces
+npm run bake:models    # just FBX → GLB
+npm run bake:ao        # just the AO bake
+node tools/bake-all.mjs ao --force   # force one step; --force alone forces all
+```
+
+The steps, in order (later steps depend on earlier ones):
+
+1. **models** (`tools/convert-models.mjs`) — converts the Quaternius vehicle and
+   transport FBX packs in `public/models/{cars,transport}/FBX/` to the `.glb`
+   the runtime loads, into the sibling `glb/` folders. Re-run **after adding or
+   changing a source FBX**.
+2. **ao** (`tools/bake-ao.mjs`) — bakes per-vertex self + ground ambient
+   occlusion for the static built environment (warehouses, containers, the
+   lattice cranes, floodlight masts) and writes **`public/baked-ao.json`**.
+   `src/game/ao.ts` folds it into the indirect/ambient term only, so the one
+   geometric bake reads correctly at day, dusk and night. Runs *after* `models`
+   because it bakes against the prototype GLBs. Re-run **after changing prop
+   geometry or the procedural dockyard furniture in `src/game/builtins.ts`**.
+   The bake is **deterministic** — fixed Fibonacci hemisphere sampling, no RNG —
+   so a re-bake reproduces the same `baked-ao.json` byte-for-byte (~2 min).
+
+`npm run bake` is **idempotent**: it skips a step whose outputs are already
+newer than its inputs and prints why; pass `--force` to rebake regardless.
+Adding a future bake (e.g. a grass-asset step) is a one-line entry in the
+`STEPS` array in `tools/bake-all.mjs` — give it a name, script, inputs and
+outputs and it slots into the order with the same up-to-date check.
+
+Not part of this offline pipeline: the **cloud** bake is a *runtime* bake
+(per-time-of-day, in `src/game/skyenv.ts`), so it has no offline step.
+
+### Diagnostics & dev tools
+
+These read assets or drive a headless game; they generate no shipped artifacts:
+
+- `tools/inspect-models.mjs [substr]` — dump GLB node/mesh/material/bounds.
+- `tools/refshot.mjs <zone> --port N` — capture the canonical fixed-pose GANTRY
+  POINT screenshots (`dockyard`/`harbor`/`cliff`/`beach`).
+- `tools/grass-count.mjs --port N` — count grass blades drawn in the frustum per
+  camera pose (the metric the grass-density work is judged on).
+- `tools/fluffy-measure.mjs` — measure the FluffyGrass reference demo's density.
+- `tests/scene-census.mjs [--port N]` — mesh/draw-call census of the dockyard,
+  grouped by source, for targeting the instancing pass.
+- `tests/{lag,harbor,cloud-perf}-probe.mjs` — headless perf probes (frame-time
+  median, draw calls, shader-compile spikes). Software-GL inflates absolute ms,
+  so read the deltas, not the absolutes; these are diagnostics, not gates.
+
+All of these read render-time state only — they never record a fixture or touch
+sim/physics/RNG, so running them can't perturb a replay pin. The replay
+regression suite and the fixture recorders are documented under
+[Replay fixtures as regression tests](#replay-fixtures-as-regression-tests).
+
 ## Controls
 
 | Input | Action |
