@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { EngineFlavor } from '../game/audio';
 import type { TimeOfDay } from '../game/daynight';
-import type { GfxMode } from '../game/Game';
 import { LEVEL_LABELS, type LevelId } from '../game/levels';
 import { parseReplayFile, type ReplayFile } from '../game/replay';
 import { GameState } from '../game/types';
@@ -90,10 +89,8 @@ interface DebugOverlayProps {
   levelId: LevelId;
   timeOfDay: TimeOfDay;
   engineSound: EngineFlavor;
-  gfx: GfxMode; // mirror of the idle screen's global CINE/FAST toggle
   onSetTimeOfDay: (t: TimeOfDay) => void;
   onSetEngineSound: (f: EngineFlavor) => void;
-  onSetGfx: (g: GfxMode) => void;
   onSelectLevel: (id: LevelId) => void;
   onLoadReplay: (file: ReplayFile, fast: boolean) => void;
 }
@@ -107,8 +104,8 @@ interface Telemetry {
 }
 
 export function DebugOverlay({
-  open, onClose, state, levelId, timeOfDay, engineSound, gfx,
-  onSetTimeOfDay, onSetEngineSound, onSetGfx, onSelectLevel, onLoadReplay,
+  open, onClose, state, levelId, timeOfDay, engineSound,
+  onSetTimeOfDay, onSetEngineSound, onSelectLevel, onLoadReplay,
 }: DebugOverlayProps) {
   const fileRef = useRef<HTMLInputElement>(null);
   const [verify, setVerify] = useState(false);
@@ -266,23 +263,6 @@ export function DebugOverlay({
         <button onClick={() => synthKey('KeyM')} title="Toggle mute (M)">
           MUTE
         </button>
-      </div>
-      <div className="dbgRow">
-        {(
-          [
-            ['cine', 'CINE', 'Film-look chain + live player reflections'],
-            ['fast', 'FAST', 'Bare renderer (?verify=1 forces this)'],
-          ] as const
-        ).map(([g, label, title]) => (
-          <button
-            key={g}
-            className={gfx === g ? 'active' : undefined}
-            onClick={() => onSetGfx(g)}
-            title={title}
-          >
-            {label}
-          </button>
-        ))}
       </div>
       <div className="dbgRow">
         {(['stock', 'v10', 'v8'] as const).map((f) => (

@@ -167,10 +167,14 @@ function makeSkySprite(tex: THREE.Texture, scale: number): THREE.Sprite {
   return s;
 }
 
-/** Presentation quality tier. 'cine' = the film-look chain (postfx.ts) +
- *  live player reflections (reflections.ts); 'fast' = the bare renderer
- *  path. Replay verify runs (?verify=1) force 'fast' — headless swiftshader
- *  shouldn't pay for pixels nobody sees. Pure visuals either way. */
+/** Render path selector. The game ALWAYS renders in 'cine' (the film-look
+ *  chain in postfx.ts + live player reflections in reflections.ts): the
+ *  player-facing FAST/CINE tier choice was removed. 'fast' survives ONLY as
+ *  the headless/determinism path — ?verify=1 replays and tools/refshot.mjs
+ *  --gfx fast review captures force it so swiftshader doesn't pay for cine
+ *  pixels nobody hashes. setGfx() is the seam that drives it (refshot calls
+ *  it through window.__game); real play never reaches 'fast'. Pure visuals
+ *  either way. */
 export type GfxMode = 'cine' | 'fast';
 
 /** Scene-light grading per time of day. The sun's direction feeds the
@@ -217,9 +221,12 @@ export class Game {
   private sunFlare = new SunFlare();
   private flareFrom = new CANNON.Vec3();
   private flareTo = new CANNON.Vec3();
-  private gfx: GfxMode = 'cine';
-  // verify replays run headless on swiftshader — never pay for cine pixels
-  private readonly forceFast = new URLSearchParams(location.search).get('verify') === '1';
+  // The game always renders in CINE; 'fast' is only the headless/review path.
+  // forceFast is the single gate cineActive() reads: ?verify=1 replays force it
+  // on at boot (swiftshader never pays for cine pixels nobody hashes), and
+  // tools/refshot.mjs flips it through setGfx() for its --gfx fast review
+  // captures. Real play leaves it false — there is no player-facing tier.
+  private forceFast = new URLSearchParams(location.search).get('verify') === '1';
   // never drawn into — exists so the warmup compile sees the render-target
   // program key (linear output, no tone mapping)
   private warmupRT = new THREE.WebGLRenderTarget(1, 1);
@@ -331,7 +338,7 @@ export class Game {
 
     this.perf = new Perf(this.renderer, this.scene, () => ({
       tod: this.timeOfDay,
-      gfx: this.gfx,
+      gfx: this.cineActive() ? 'cine' : 'fast',
       cine: this.cineActive(),
       level: this.levelId,
       state: GameState[this.state],
@@ -417,7 +424,10 @@ export class Game {
     const env = buildEnvironment(this.scene, this.phys, level);
     this.sea = env.sea;
     this.grass = env.grass;
-    this.grass?.setTier(this.gfx); // seed the blade count to the current tier
+    // SHARED FILE (grass agent owns grass.ts) — forced-cine touch only: the
+    // game is always CINE, so seed the full blade budget (headless verify runs
+    // get the sparse FAST subset via applyRenderPath below). Don't retune here.
+    this.grass?.setTier(this.cineActive() ? 'cine' : 'fast');
     setSeaCamera(this.camera); // the sea reads the camera for fresnel/sparkle
     // prop colliders are synchronous and must exist before the first
     // physics step (their GLB visuals stream in whenever — see props.ts)
@@ -446,7 +456,7 @@ export class Game {
     this.resizeObserver = new ResizeObserver(() => this.onResize());
     this.resizeObserver.observe(container);
 
-    this.setGfx(this.gfx); // tone-map handoff + player env before first frame
+    this.applyRenderPath(); // tone-map handoff + player env before first frame
     this.setTimeOfDay(this.timeOfDay); // sweep the freshly built scene
 
     this.schedule();
@@ -567,16 +577,27 @@ export class Game {
     }
   }
 
-  /** Presentation tier (see GfxMode). Swaps the player between the live
-   *  cube map and the showroom fallback, sizes the shadow budget, and
-   *  hands tone mapping to the chain or the renderer. */
+  /** Headless / review render-path seam (see GfxMode). The player-facing
+   *  FAST/CINE tier was removed — the game always renders in CINE — so this is
+   *  NOT a player control: it exists so tools/refshot.mjs can flip into the
+   *  bare-renderer 'fast' path for its --gfx fast review captures through
+   *  window.__game. ?verify=1 already pins forceFast at boot; this lets the
+   *  refshot tool reach it too. After flipping it, re-derive the render path. */
   setGfx(g: GfxMode): void {
     this.perf.tag(`gfx:${g}`);
-    this.gfx = g;
-    // heavy blade density is gated to CINE; FAST drops to a sparse subset so
-    // the cheap tier leans on the textured-ground fallback (perf strategy)
-    this.grass?.setTier(g);
+    this.forceFast = g === 'fast';
+    this.applyRenderPath();
+  }
+
+  /** Apply the active render path (CINE composer vs the bare renderer) to the
+   *  renderer + scene: blade density, tone-mapping owner, shadow budget and
+   *  the player's reflection source. Driven by cineActive() — CINE in all real
+   *  play, FAST only under the headless/review bypass. */
+  private applyRenderPath(): void {
     const cine = this.cineActive();
+    // SHARED FILE (grass agent owns grass.ts) — forced-cine touch only: pass
+    // the resolved tier so headless FAST gets the sparse subset; don't retune.
+    this.grass?.setTier(cine ? 'cine' : 'fast');
     // with the composer, the renderer draws into an HDR buffer — ACES then
     // lives in the chain (postfx.ts); without it, back on the renderer
     this.renderer.toneMapping = cine ? THREE.NoToneMapping : THREE.ACESFilmicToneMapping;
@@ -605,8 +626,14 @@ export class Game {
     return { ...glassParams };
   }
 
+  // The game always renders in CINE (the film-look composer is always on);
+  // the player-facing FAST/CINE tier choice was removed. The ONLY thing that
+  // takes the bare-renderer path now is the headless determinism bypass:
+  // ?verify=1 replays (and tools/refshot.mjs --gfx fast review captures) set
+  // forceFast so swiftshader doesn't pay for cine pixels nobody hashes. So
+  // cineActive() collapses to "not forced fast" — true in all real play.
   private cineActive(): boolean {
-    return this.gfx === 'cine' && !this.forceFast;
+    return !this.forceFast;
   }
 
   /** The player's paint reflects the live capture in cine, the showroom in
@@ -1995,11 +2022,12 @@ export class Game {
     // they track THIS frame's camera. Presentation only: reads the camera
     // and controller speed, rolls Math.random, writes nothing the sim or
     // worldHash can see — replays and both pins are untouched.
-    // FAST tier only: streaks are the cheap stand-in for radial blur, and
-    // in CINE the real per-pixel motion blur (postfx.ts) supplies the smear
-    // — both at once would double-count the speed cue. Speed 0 spawns
-    // nothing but still walks the pool, so a mid-run tier flip lets any
-    // live streaks fade out instead of freezing them.
+    // CINE supplies the real per-pixel motion blur (postfx.ts), so the streaks
+    // — the cheap radial-blur stand-in — stay gated OFF whenever it's active
+    // (both at once would double-count the speed cue). The game always renders
+    // CINE now, so in real play this passes speed 0 and the streaks never spawn;
+    // they only light up under the headless/FAST bypass. The pool is still
+    // walked every frame (speed 0) so any live streaks fade out, never freeze.
     this.fx.streaks.frame(
       simDt,
       this.camera,
