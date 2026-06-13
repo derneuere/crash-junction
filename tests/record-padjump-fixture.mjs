@@ -65,10 +65,13 @@ try {
   await page.goto(`http://localhost:${PORT}/`, { waitUntil: 'domcontentloaded' });
   await page.waitForFunction(() => !!window.__game, { timeout: 30_000 });
   await page.evaluate(() => {
-    const btn = [...document.querySelectorAll('.levels button')].find((b) => b.textContent.includes('PROVING'));
+    // the idle screen is now the event-picker card strip (no more `.levels`);
+    // match the level-name button by text — same contract refshot/record-race use
+    const btn = [...document.querySelectorAll('button')].find((b) => (b.textContent?.trim() ?? '').includes('PROVING'));
+    if (!btn) throw new Error('no PROVING GROUND button on the page');
     btn.click();
   });
-  await page.waitForFunction(() => !!window.__game, { timeout: 30_000 });
+  await page.waitForFunction(() => window.__game?.levelId === 'track', { timeout: 30_000 });
   await page.evaluate((timeline, captureAt) => {
     const k = (type, code) => window.dispatchEvent(new KeyboardEvent(type, { code }));
     window.__trace = [];

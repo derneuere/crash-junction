@@ -259,6 +259,14 @@ try {
             const offFlash = g.events.on('flash', (s) => {
               W.flashes[s] = (W.flashes[s] ?? 0) + 1;
             });
+            // The classified takedown banner replaced the old flash('TAKEDOWN')
+            // (feat-banner): takedowns now fire a 'takedown' event carrying the
+            // type label. Mirror each one back into W.flashes.TAKEDOWN so the
+            // watch bodies (which count W.flashes.TAKEDOWN) read takedowns just
+            // as they did before the banner — assertions unchanged.
+            const offTakedown = g.events.on('takedown', () => {
+              W.flashes.TAKEDOWN = (W.flashes.TAKEDOWN ?? 0) + 1;
+            });
             const watch = new Function('W', 'g', 't', watchBody);
             let t0 = null;
             let applied = 0;
@@ -275,6 +283,7 @@ try {
               if (verdict?.done) {
                 g.onStep = null;
                 offFlash();
+                offTakedown();
                 for (const code of ['Space', 'ArrowUp', 'KeyA', 'KeyD']) k('keyup', code);
                 resolve({ ok: verdict.ok, why: verdict.why ?? '', file: verdict.ok ? g2.captureReport(note) : null });
               }
