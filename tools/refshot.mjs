@@ -39,6 +39,18 @@ const POSES = {
   // seam-2: the chicane verge — beach→bank skirt seam masks + the NW
   // drygrass tongue fading the headland gold into the shared turf
   'seam-2': { cam: [-218, 22, 40], look: [-285, 0, -10] },
+  // sandwater (ARTIST pose, art-sand-water branch — LOCKED): low on the SW
+  // beach apron, aimed slightly DOWN at the near waterline (the -272,-200
+  // bight) so the foam contour + wet-sand band get vertical screen extent
+  // instead of compressing edge-on. The frame reads dry sand (lower
+  // foreground) → wet-sand sheen → foam line → open sea, the full sand→water
+  // transition stacked up the frame. The seed cam(-162,8,-150)/
+  // look(-216,-1,-202) sat inside the motel block at (-176,-154); moved SW
+  // onto the open sand, eye at ~9 m looking down-and-across so the shoreline
+  // sits in the middle third at readable size, no buildings in shot. The
+  // grazing low-angle variants buried the wash in a one-pixel line; this
+  // slight downward tilt is what makes the beach read AS a beach. FROZEN.
+  sandwater: { cam: [-236, 9, -158], look: [-280, -2.2, -204] },
 };
 
 // ---- CLI ----
@@ -46,8 +58,15 @@ const args = process.argv.slice(2);
 const zone = args[0];
 const portIdx = args.indexOf('--port');
 const PORT = portIdx >= 0 ? Number(args[portIdx + 1]) : 5181;
-if (!POSES[zone] || !Number.isInteger(PORT)) {
-  console.error('usage: node tools/refshot.mjs <dockyard|harbor|cliff|beach|seam-1|seam-2> --port <port>');
+// optional --tod day|dusk|night and --gfx cine|fast for art-pass review
+// across lighting + render tiers; default day/cine keeps the canonical pose
+// captures (and the filename) unchanged. Non-default runs suffix the file.
+const todIdx = args.indexOf('--tod');
+const TOD = todIdx >= 0 ? args[todIdx + 1] : 'day';
+const gfxIdx = args.indexOf('--gfx');
+const GFX = gfxIdx >= 0 ? args[gfxIdx + 1] : 'cine';
+if (!POSES[zone] || !Number.isInteger(PORT) || !['day', 'dusk', 'night'].includes(TOD) || !['cine', 'fast'].includes(GFX)) {
+  console.error('usage: node tools/refshot.mjs <dockyard|harbor|cliff|beach|seam-1|seam-2|sandwater> --port <port> [--tod day|dusk|night] [--gfx cine|fast]');
   process.exit(1);
 }
 if (parseInt(process.versions.node, 10) < 18) {
@@ -166,6 +185,16 @@ try {
   // network/parse pipeline time to drape every model over its collider
   await new Promise((res) => setTimeout(res, 5_000));
 
+  // art-pass review: drive the game API straight to the requested tod + gfx
+  // tier (re-bakes the sky env / swaps the post chain), then settle a beat
+  if (TOD !== 'day' || GFX !== 'cine') {
+    await page.evaluate(({ tod, gfx }) => {
+      window.__game?.setGfx(gfx);
+      window.__game?.setTimeOfDay(tod);
+    }, { tod: TOD, gfx: GFX });
+    await new Promise((res) => setTimeout(res, 1500));
+  }
+
   const pose = POSES[zone];
   const dataUrl = await page.evaluate(({ cam, look }) => {
     const g = window.__game;
@@ -199,9 +228,11 @@ try {
 
   const outDir = path.join(root, 'screenshots', 'gantry-point');
   mkdirSync(outDir, { recursive: true });
-  const outFile = path.join(outDir, `current-${zone}.png`);
+  // default day/cine keeps the canonical filename; review variants suffix it
+  const suffix = TOD === 'day' && GFX === 'cine' ? '' : `-${TOD}-${GFX}`;
+  const outFile = path.join(outDir, `current-${zone}${suffix}.png`);
   writeFileSync(outFile, Buffer.from(dataUrl.slice('data:image/png;base64,'.length), 'base64'));
-  console.log(`wrote ${path.relative(root, outFile)} (${zone}: cam ${pose.cam.join(',')} look ${pose.look.join(',')})`);
+  console.log(`wrote ${path.relative(root, outFile)} (${zone} ${TOD}/${GFX}: cam ${pose.cam.join(',')} look ${pose.look.join(',')})`);
 } catch (e) {
   console.error(e.message);
   failed = true;

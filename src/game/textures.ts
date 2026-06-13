@@ -220,14 +220,63 @@ export function makePatchTexture(kind: PatchKind): THREE.CanvasTexture {
       });
     }
   } else if (kind === 'sand') {
-    // warm pale grain — just speckle, sand has no features at this scale
+    // DRY beach sand. Real dry sand at this scale is grain on grain: a warm
+    // pale base, broad tonal drift (the sun bleaches the high ground, damp
+    // hollows stay tan), a four-tone speckle for tooth, faint wind-ripple
+    // drag marks, and the odd shell/pebble fleck. Built per the Substance
+    // beach-sand workflow — "cell noise at different scales with distortion
+    // + a high-scale spot texture, slope-blurred" — approximated with
+    // layered radial blots + multi-tone fillRect grain (80.lv beach-sand).
     g.fillStyle = '#dcc69b';
     g.fillRect(0, 0, 256, 256);
-    for (let i = 0; i < 900; i++) {
+    // broad tonal drift: big soft warm/cool blots so the apron doesn't read
+    // as one flat slab of paint (the cell-noise-at-large-scale layer)
+    for (let i = 0; i < 22; i++) {
+      const x = hash01(i * 7 + 380) * 256;
+      const y = hash01(i * 7 + 381) * 256;
+      const r = 26 + hash01(i * 7 + 382) * 60;
+      const warm = hash01(i * 7 + 383) < 0.5;
+      wrapped(256, x, y, r, (px, py) => {
+        const gr = g.createRadialGradient(px, py, 2, px, py, r);
+        gr.addColorStop(0, warm ? 'rgba(206,182,134,0.22)' : 'rgba(232,216,176,0.22)');
+        gr.addColorStop(1, 'rgba(0,0,0,0)');
+        g.fillStyle = gr;
+        g.fillRect(px - r, py - r, r * 2, r * 2);
+      });
+    }
+    // wind-ripple drag marks: faint near-horizontal arcs, the dry-sand
+    // analog of the wet drag noise — gives the flat apron a grain direction
+    g.lineWidth = 1;
+    for (let i = 0; i < 26; i++) {
+      const x = hash01(i * 5 + 420) * 256;
+      const y = hash01(i * 5 + 421) * 256;
+      const len = 22 + hash01(i * 5 + 422) * 40;
+      const tilt = (hash01(i * 5 + 423) - 0.5) * 8;
+      g.strokeStyle = hash01(i * 5 + 424) < 0.5 ? 'rgba(198,174,128,0.28)' : 'rgba(236,222,184,0.3)';
+      wrapped(256, x, y, len, (px, py) => {
+        g.beginPath();
+        g.moveTo(px - len / 2, py);
+        g.quadraticCurveTo(px, py + tilt, px + len / 2, py);
+        g.stroke();
+      });
+    }
+    // four-tone grain for tooth (denser + more tonal range than before)
+    const grain = ['rgba(190,164,118,0.5)', 'rgba(238,222,182,0.5)', 'rgba(210,190,144,0.45)', 'rgba(170,146,104,0.4)'];
+    for (let i = 0; i < 1500; i++) {
       const x = hash01(i * 3 + 400) * 256;
       const y = hash01(i * 3 + 401) * 256;
-      g.fillStyle = hash01(i * 3 + 402) < 0.5 ? 'rgba(196,172,128,0.5)' : 'rgba(238,222,182,0.5)';
-      g.fillRect(x, y, 1.6, 1.6);
+      g.fillStyle = grain[Math.floor(hash01(i * 3 + 402) * 4)];
+      const s = 1.2 + hash01(i * 3 + 403) * 1.2;
+      g.fillRect(x, y, s, s);
+    }
+    // shell / pebble flecks: a few brighter highlit specks catch the eye and
+    // sell the scale — sand is never perfectly uniform
+    for (let i = 0; i < 16; i++) {
+      const x = hash01(i * 9 + 460) * 256;
+      const y = hash01(i * 9 + 461) * 256;
+      const s = 1.6 + hash01(i * 9 + 462) * 2.2;
+      g.fillStyle = hash01(i * 9 + 463) < 0.6 ? 'rgba(250,244,228,0.7)' : 'rgba(150,128,92,0.55)';
+      g.fillRect(x, y, s, s);
     }
   } else if (kind === 'drygrass') {
     // golden-tan mottle: big soft blotches + a few wispy strokes
@@ -337,26 +386,64 @@ export function makeQuayTexture(): THREE.CanvasTexture {
 
 /** Waterline foam band: alpha peaks just off the shore toe and dissolves
  *  into lacy holes seaward. v runs inner (0) → outer (1); flipY off so the
- *  canvas reads in that order. u tiles along the coast. */
-export function makeFoamTexture(): THREE.CanvasTexture {
+ *  canvas reads in that order. u tiles along the coast.
+ *
+ *  Built as CONTOUR foam (Cyanilux shoreline breakdown / Alisavakis
+ *  stylized-water foam): rather than one even band it lays a bright,
+ *  near-opaque LEADING EDGE where the swash meets the sand, then two or
+ *  three softer foam CONTOUR LINES trailing seaward, each broken into lacy
+ *  holes by cell-noise so the edge reads as scalloped sea-foam, not a decal
+ *  stripe. The variant arg lets the coast stack two offset copies (a
+ *  scrolling outer swash over a fixed leading edge) for the animated wash.
+ *  https://www.cyanilux.com/tutorials/shoreline-shader-breakdown/
+ *  https://halisavakis.com/my-take-on-shaders-stylized-water-shader/ */
+export function makeFoamTexture(variant = 0): THREE.CanvasTexture {
   const [c, g] = canvas(128);
+  const seed = variant * 1000;
   g.clearRect(0, 0, 128, 128);
+  // a soft base band so there's always SOME foam tint across the strip
   const band = g.createLinearGradient(0, 0, 0, 128);
-  band.addColorStop(0, 'rgba(240,250,250,0)');
-  band.addColorStop(0.3, 'rgba(240,250,250,0.85)');
-  band.addColorStop(0.55, 'rgba(240,250,250,0.5)');
-  band.addColorStop(1, 'rgba(240,250,250,0)');
+  band.addColorStop(0, 'rgba(246,253,253,0)');
+  band.addColorStop(0.16, 'rgba(246,253,253,0.7)');
+  band.addColorStop(0.5, 'rgba(242,251,251,0.4)');
+  band.addColorStop(1, 'rgba(242,251,251,0)');
   g.fillStyle = band;
   g.fillRect(0, 0, 128, 128);
-  // punch holes so the seaward edge breaks up instead of fading evenly
+  // contour lines: each is a wavy near-horizontal foam crest. The first
+  // sits at the shore toe (bright, the swash leading edge), the rest trail
+  // seaward and fade — the "distinct wave lines" of the contour technique.
+  const lines = [
+    { y: 24, h: 19, a: 1.0 }, // leading edge — opaque, the bright waterline crest
+    { y: 56, h: 14, a: 0.7 },
+    { y: 88, h: 11, a: 0.45 },
+  ];
+  for (let li = 0; li < lines.length; li++) {
+    const ln = lines[li];
+    g.fillStyle = `rgba(248,253,253,${ln.a})`;
+    // draw the crest as a filled wavy ribbon: top edge wobbles in u, bottom
+    // edge wobbles out of phase so the band thickens and thins like foam
+    g.beginPath();
+    for (let x = 0; x <= 128; x += 4) {
+      const w = Math.sin((x / 128) * Math.PI * 4 + li * 1.7 + seed) * 3 + Math.sin((x / 128) * Math.PI * 9 + seed) * 1.5;
+      g.lineTo(x, ln.y + w - ln.h / 2);
+    }
+    for (let x = 128; x >= 0; x -= 4) {
+      const w = Math.sin((x / 128) * Math.PI * 5 + li * 2.3 + seed) * 3.2;
+      g.lineTo(x, ln.y + w + ln.h / 2);
+    }
+    g.closePath();
+    g.fill();
+  }
+  // punch lacy cell-noise holes so every crest scallops instead of reading
+  // as a solid stripe (the "blend in some cell noise" foam step)
   g.globalCompositeOperation = 'destination-out';
-  for (let i = 0; i < 46; i++) {
-    const x = hash01(i * 3 + 800) * 128;
-    const y = 40 + hash01(i * 3 + 801) * 88;
-    const r = 3 + hash01(i * 3 + 802) * 9;
+  for (let i = 0; i < 90; i++) {
+    const x = hash01(i * 3 + 800 + seed) * 128;
+    const y = 12 + hash01(i * 3 + 801 + seed) * 110;
+    const r = 2.5 + hash01(i * 3 + 802 + seed) * 8;
     wrapped(128, x, y, r, (px, py) => {
       const gr = g.createRadialGradient(px, py, 0, px, py, r);
-      gr.addColorStop(0, 'rgba(0,0,0,0.9)');
+      gr.addColorStop(0, 'rgba(0,0,0,0.95)');
       gr.addColorStop(1, 'rgba(0,0,0,0)');
       g.fillStyle = gr;
       g.fillRect(px - r, py - r, r * 2, r * 2);
@@ -367,6 +454,70 @@ export function makeFoamTexture(): THREE.CanvasTexture {
   t.wrapS = THREE.RepeatWrapping;
   t.wrapT = THREE.ClampToEdgeWrapping;
   t.flipY = false;
+  t.colorSpace = THREE.SRGBColorSpace;
+  return t;
+}
+
+/** WET beach sand: the strip the swash has just soaked. Darker, cooler and
+ *  much smoother than dry sand (the water fills the grain voids and mirrors
+ *  the sky), with the wave's DIRECTIONAL DRAG marks — long low arcs raked
+ *  toward the sea — and a scatter of trapped-water glints. Tiles seamlessly
+ *  along the coast. Pairs with a low-roughness material so scene.environment
+ *  (the PMREM sky) gives the wet sheen; the dark base does the wet read.
+ *  Wet-sand authoring per the 80.lv Substance beach study (gradient warped
+ *  by Perlin + anisotropic/directional drag noise, lower noise than dry). */
+export function makeWetSandTexture(): THREE.CanvasTexture {
+  const [c, g] = canvas(256);
+  // darker, slightly desaturated/cooler base than dry #dcc69b
+  g.fillStyle = '#9d8a64';
+  g.fillRect(0, 0, 256, 256);
+  // broad damp drift — patches where water still pools read even darker
+  for (let i = 0; i < 18; i++) {
+    const x = hash01(i * 7 + 900) * 256;
+    const y = hash01(i * 7 + 901) * 256;
+    const r = 30 + hash01(i * 7 + 902) * 64;
+    const wetter = hash01(i * 7 + 903) < 0.5;
+    wrapped(256, x, y, r, (px, py) => {
+      const gr = g.createRadialGradient(px, py, 2, px, py, r);
+      gr.addColorStop(0, wetter ? 'rgba(108,96,70,0.30)' : 'rgba(86,76,56,0.30)');
+      gr.addColorStop(1, 'rgba(0,0,0,0)');
+      g.fillStyle = gr;
+      g.fillRect(px - r, py - r, r * 2, r * 2);
+    });
+  }
+  // directional wave-drag arcs: long, shallow, raked the same way (the
+  // anisotropic drag the receding swash leaves) — far fewer, longer strokes
+  // than dry sand's grain, which is what makes wet sand read as smoother
+  g.lineWidth = 1.4;
+  for (let i = 0; i < 30; i++) {
+    const x = hash01(i * 5 + 940) * 256;
+    const y = hash01(i * 5 + 941) * 256;
+    const len = 60 + hash01(i * 5 + 942) * 90;
+    const bow = 6 + hash01(i * 5 + 943) * 10; // consistent rake direction
+    g.strokeStyle = hash01(i * 5 + 944) < 0.5 ? 'rgba(78,68,50,0.34)' : 'rgba(150,134,100,0.26)';
+    wrapped(256, x, y, len, (px, py) => {
+      g.beginPath();
+      g.moveTo(px - len / 2, py);
+      g.quadraticCurveTo(px, py + bow, px + len / 2, py);
+      g.stroke();
+    });
+  }
+  // light grain (sparse — wet sand has far less visible tooth than dry)
+  for (let i = 0; i < 500; i++) {
+    const x = hash01(i * 3 + 980) * 256;
+    const y = hash01(i * 3 + 981) * 256;
+    g.fillStyle = hash01(i * 3 + 982) < 0.5 ? 'rgba(72,62,46,0.4)' : 'rgba(140,124,92,0.3)';
+    g.fillRect(x, y, 1.4, 1.4);
+  }
+  // trapped-water glints: tiny bright specks the sheen catches
+  for (let i = 0; i < 22; i++) {
+    const x = hash01(i * 11 + 1020) * 256;
+    const y = hash01(i * 11 + 1021) * 256;
+    g.fillStyle = 'rgba(228,234,232,0.5)';
+    g.fillRect(x, y, 1.6, 1.6);
+  }
+  const t = new THREE.CanvasTexture(c);
+  t.wrapS = t.wrapT = THREE.RepeatWrapping;
   t.colorSpace = THREE.SRGBColorSpace;
   return t;
 }

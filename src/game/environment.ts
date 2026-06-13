@@ -11,6 +11,7 @@ import {
   makePatchTexture,
   makeQuayTexture,
   makeSeaTexture,
+  makeWetSandTexture,
   makeWindowTextures,
   type PatchKind,
 } from './textures';
@@ -381,6 +382,175 @@ function buildCoast(scene: THREE.Scene, coast: CoastDef): void {
     scene.add(mesh);
   };
 
+  // BEACH skirt (replaces addFlatSkirt for 'beach' runs): the sand slope from
+  // the dune rim down past the waterline, but multi-row and shaded as a real
+  // shoreline instead of one flat sand sheet. A WET/DRY gradient bakes into
+  // the vertex colours — pale dry sand high up darkens through a damp band to
+  // the wet, water-soaked sand at the toe (the swash zone) — and a separate
+  // low-roughness WET-SAND overlay covers the splash zone so the PMREM sky
+  // gives it a sheen the matte dry sand never gets. The wet read is the key
+  // shoreline cue: dry → damp → wet → foam → sea, never a hard cut edge.
+  //   wet/dry darkening + alpha-blended wet zone: Cyanilux shoreline
+  //   breakdown; smoother low-noise wet sand + drag: 80.lv Substance study.
+  const ROWS_BEACH = 7;
+  const dryHi = new THREE.Color(0xe6d2a8); // sun-bleached dry sand crest
+  const dryLo = new THREE.Color(0xcbb488); // dry sand toward the damp line
+  const dampC = new THREE.Color(0x9a8763); // the damp transition band
+  const wetC = new THREE.Color(0x6f6045); // dark water-soaked sand at the swash
+  const addBeachSkirt = (segs: number[], dryMat: THREE.Material): void => {
+    // SEAM CONTRACT: the wet/damp bands + sheen are placed in v relative to
+    // the CURRENT seaLevel (sea, from CoastDef) and the swash REACH — how far
+    // up the slope spent waves still wet the sand. A flat beach's swash runs
+    // metres past the still waterline, so the damp band is anchored well
+    // ABOVE sea (SWASH_HI), not at a thin wave-amplitude sliver, or it
+    // foreshortens to nothing from a low camera. The water sibling owns the
+    // real sea surface + wave height; from this worktree we anchor to the
+    // current sea. MERGE: if the water agent's wave amplitude differs,
+    // retune SWASH_HI / the heights below so the wet sand tracks their crest.
+    const SWASH_HI = 1.7; // metres above sea the damp sand reaches (swash run-up)
+    const cols = segs.length + 1;
+    const pos = new Float32Array(cols * ROWS_BEACH * 3);
+    const uv = new Float32Array(cols * ROWS_BEACH * 2);
+    const col = new Float32Array(cols * ROWS_BEACH * 3);
+    const tmp = new THREE.Color();
+    let u = 0;
+    for (let c = 0; c < cols; c++) {
+      const vi = (segs[0] + c) % n;
+      if (c > 0) {
+        const pv = (segs[0] + c - 1) % n;
+        u += Math.hypot(o[vi].x - o[pv].x, o[vi].z - o[pv].z) / 7;
+      }
+      const rimY = o[vi].y ?? 0;
+      const topX = o[vi].x;
+      const topZ = o[vi].z;
+      const dx = vOut[vi].x * vW[vi] * botF;
+      const dz = vOut[vi].z * vW[vi] * botF;
+      // v fraction (0 rim → 1 toe) where the slope crosses a given height
+      const fAt = (h: number) => Math.min(1, Math.max(0, (rimY - h) / Math.max(0.01, rimY - BOT)));
+      const fDamp = fAt(sea + SWASH_HI); // top of the damp band (swash run-up)
+      const fSea = fAt(sea); // the waterline itself
+      for (let r = 0; r < ROWS_BEACH; r++) {
+        const t = r / (ROWS_BEACH - 1);
+        const k = (c * ROWS_BEACH + r) * 3;
+        pos[k] = topX + dx * t;
+        pos[k + 1] = rimY + (BOT - rimY) * t;
+        pos[k + 2] = topZ + dz * t;
+        uv[(c * ROWS_BEACH + r) * 2] = u;
+        uv[(c * ROWS_BEACH + r) * 2 + 1] = t;
+        // colour: dry crest → dry-low → damp at the swash top → dark wet sand
+        // toward the waterline → darkest underwater (hidden by the sea plane).
+        // The wide damp→wet ramp is what reads as a real shoreline gradient
+        // instead of a clean cut at the water's edge.
+        if (t < fDamp) tmp.copy(dryHi).lerp(dryLo, t / Math.max(0.001, fDamp));
+        else if (t < fSea) tmp.copy(dryLo).lerp(dampC, (t - fDamp) / Math.max(0.001, fSea - fDamp));
+        else tmp.copy(dampC).lerp(wetC, Math.min(1, (t - fSea) / 0.18));
+        col[k] = tmp.r;
+        col[k + 1] = tmp.g;
+        col[k + 2] = tmp.b;
+      }
+    }
+    const idx: number[] = [];
+    for (let c = 0; c < cols - 1; c++) {
+      for (let r = 0; r < ROWS_BEACH - 1; r++) {
+        const a = c * ROWS_BEACH + r;
+        const b = (c + 1) * ROWS_BEACH + r;
+        idx.push(a, a + 1, b, a + 1, b + 1, b);
+      }
+    }
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    geo.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
+    geo.setAttribute('color', new THREE.BufferAttribute(col, 3));
+    geo.setIndex(idx);
+    geo.computeVertexNormals();
+    // dry skirt carries the sand texture, tinted by the wet/dry vertex
+    // gradient (vertexColors multiplies the map) — one matte mesh, the whole
+    // slope. The wet sheen rides as a thin overlay below.
+    const dryGeoMat = (dryMat as THREE.MeshStandardMaterial).clone();
+    dryGeoMat.vertexColors = true;
+    const mesh = new THREE.Mesh(geo, dryGeoMat);
+    mesh.receiveShadow = true;
+    scene.add(mesh);
+
+    // WET-SAND SHEEN overlay: a thin strip riding the splash zone (the
+    // high-water line down to just below the waterline), a hair proud of the
+    // dry slope along its surface normal so the two never z-fight. Low
+    // roughness + a touch of metalness so scene.environment (the PMREM sky)
+    // mirrors across it — that wet glint, brightest at a glancing angle from
+    // a low camera, is what separates wet sand from a dark paint stripe. The
+    // wet texture's dark base + drag arcs do the rest. Transparent with an
+    // alpha that fades the sheen out toward the dry sand so there's no edge.
+    // three rows down the splash zone so the sheen ramps in and back out
+    // smoothly: transparent at the dry top, peak just above the waterline
+    // (the still-glistening wet sand), tapering under the sea.
+    const SHEEN_ROWS = 3;
+    const sHeights = [sea + 1.5, sea + 0.2, sea - 0.5]; // dry edge → waterline → under
+    const sAlphas = [0, 0.85, 0.4]; // fade in, peak at the wet line, fade under
+    const sPos = new Float32Array(cols * SHEEN_ROWS * 3);
+    const sUv = new Float32Array(cols * SHEEN_ROWS * 2);
+    const sAlpha = new Float32Array(cols * SHEEN_ROWS); // per-vertex sheen alpha
+    let su = 0;
+    for (let c = 0; c < cols; c++) {
+      const vi = (segs[0] + c) % n;
+      if (c > 0) {
+        const pv = (segs[0] + c - 1) % n;
+        su += Math.hypot(o[vi].x - o[pv].x, o[vi].z - o[pv].z) / 6;
+      }
+      const rimY = o[vi].y ?? 0;
+      const dx = vOut[vi].x * vW[vi] * botF;
+      const dz = vOut[vi].z * vW[vi] * botF;
+      const fAt = (h: number) => Math.min(1, Math.max(0, (rimY - h) / Math.max(0.01, rimY - BOT)));
+      const lift = 0.012; // proud of the slope so it wins the depth test
+      for (let r = 0; r < SHEEN_ROWS; r++) {
+        const t = fAt(sHeights[r]);
+        const k = (c * SHEEN_ROWS + r) * 3;
+        sPos[k] = o[vi].x + dx * t + vOut[vi].x * lift;
+        sPos[k + 1] = rimY + (BOT - rimY) * t + lift;
+        sPos[k + 2] = o[vi].z + dz * t + vOut[vi].z * lift;
+        sUv[(c * SHEEN_ROWS + r) * 2] = su;
+        sUv[(c * SHEEN_ROWS + r) * 2 + 1] = r / (SHEEN_ROWS - 1);
+        sAlpha[c * SHEEN_ROWS + r] = sAlphas[r];
+      }
+    }
+    const sIdx: number[] = [];
+    for (let c = 0; c < cols - 1; c++) {
+      for (let r = 0; r < SHEEN_ROWS - 1; r++) {
+        const a = c * SHEEN_ROWS + r;
+        const b = (c + 1) * SHEEN_ROWS + r;
+        sIdx.push(a, a + 1, b, a + 1, b + 1, b);
+      }
+    }
+    const sGeo = new THREE.BufferGeometry();
+    sGeo.setAttribute('position', new THREE.BufferAttribute(sPos, 3));
+    sGeo.setAttribute('uv', new THREE.BufferAttribute(sUv, 2));
+    sGeo.setAttribute('alpha', new THREE.BufferAttribute(sAlpha, 1));
+    sGeo.setIndex(sIdx);
+    sGeo.computeVertexNormals();
+    const sMat = new THREE.MeshStandardMaterial({
+      map: makeWetSandTexture(),
+      roughness: 0.24, // low → a crisp grazing-angle sky glint = the wet read
+      metalness: 0.0, // dielectric: Fresnel rim reflection, no metallic colour cast
+      envMapIntensity: 1.3,
+      transparent: true,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+    });
+    // per-vertex alpha fade (no shader rewrite — just feed gl_FragColor.a the
+    // attribute): the sheen dissolves into the dry sand instead of edging it
+    sMat.onBeforeCompile = (shader) => {
+      shader.vertexShader = shader.vertexShader
+        .replace('void main() {', 'attribute float alpha;\nvarying float vAlpha;\nvoid main() {')
+        .replace('#include <begin_vertex>', '#include <begin_vertex>\nvAlpha = alpha;');
+      shader.fragmentShader = shader.fragmentShader
+        .replace('void main() {', 'varying float vAlpha;\nvoid main() {')
+        .replace('#include <dithering_fragment>', '#include <dithering_fragment>\ngl_FragColor.a *= vAlpha;');
+    };
+    const sMesh = new THREE.Mesh(sGeo, sMat);
+    sMesh.renderOrder = 1; // over the dry slope, under the foam
+    sMesh.receiveShadow = true;
+    scene.add(sMesh);
+  };
+
   // jagged rock face: extra columns every ~7 m and four rows down the face,
   // interior vertices jittered by index-hash (stable across reloads — the
   // refshot poses depend on it). Run-boundary columns and the rim row stay
@@ -521,59 +691,119 @@ function buildCoast(scene: THREE.Scene, coast: CoastDef): void {
   const quayMat = new THREE.MeshStandardMaterial({ map: makeQuayTexture(), roughness: 0.9, side: THREE.DoubleSide });
   const bankMat = new THREE.MeshStandardMaterial({ color: 0x4f5944, roughness: 1, side: THREE.DoubleSide });
   for (const run of runs) {
-    if (run.edge === 'beach') addFlatSkirt(run.segs, beachMat, 7);
+    if (run.edge === 'beach') addBeachSkirt(run.segs, beachMat); // wet/dry shaded sand
     else if (run.edge === 'wall') addFlatSkirt(run.segs, quayMat, 6);
     else if (run.edge === 'bank') addFlatSkirt(run.segs, bankMat, 6);
     else addCliffSkirt(run.segs);
   }
 
-  // foam: a soft ring riding the waterline toe of every skirt, a hair
-  // above the sea so the two transparent-vs-opaque planes never z-fight
+  // FOAM: layered shore-line foam riding the waterline toe of every skirt, a
+  // hair above the sea so the transparent-vs-opaque planes never z-fight.
+  // Two stacked rings sell the wash instead of one static stripe:
+  //   • a FIXED leading edge hugging the shore toe (the bright lacy line
+  //     where the last sheet of water meets the sand) — never moves much, so
+  //     the waterline always reads as a solid contour;
+  //   • a wider SWASH ring drifting in and out (the spent wave sliding up the
+  //     sand and retreating), built from a second foam-texture variant.
+  // Both animate off the RENDER clock (performance.now in onBeforeRender) —
+  // NEVER sim time — so the wash breathes without ever touching determinism:
+  // onBeforeRender runs only when a frame is drawn, the replay/sim path never
+  // invokes it, and it writes only to visual texture/material state.
+  //
+  // SEAM CONTRACT: the foam sits at sea + a small lift, and the swash slides
+  // over a band sized to an ASSUMED wave amplitude (~0.15–0.3 m). The water
+  // sibling owns the real sea surface + wave height; from this worktree we
+  // can't see their final numbers, so we anchor to the CURRENT seaLevel
+  // (sea) + FOAM_AMP. MERGE: align FOAM_AMP / the foam lift to the water
+  // agent's actual wave amplitude so the foam tracks the wet crest, not a
+  // guessed height. (Contour-foam + scrolling-swash technique: Cyanilux
+  // shoreline breakdown, Alisavakis stylized-water foam.)
   {
-    const cols = n + 1;
-    const pos = new Float32Array(cols * 6);
-    const uv = new Float32Array(cols * 4);
-    let u = 0;
-    for (let c = 0; c < cols; c++) {
-      const vi = c % n;
-      if (c > 0) {
-        const pv = (c - 1) % n;
-        u += Math.hypot(o[vi].x - o[pv].x, o[vi].z - o[pv].z) / 3;
+    const FOAM_AMP = 0.22; // assumed sea-surface wave amplitude, metres
+    // one foam ring: inner/outer are metres of the skirt's outward normal
+    // relative to the WATERLINE — the point where the sand slope crosses the
+    // sea surface, NOT the skirt toe (the toe is ~18 m out and metres below
+    // the sea, so foam pinned there hid under the slope). Anchoring at the
+    // crossing puts the foam exactly on the wet sand at the water's edge.
+    // `tex` and `speed` drive the animation.
+    const makeFoamRing = (inner: number, outer: number, tex: THREE.CanvasTexture, speed: number, baseOpacity: number): void => {
+      const cols = n + 1;
+      const pos = new Float32Array(cols * 6);
+      const uv = new Float32Array(cols * 4);
+      let u = 0;
+      for (let c = 0; c < cols; c++) {
+        const vi = c % n;
+        if (c > 0) {
+          const pv = (c - 1) % n;
+          u += Math.hypot(o[vi].x - o[pv].x, o[vi].z - o[pv].z) / 3;
+        }
+        // waterline crossing: fraction along rim→toe where the slope hits sea
+        const rimY = o[vi].y ?? 0;
+        const runW = Math.max(0.01, vW[vi] * botF); // horizontal rim→toe run
+        const slope = (rimY - BOT) / runW; // metres of rise per metre seaward-in
+        const tSea = Math.min(1, Math.max(0, (rimY - sea) / Math.max(0.01, rimY - BOT)));
+        const wlx = o[vi].x + vOut[vi].x * vW[vi] * botF * tSea;
+        const wlz = o[vi].z + vOut[vi].z * vW[vi] * botF * tSea;
+        // foam rides the WET SAND inland of the waterline (where the slope is
+        // above sea, follow the slope so the band drapes on the sand) and the
+        // SEA SURFACE seaward of it (clamp to sea so it floats, never sinks
+        // under the opaque sea plane). +0.05 keeps it off both to avoid
+        // z-fight. inner is inland (negative offset → +height via -off*slope).
+        const yAt = (off: number) => Math.max(sea, sea - off * slope) + 0.05;
+        const k = c * 6;
+        pos[k] = wlx + vOut[vi].x * inner;
+        pos[k + 1] = yAt(inner);
+        pos[k + 2] = wlz + vOut[vi].z * inner;
+        pos[k + 3] = wlx + vOut[vi].x * outer;
+        pos[k + 4] = yAt(outer);
+        pos[k + 5] = wlz + vOut[vi].z * outer;
+        uv[c * 4] = u;
+        uv[c * 4 + 1] = 0;
+        uv[c * 4 + 2] = u;
+        uv[c * 4 + 3] = 1;
       }
-      const tx = o[vi].x + vOut[vi].x * vW[vi];
-      const tz = o[vi].z + vOut[vi].z * vW[vi];
-      const k = c * 6;
-      pos[k] = tx - vOut[vi].x * 0.7;
-      pos[k + 1] = sea + 0.04;
-      pos[k + 2] = tz - vOut[vi].z * 0.7;
-      pos[k + 3] = tx + vOut[vi].x * 1.1;
-      pos[k + 4] = sea + 0.04;
-      pos[k + 5] = tz + vOut[vi].z * 1.1;
-      uv[c * 4] = u;
-      uv[c * 4 + 1] = 0;
-      uv[c * 4 + 2] = u;
-      uv[c * 4 + 3] = 1;
-    }
-    const idx: number[] = [];
-    for (let c = 0; c < cols - 1; c++) {
-      const a = c * 2;
-      idx.push(a, a + 1, a + 2, a + 1, a + 3, a + 2);
-    }
-    const geo = new THREE.BufferGeometry();
-    geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-    geo.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
-    geo.setIndex(idx);
-    const foam = new THREE.Mesh(
-      geo,
-      new THREE.MeshBasicMaterial({
-        map: makeFoamTexture(),
+      const idx: number[] = [];
+      for (let c = 0; c < cols - 1; c++) {
+        const a = c * 2;
+        idx.push(a, a + 1, a + 2, a + 1, a + 3, a + 2);
+      }
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+      geo.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
+      geo.setIndex(idx);
+      const mat = new THREE.MeshBasicMaterial({
+        map: tex,
         transparent: true,
         depthWrite: false,
+        opacity: baseOpacity,
         side: THREE.DoubleSide,
-      }),
-    );
-    foam.renderOrder = 1; // after the sea
-    scene.add(foam);
+      });
+      const foam = new THREE.Mesh(geo, mat);
+      foam.renderOrder = 2; // after the sea (0/1) and the wet sheen (1)
+      // RENDER-TIME animation (determinism-safe — see block header): scroll
+      // the foam crests along the shore + a slow seaward drift, and pulse the
+      // swash opacity like a wave running up and sliding back. performance.now
+      // is the wall clock, independent of the sim/replay dt stream.
+      if (speed !== 0) {
+        const ampV = FOAM_AMP; // ties the swash throw to the assumed wave amp
+        foam.onBeforeRender = () => {
+          const tm = performance.now() / 1000;
+          tex.offset.x = (tm * 0.03 * speed) % 1; // drift along the coast
+          tex.offset.y = -Math.sin(tm * 0.6 * speed) * 0.12 * ampV * 6; // swash in/out
+          // breathe the swash brightness so the spent wave fades as it slides
+          mat.opacity = baseOpacity * (0.6 + 0.4 * (0.5 + 0.5 * Math.sin(tm * 0.6 * speed - 0.5)));
+        };
+      }
+      scene.add(foam);
+    };
+    // leading edge: a fat lacy band straddling the waterline — runs from ~2 m
+    // up the wet sand (inner, inland/negative) out ~2 m over the sea (outer),
+    // so the bright crest sits ON the water's edge at readable width from a
+    // low camera. Bright, barely drifting — the waterline always reads.
+    makeFoamRing(-2.2, 2.0, makeFoamTexture(0), 1, 1.0);
+    // outer swash: wider still, a second variant, drifting + pulsing seaward —
+    // the spent sheet of a broken wave sliding up the sand and retreating
+    makeFoamRing(-3.4, 4.2, makeFoamTexture(1), 1.35, 0.78);
   }
 }
 
