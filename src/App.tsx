@@ -14,7 +14,7 @@ import { MainMenu } from './ui/menu/MainMenu';
 import { Settings } from './ui/menu/Settings';
 import { EventSelect } from './ui/menu/EventSelect';
 import { Loading } from './ui/menu/Loading';
-import CarSelect from './ui/CarSelect';
+import { CarSelect } from './ui/CarSelect';
 import {
   readBest, readCar, readMuted, readSel, upgradeBest, writeBest, writeMuted, writeSel, type BestMap,
 } from './ui/storage';
@@ -397,13 +397,13 @@ export default function App() {
   }
   if (phase === 'carselect') {
     return (
+      // garage CarSelect: onSelect IS the SELECT/confirm action; cycling +
+      // livery preview are internal to the showroom scene. (Livery colour is
+      // chosen in the garage but not yet applied in-game — follow-up.)
       <CarSelect
-        event={levelId}
-        tod={timeOfDay}
         cars={PLAYER_CARS}
-        carId={carId}
-        onSelect={selectCar}
-        onConfirm={(id) => { selectCar(id); startGameplay(); }}
+        initialCarId={carId}
+        onSelect={(id) => { selectCar(id); startGameplay(); }}
         onBack={() => setPhase('events')}
       />
     );

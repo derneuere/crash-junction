@@ -1,121 +1,202 @@
-import { useEffect, useState } from 'react';
-import type { TimeOfDay } from '../game/daynight';
-import type { LevelId } from '../game/levels';
-import { LEVEL_LABELS } from '../game/levels';
-import { PLAYER_CARS, type PlayerCarId } from '../game/models';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { GarageScene, GARAGE_DEFAULT_COLOR } from '../game/garageScene';
+import type { PlayerCarDef, PlayerCarId } from '../game/models';
 
-// ---------------------------------------------------------------------------
-// PLACEHOLDER CarSelect — the real one ships from the GARAGE sibling agent
-// (CarSelect.tsx + a 3D garage scene). This minimal list keeps the `frontend`
-// branch building and walkable on its own; the merge swaps in the garage
-// sibling's component, which MUST keep this prop contract:
+// ────────────────────────────────────────────────────────────────────────────
+// CarSelect — the B3 "SELECT A COMPACT" garage overlay. Mounts a GarageScene on
+// its own canvas (the chosen car orbiting in a moody showroom), and lays a dark
+// chrome-and-orange HUD over it: the car's name/type, TOP SPEED + WEIGHT stat
+// bars, the engine voice it implies, left/right to cycle the roster, a paint
+// swatch row, and SELECT / BACK.
 //
-//   interface CarSelectProps {
-//     event:    LevelId;            // the committed event (for the header)
-//     tod:      TimeOfDay;          // the committed variant (garage lighting)
-//     cars:     readonly PlayerCarDef[];  // the roster (models.PLAYER_CARS)
-//     carId:    PlayerCarId;        // current selection (highlight + default)
-//     onSelect: (id: PlayerCarId) => void;  // pick a car (writes cj-car/-engine)
-//     onConfirm:(id: PlayerCarId) => void;  // commit → LOADING → INGAME
-//     onBack:   () => void;         // → EVENT SELECT
-//   }
-//
-// App owns the flow: onSelect just updates the live selection (so the garage
-// can preview the engine voice / body); onConfirm is what advances to LOADING
-// and mounts the heavy Game. The garage may treat select+confirm as one click.
-// ---------------------------------------------------------------------------
+// This component is SELF-CONTAINED and owns the GarageScene lifecycle (mount →
+// start, unmount → dispose). The frontend sibling renders <CarSelect> for its
+// car-select route and passes the roster + callbacks; this REPLACES their
+// placeholder. The scene is decoupled from the game sim — mounting it loads no
+// level and touches no physics/RNG/replay.
+// ────────────────────────────────────────────────────────────────────────────
+
+/** The garage paint palette — B3-ish showroom colours. The first is the
+ *  default spawn red so an un-customised car matches its in-game colour. */
+export const CAR_COLORS: readonly number[] = [
+  GARAGE_DEFAULT_COLOR, // spawn red
+  0xf2b01e, // gold
+  0xe8e8ec, // pearl white
+  0x1c1f26, // gunmetal
+  0x2266dd, // electric blue
+  0x22bb55, // racing green
+  0xc23a8f, // magenta
+  0xff6a1a, // hazard orange
+];
+
+/** Display stats per car, 0..1 of the class max — derived from the roster's
+ *  body/engine archetype (the SPECS.sedan physics are shared, so the BARS are a
+ *  presentation read of each body's character, B3-style). Top speed tracks the
+ *  engine voice (V10 screamers > V8 muscle > stock rental); weight is the body
+ *  mass feel (the compact is light, the cop interceptor heavy). */
+const CAR_STATS: Record<PlayerCarId, { topSpeed: number; weight: number }> = {
+  compact: { topSpeed: 0.52, weight: 0.34 },
+  wedge: { topSpeed: 0.96, weight: 0.46 },
+  vector: { topSpeed: 0.92, weight: 0.5 },
+  prowler: { topSpeed: 0.74, weight: 0.82 },
+};
+
+/** Engine-voice label shown under the stats (matches audio/synths flavors). */
+const ENGINE_LABEL: Record<PlayerCarDef['flavor'], string> = {
+  stock: 'STOCK INLINE-4',
+  v10: 'V10 SCREAMER',
+  v8: 'V8 MUSCLE',
+};
 
 export interface CarSelectProps {
-  /** The committed event — header context (the garage may show its skyline). */
-  event: LevelId;
-  /** The committed time-of-day — drives the garage lighting. */
-  tod: TimeOfDay;
-  /** The player-car roster (models.PLAYER_CARS). */
-  cars: readonly { id: PlayerCarId; label: string; flavor: string; tagline: string }[];
-  /** Current selection — highlight + the default confirm target. */
-  carId: PlayerCarId;
-  /** Pick a car (App writes cj-car + the car's engine voice). */
-  onSelect: (id: PlayerCarId) => void;
-  /** Commit a car → LOADING → INGAME (mounts the heavy Game). */
-  onConfirm: (id: PlayerCarId) => void;
-  /** Back to EVENT SELECT. */
+  /** The roster to choose from — pass PLAYER_CARS (or a subset/owned set). */
+  cars: readonly PlayerCarDef[];
+  /** Which car is focused on open. Falls back to the first car if unknown. */
+  initialCarId: PlayerCarId;
+  /** Optional initial paint (hex). Defaults to the spawn red. */
+  initialColor?: number;
+  /** Confirm: the player picked `carId` painted `color` (hex 0xRRGGBB). */
+  onSelect: (carId: PlayerCarId, color: number) => void;
+  /** Cancel: return to the previous menu without changing the car. */
   onBack: () => void;
 }
 
-/** Screen 5 — CAR SELECT (placeholder). A plain roster list; clicking a row
- *  selects it, DRIVE (or a second click) confirms → LOADING. The garage
- *  sibling replaces this with the 3D showroom; the prop contract above is the
- *  seam. Lightweight React, no game level — the Game mounts only after this. */
-export default function CarSelect({
-  event, tod, cars, carId, onSelect, onConfirm, onBack,
-}: CarSelectProps) {
-  const [sel, setSel] = useState<PlayerCarId>(carId);
+export function CarSelect({ cars, initialCarId, initialColor, onSelect, onBack }: CarSelectProps) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const sceneRef = useRef<GarageScene | null>(null);
 
+  const startIndex = Math.max(0, cars.findIndex((c) => c.id === initialCarId));
+  const [index, setIndex] = useState(startIndex < 0 ? 0 : startIndex);
+  const [color, setColor] = useState(initialColor ?? GARAGE_DEFAULT_COLOR);
+
+  const car = cars[index] ?? cars[0];
+  const stats = CAR_STATS[car.id] ?? { topSpeed: 0.6, weight: 0.5 };
+
+  // mount the garage scene once; the canvas lives for the component's life
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const scene = new GarageScene(canvas);
+    sceneRef.current = scene;
+    scene.start();
+    const onResize = () => scene.resize();
+    addEventListener('resize', onResize);
+    // a frame after layout settles, fit to the real canvas box
+    const id = requestAnimationFrame(() => scene.resize());
+    return () => {
+      cancelAnimationFrame(id);
+      removeEventListener('resize', onResize);
+      scene.dispose();
+      sceneRef.current = null;
+    };
+  }, []);
+
+  // push the current car + colour into the scene whenever they change
+  useEffect(() => {
+    sceneRef.current?.setCar(car.id, color);
+  }, [car.id, color]);
+
+  const cycle = (dir: -1 | 1) => setIndex((i) => (i + dir + cars.length) % cars.length);
+
+  // keyboard: ←/→ cycle, Enter selects, Esc backs out
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.repeat) return;
-      const i = cars.findIndex((c) => c.id === sel);
-      if (e.code === 'ArrowLeft' || e.code === 'ArrowUp') {
-        const id = cars[(i + cars.length - 1) % cars.length].id;
-        setSel(id);
-        onSelect(id);
-      } else if (e.code === 'ArrowRight' || e.code === 'ArrowDown') {
-        const id = cars[(i + 1) % cars.length].id;
-        setSel(id);
-        onSelect(id);
-      } else if (e.code === 'Enter' || e.code === 'NumpadEnter' || e.code === 'Space') {
-        e.preventDefault();
-        onConfirm(sel);
-      } else if (e.code === 'Escape') {
-        onBack();
-      }
+      if (e.code === 'ArrowLeft' || e.code === 'KeyA') cycle(-1);
+      else if (e.code === 'ArrowRight' || e.code === 'KeyD') cycle(1);
+      else if (e.code === 'Enter') onSelect(car.id, color);
+      else if (e.code === 'Escape') onBack();
     };
     addEventListener('keydown', onKey);
     return () => removeEventListener('keydown', onKey);
-  }, [cars, sel, onSelect, onConfirm, onBack]);
+  }, [car.id, color, cars.length, onSelect, onBack]);
 
-  const pick = (id: PlayerCarId) => {
-    setSel(id);
-    onSelect(id);
-  };
+  const carClass = useMemo(() => car.label.toUpperCase(), [car.label]);
 
   return (
-    <div className="screen carScreen">
-      <div className="bgSwoosh" aria-hidden />
-      <div className="bgGrid" aria-hidden />
+    <div className="garageSel">
+      <canvas ref={canvasRef} className="garageCanvas" />
+      {/* dark vignette so the HUD text reads over the showroom */}
+      <div className="garageVig" />
 
-      <div className="menuHeader">
-        <div className="menuKicker">SELECT CAR</div>
-        <div className="region">
-          {LEVEL_LABELS[event]} &middot; {tod.toUpperCase()}
+      {/* top banner — B3 "SELECT A <CAR>" */}
+      <div className="garageHead">
+        <span className="garageKicker">SELECT YOUR RIDE</span>
+        <span className="garageTitle">{carClass}</span>
+      </div>
+
+      {/* left / right car cyclers flanking the orbiting car */}
+      <button className="garageArrow left" onClick={() => cycle(-1)} aria-label="Previous car">
+        &#8249;
+      </button>
+      <button className="garageArrow right" onClick={() => cycle(1)} aria-label="Next car">
+        &#8250;
+      </button>
+
+      {/* the stat / info panel */}
+      <div className="garagePanel">
+        <div className="garageName">{car.label}</div>
+        <div className="garageTagline">{car.tagline}</div>
+
+        <div className="garageStats">
+          <StatBar label="TOP SPEED" value={stats.topSpeed} />
+          <StatBar label="WEIGHT" value={stats.weight} />
+        </div>
+
+        <div className="garageEngine">
+          <span className="garageEngLbl">ENGINE</span>
+          <span className="garageEngVal">{ENGINE_LABEL[car.flavor]}</span>
+        </div>
+
+        <div className="garageColors">
+          <span className="garageColorLbl">PAINT</span>
+          <div className="garageSwatches">
+            {CAR_COLORS.map((hex) => (
+              <button
+                key={hex}
+                className={`garageSwatch${hex === color ? ' active' : ''}`}
+                style={{ background: `#${hex.toString(16).padStart(6, '0')}` }}
+                onClick={() => setColor(hex)}
+                aria-label={`Paint #${hex.toString(16).padStart(6, '0')}`}
+              />
+            ))}
+          </div>
+        </div>
+
+        <div className="garageActions">
+          <button className="garageBtn back" onClick={onBack}>
+            BACK
+          </button>
+          <button className="garageBtn select" onClick={() => onSelect(car.id, color)}>
+            SELECT
+          </button>
         </div>
       </div>
 
-      <ul className="carList">
-        {cars.map((c) => (
-          <li key={c.id}>
-            <button
-              className={`carCard${c.id === sel ? ' sel' : ''}`}
-              onMouseEnter={() => pick(c.id)}
-              onClick={() => (c.id === sel ? onConfirm(c.id) : pick(c.id))}
-            >
-              <span className="carName">{c.label}</span>
-              <span className="carFlavor">{c.flavor.toUpperCase()} ENGINE</span>
-              <span className="carTag">{c.tagline}</span>
-            </button>
-          </li>
+      {/* roster dots so the player sees how many cars there are */}
+      <div className="garageDots">
+        {cars.map((c, i) => (
+          <button
+            key={c.id}
+            className={`garageDot${i === index ? ' active' : ''}`}
+            onClick={() => setIndex(i)}
+            aria-label={c.label}
+          />
         ))}
-      </ul>
-
-      <button className="driveBtn" onClick={() => onConfirm(sel)}>
-        &#9658; DRIVE
-      </button>
-
-      <div className="menuFoot">SELECT A CAR &middot; ENTER / DRIVE &rarr; LOADING</div>
-      <button className="backBtn" onClick={onBack}>&#9664; BACK</button>
+      </div>
     </div>
   );
 }
 
-/** Re-export the roster type so callers (App) and the garage sibling agree. */
-export { PLAYER_CARS };
+/** A skewed B3 stat bar: a filled gold/orange gradient over a dark track. */
+function StatBar({ label, value }: { label: string; value: number }) {
+  const pct = Math.round(Math.max(0, Math.min(1, value)) * 100);
+  return (
+    <div className="garageStat">
+      <span className="garageStatLbl">{label}</span>
+      <div className="garageStatTrack">
+        <div className="garageStatFill" style={{ width: `${pct}%` }} />
+      </div>
+    </div>
+  );
+}
