@@ -29,6 +29,7 @@ import { LEVELS, type LevelId } from './levels';
 import { createMode, type GameMode, type ModeHost } from './modes/mode';
 import { GROUP_DECOR, createPhysics, type PhysicsContext } from './physics';
 import { buildEnvironment, makeHeightSampler } from './environment';
+import { setSeaCamera, type Sea } from './sea';
 import { loadLevelProps } from './props';
 import { BRAKE_INTENSITY, HEADLIGHT_INTENSITY, charActor, createBarrel, createPole, createVehicle, deformActor, popWheel, repairVehicle, shatterGlass, type LoosePart } from './vehicles';
 import { applyCarEnvScale, applyGlassParams, glassParams, setCarEnvMap, setPlayerEnvMap, type GlassParams } from './geometry';
@@ -223,6 +224,8 @@ export class Game {
   private audio = new GameAudio();
   private director = new CameraDirector();
   private heightAt: HeightSampler;
+  // the animated sea (coast levels); its waves run off RENDER time, never sim
+  private sea: Sea | null = null;
 
   private actors: Actor[] = [];
   private byBody = new Map<number, Actor>();
@@ -391,7 +394,8 @@ export class Game {
     this.levelId = ((Object.keys(LEVELS) as LevelId[]).find((id) => LEVELS[id] === level) ?? 'junction') as LevelId;
     this.heightAt = makeHeightSampler(level);
     this.phys = createPhysics();
-    buildEnvironment(this.scene, this.phys, level);
+    this.sea = buildEnvironment(this.scene, this.phys, level);
+    setSeaCamera(this.camera); // the sea reads the camera for fresnel/sparkle
     // prop colliders are synchronous and must exist before the first
     // physics step (their GLB visuals stream in whenever — see props.ts)
     loadLevelProps(this.scene, this.phys, level);
@@ -466,6 +470,26 @@ export class Game {
     }
     this.scene.environmentIntensity = p.envInt;
     this.updateShadowRig(); // re-aim immediately — don't wait a frame
+
+    // re-tint the animated sea to the new time of day: it mirrors an analytic
+    // sky built from the SAME palette as the dome (sky/horizon colours), with
+    // a deeper body colour and a sun glint that dims at dusk/night. Visual
+    // only — the sea is render-driven and never in the sim/replay hash.
+    if (this.sea) {
+      const SEA_DEEP: Record<TimeOfDay, number> = { day: 0x0a3c4e, dusk: 0x163a44, night: 0x040a14 };
+      const SEA_GLINT: Record<TimeOfDay, number> = { day: 1.0, dusk: 0.85, night: 0.4 };
+      const SEA_AMBIENT: Record<TimeOfDay, number> = { day: 1.0, dusk: 0.8, night: 0.32 };
+      this.sea.setTimeOfDay({
+        sky: p.hemiSky,
+        horizon: p.fog,
+        deep: SEA_DEEP[t],
+        sun: p.sunColor,
+        sunDir: this.sunDirUnit,
+        sunStrength: SEA_GLINT[t],
+        envIntensity: p.envInt,
+        ambient: SEA_AMBIENT[t],
+      });
+    }
 
     this.sunSprite.position.copy(this.sunDirUnit).multiplyScalar(290);
     this.sunSprite.visible = !night;
@@ -1978,6 +2002,7 @@ export class Game {
     this.audio.frame(af);
 
     // presentation pixels only from here down — the sim never reads back
+    this.sea?.update(af.dt); // animate the waves off RENDER time (pin-safe)
     this.updateShadowRig();
     this.sunFlare.update(this.camera, this.sunSprite.position, af.dt, this.sunSprite.visible, () => this.flareOccluded());
     if (this.cineActive()) {
