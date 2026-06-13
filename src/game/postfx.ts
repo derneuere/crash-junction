@@ -14,16 +14,19 @@ import {
 import { N8AOPostPass } from 'n8ao';
 import { MotionBlurEffect, VelocityDepthNormalPass } from 'realism-effects';
 
-// The film-look chain ("cinematic" gfx tier): HDR scene render → ambient
-// occlusion → per-pixel motion blur → bloom → ACES tonemap → vignette /
-// chromatic aberration / grain. In three r152+, renderer-level tone mapping
+// The film-look chain — the game's ONLY render path now: HDR scene render →
+// ambient occlusion → per-pixel motion blur → bloom → ACES tonemap → vignette
+// / chromatic aberration / grain. In three r152+, renderer-level tone mapping
 // only applies when drawing straight to the canvas, so ACES moves into the
 // chain here; the renderer's exposure still flows through (three binds the
 // toneMappingExposure uniform on any program that declares it).
 //
-// All of it is presentation-only — the sim and the replay hashes never see
-// a pixel. The "fast" tier bypasses this entirely (Game falls back to
-// renderer.render with renderer-level ACES, today's exact path).
+// All of it is presentation-only — the sim and the replay hashes never see a
+// pixel. The player-facing FAST/CINE tier was removed; the composer is always
+// on in real play. The one path that still bypasses it is the headless
+// determinism bypass — ?verify=1 replays (and refshot --gfx fast review
+// captures) fall back to renderer.render with renderer-level ACES, so
+// swiftshader doesn't pay for cine pixels nobody hashes (Game.forceFast).
 
 export class Postfx {
   private composer: EffectComposer;

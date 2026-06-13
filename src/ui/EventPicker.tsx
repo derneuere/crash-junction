@@ -1,6 +1,5 @@
 import { useEffect } from 'react';
 import type { TimeOfDay } from '../game/daynight';
-import type { GfxMode } from '../game/Game';
 import { LEVELS, LEVEL_LABELS, type LevelId } from '../game/levels';
 import { PLAYER_CARS, type PlayerCarId } from '../game/models';
 import type { BestMap } from './storage';
@@ -17,12 +16,8 @@ interface EventPickerProps {
   variants: Record<LevelId, TimeOfDay>;
   best: BestMap;
   carId: PlayerCarId;
-  /** Global presentation tier (not per-event): CINE = film-look post chain
-   *  + live player reflections, FAST = the bare renderer. */
-  gfx: GfxMode;
   onSelectEvent: (id: LevelId, tod?: TimeOfDay) => void;
   onSelectCar: (id: PlayerCarId) => void;
-  onSetGfx: (g: GfxMode) => void;
   onOpenDebug: () => void;
 }
 
@@ -34,7 +29,7 @@ const TOD_CYCLE: Record<TimeOfDay, TimeOfDay> = { day: 'dusk', dusk: 'night', ni
  *  event with DAY/DUSK/NIGHT variant chips, the car roster footer. Idle-only
  *  — Hud unmounts it the moment a take starts. */
 export function EventPicker({
-  levelId, tod, variants, best, carId, gfx, onSelectEvent, onSelectCar, onSetGfx, onOpenDebug,
+  levelId, tod, variants, best, carId, onSelectEvent, onSelectCar, onOpenDebug,
 }: EventPickerProps) {
   // keyboard browse: ←/→ walk the strip, ↑/↓/Tab cycle the focused variant,
   // Space stays the game's own launch key (Game.ts listens on window)
@@ -85,25 +80,6 @@ export function EventPicker({
             }}
           >
             {c.label} &middot; {c.flavor.toUpperCase()}
-          </button>
-        ))}
-        <span className="carLbl gfxLbl">GFX</span>
-        {(
-          [
-            ['cine', 'CINE', 'Cinematic: bloom, motion blur, AO, live paint reflections'],
-            ['fast', 'FAST', 'Fast: bare renderer (the pre-film-look path)'],
-          ] as const
-        ).map(([g, label, title]) => (
-          <button
-            key={g}
-            className={g === gfx ? 'active' : undefined}
-            title={title}
-            onClick={(e) => {
-              onSetGfx(g);
-              e.currentTarget.blur(); // keep Space on the game's launch key
-            }}
-          >
-            {label}
           </button>
         ))}
         <button className="devBtn" title="Debug overlay (` toggles)" onClick={onOpenDebug}>

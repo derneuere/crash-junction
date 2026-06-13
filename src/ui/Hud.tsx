@@ -1,6 +1,5 @@
 import { GameState, type ModeKind } from '../game/types';
 import type { TimeOfDay } from '../game/daynight';
-import type { GfxMode } from '../game/Game';
 import type { CashFloatData, RaceStanding, ReportData } from '../game/events';
 import type { LevelId } from '../game/levels';
 import type { PlayerCarId } from '../game/models';
@@ -33,10 +32,8 @@ interface HudProps {
   variants: Record<LevelId, TimeOfDay>; // what each event card opens with
   best: BestMap;
   carId: PlayerCarId;
-  gfx: GfxMode; // global presentation tier — CINE film look / FAST bare renderer
   onSelectEvent: (id: LevelId, tod?: TimeOfDay) => void;
   onSelectCar: (id: PlayerCarId) => void;
-  onSetGfx: (g: GfxMode) => void;
   onOpenDebug: () => void;
   onCashDone: (id: number) => void;
 }
@@ -48,7 +45,7 @@ interface HudProps {
 export function Hud({
   state, mode, damage, goldTarget, levelId,
   multiplier, boost, flash, report, cash, crashbreaker, race, replaying, cineCam,
-  timeOfDay, variants, best, carId, gfx, onSelectEvent, onSelectCar, onSetGfx, onOpenDebug, onCashDone,
+  timeOfDay, variants, best, carId, onSelectEvent, onSelectCar, onOpenDebug, onCashDone,
 }: HudProps) {
   const cine = state === GameState.Crash || cineCam;
   const inRun = state !== GameState.Idle && state !== GameState.Done;
@@ -89,10 +86,8 @@ export function Hud({
             variants={variants}
             best={best}
             carId={carId}
-            gfx={gfx}
             onSelectEvent={onSelectEvent}
             onSelectCar={onSelectCar}
-            onSetGfx={onSetGfx}
             onOpenDebug={onOpenDebug}
           />
           <div className="hint">

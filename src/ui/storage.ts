@@ -14,7 +14,6 @@ import { DEFAULT_CAR, PLAYER_CARS, type PlayerCarId } from '../game/models';
 //             as "never medaled", so no migration step is needed)
 //   cj-car    player car id (v1 roster, models.ts)
 //   cj-engine engine flavor — owned by App since the flavor feature, unchanged
-//   cj-gfx    presentation tier ('cine' | 'fast') — owned by App, global
 //
 // Everything here is presentation-side persistence: the sim never reads it
 // (App applies tod/car/engine at the remount take boundary).
