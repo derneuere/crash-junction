@@ -40,9 +40,11 @@ try {
   page.on('pageerror', (e) => console.error('[pageerror]', e.message));
   page.on('dialog', (d) => d.dismiss().catch(() => {}));
 
-  await page.goto(`http://localhost:${PORT}/?verify=1`, { waitUntil: 'load' });
+  // FAST PATH (menu redesign): the menu no longer mounts a level on boot, so
+  // deep-link to junction gameplay. verify=1 still forces the FAST render tier.
+  await page.goto(`http://localhost:${PORT}/?level=junction&launch=1&verify=1`, { waitUntil: 'load' });
   // wait for the game handle
-  await page.waitForFunction(() => !!window.__game, { timeout: 15000 });
+  await page.waitForFunction(() => window.__game?.levelId === 'junction', { timeout: 15000 });
 
   // Helper: set the sim key mask the game reads, advance N fixed steps via
   // its own loop by faking key state + letting rAF/timeout drive. We instead

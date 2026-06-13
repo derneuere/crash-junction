@@ -157,11 +157,8 @@ try {
   const page = await browser.newPage();
   page.on('pageerror', (e) => console.log(`[page error] ${e.message}`));
 
-  await page.goto(`http://localhost:${PORT}/`, { waitUntil: 'domcontentloaded' });
-  await page.waitForFunction(() => window.__game !== undefined, { timeout: 30_000, polling: 100 });
-
-  await clickButton(page, /\bDAY\b/);
-  await clickButton(page, /^GANTRY POINT$/);
+  // FAST PATH (menu redesign): jump straight to GANTRY POINT day gameplay.
+  await page.goto(`http://localhost:${PORT}/?level=gantry&tod=day&launch=1`, { waitUntil: 'domcontentloaded' });
   await page.waitForFunction(() => window.__game?.levelId === 'gantry', { timeout: 30_000, polling: 100 });
   await new Promise((res) => setTimeout(res, 5_000));
 

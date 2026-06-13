@@ -211,22 +211,20 @@ try {
   }
   if (!browser) throw new Error('no Chrome or Edge found');
   const page = await browser.newPage();
-  await page.goto(`http://localhost:${PORT}/`, { waitUntil: 'domcontentloaded' });
-  await page.waitForFunction(() => !!window.__game, { timeout: 30_000 });
+  // FAST PATH (menu redesign): boot straight into the default race level via
+  // the deep-link, then hop between levels with window.__startLevel for the
+  // gantry fixture. Browsing the menus no longer mounts a level, so we never
+  // click the picker — we jump past it. (Most fixtures run on SILVER LAKE RING;
+  // only gantry-grid-uturn carries its own `level`.)
+  await page.goto(`http://localhost:${PORT}/?level=race&launch=1`, { waitUntil: 'domcontentloaded' });
+  await page.waitForFunction(() => !!window.__startLevel && !!window.__game, { timeout: 30_000 });
 
-  // mount a level through the event picker, same contract refshot.mjs uses
-  // (regex on trimmed button text); levels persist across fixtures, so only
-  // click when the wanted level differs from what's mounted
+  // mount a level by id; levels persist across fixtures, so only switch when
+  // the wanted level differs from what's mounted (the Game remount is the take
+  // boundary, exactly like the old picker click).
   const mountLevel = async (level) => {
     if ((await page.evaluate(() => window.__game?.levelId)) === level.id) return;
-    const clicked = await page.evaluate((reSrc) => {
-      const re = new RegExp(reSrc);
-      const btn = [...document.querySelectorAll('button')].find((b) => re.test(b.textContent?.trim() ?? ''));
-      if (!btn) return false;
-      btn.click();
-      return true;
-    }, level.button);
-    if (!clicked) throw new Error(`no button matching ${level.button} on the page`);
+    await page.evaluate((id) => window.__startLevel(id), level.id);
     await page.waitForFunction((id) => window.__game?.levelId === id, { timeout: 30_000 }, level.id);
   };
 

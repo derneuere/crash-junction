@@ -53,15 +53,9 @@ try {
   }
   if (!browser) throw new Error('no Chrome or Edge found');
   const page = await browser.newPage();
-  await page.goto(`http://localhost:${PORT}/`, { waitUntil: 'domcontentloaded' });
-  await page.waitForFunction(() => !!window.__game, { timeout: 30_000 });
-
-  // pick a level (PROVING GROUND practice — no traffic, clean drive)
-  await page.evaluate(() => {
-    const btn = [...document.querySelectorAll('button')].find((b) => (b.textContent?.trim() ?? '').includes('PROVING'));
-    if (!btn) throw new Error('no PROVING GROUND button');
-    btn.click();
-  });
+  // FAST PATH (menu redesign): jump straight to PROVING GROUND (track) — a
+  // practice level, no traffic, clean drive. No picker click.
+  await page.goto(`http://localhost:${PORT}/?level=track&launch=1`, { waitUntil: 'domcontentloaded' });
   await page.waitForFunction(() => window.__game?.levelId === 'track', { timeout: 30_000 });
 
   // Install a synthetic standard-mapping pad. window.__pad is the mutable

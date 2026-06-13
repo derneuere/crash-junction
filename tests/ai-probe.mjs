@@ -78,11 +78,8 @@ try {
       failed = true;
       console.error(`PAGE ERROR: ${e.message}`);
     });
-    await page.goto(`http://localhost:${PORT}/`, { waitUntil: 'domcontentloaded' });
-    await page.waitForFunction(() => !!window.__game, { timeout: 30_000, polling: 250 });
-    await page.evaluate(() => {
-      [...document.querySelectorAll('button')].find((b) => b.textContent.includes('SILVER LAKE')).click();
-    });
+    // FAST PATH (menu redesign): jump straight to SILVER LAKE RING (race).
+    await page.goto(`http://localhost:${PORT}/?level=race&launch=1`, { waitUntil: 'domcontentloaded' });
     await page.waitForFunction(() => window.__game?.levelId === 'race', { timeout: 30_000, polling: 250 });
 
     await page.evaluate(() => {

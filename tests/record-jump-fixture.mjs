@@ -48,8 +48,10 @@ try {
   }
   if (!browser) throw new Error('no Chrome or Edge found');
   const page = await browser.newPage();
-  await page.goto(`http://localhost:${PORT}/`, { waitUntil: 'domcontentloaded' });
-  await page.waitForFunction(() => !!window.__game, { timeout: 30_000 });
+  // FAST PATH (menu redesign): the junction Game is no longer mounted on boot
+  // (browsing the menus mounts nothing). Jump straight to junction gameplay.
+  await page.goto(`http://localhost:${PORT}/?level=junction&launch=1`, { waitUntil: 'domcontentloaded' });
+  await page.waitForFunction(() => window.__game?.levelId === 'junction', { timeout: 30_000 });
   await page.evaluate(() => {
     const k = (type, code) => window.dispatchEvent(new KeyboardEvent(type, { code }));
     // capture clock runs on SIM time (slow software renderers fall behind

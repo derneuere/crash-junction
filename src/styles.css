@@ -879,8 +879,545 @@ canvas {
   color: rgba(255, 255, 255, 0.85);
 }
 
+/* in-game pre-launch overlay (Idle, level loaded) */
+.launchPrompt {
+  position: absolute;
+  left: 50%;
+  bottom: 16%;
+  transform: translateX(-50%);
+  text-align: center;
+  pointer-events: none;
+}
+.launchPrompt .launchRow {
+  pointer-events: auto;
+  margin: 0 auto;
+  cursor: pointer;
+}
+.launchSub {
+  margin-top: 6px;
+  font-size: 11px;
+  letter-spacing: 4px;
+  color: rgba(255, 255, 255, 0.5);
+  transform: skewX(-8deg);
+}
+/* MENU / exit affordance, in-game corner */
+.exitBtn {
+  position: absolute;
+  top: 18px;
+  left: 24px;
+  z-index: 7;
+  pointer-events: auto;
+  cursor: pointer;
+  font-family: inherit;
+  padding: 5px 14px;
+  font-size: 12px;
+  letter-spacing: 3px;
+  color: rgba(255, 255, 255, 0.6);
+  background: rgba(8, 10, 14, 0.6);
+  border: 1px solid rgba(255, 160, 60, 0.3);
+  transform: skewX(-8deg);
+  transition: color 0.15s, border-color 0.15s, box-shadow 0.15s;
+}
+.exitBtn:hover {
+  color: #ffd34d;
+  border-color: rgba(255, 180, 70, 0.95);
+  box-shadow: 0 0 14px rgba(255, 140, 40, 0.3);
+}
+.exitBtn.results {
+  top: auto;
+  left: 50%;
+  bottom: 12%;
+  transform: translateX(-50%) skewX(-8deg);
+}
+
+/* =====================================================================
+   MENU FLOW (Title → Main → Settings → Event → Car → Loading)
+   B3 vibe: dark metallic-blue chrome frame, bold italic chunky chrome
+   text, animated swoosh + grid background, orange-gold accents. Pure
+   React over a themed background — NO game level is mounted here.
+   ===================================================================== */
+.screen {
+  position: fixed;
+  inset: 0;
+  overflow: hidden;
+  font-family: Impact, Haettenschweiler, 'Arial Narrow Bold', 'Arial Black', sans-serif;
+  user-select: none;
+  color: #fff;
+  /* dark metallic-blue base wash */
+  background:
+    radial-gradient(120% 80% at 50% -10%, #16314f 0%, #0a1422 45%, #060a12 100%);
+}
+/* the diagonal chrome swoosh sweeping across the frame */
+.bgSwoosh {
+  position: absolute;
+  inset: -20% -10%;
+  background:
+    linear-gradient(115deg, transparent 38%, rgba(110, 160, 220, 0.10) 46%, rgba(180, 210, 255, 0.18) 50%, rgba(110, 160, 220, 0.10) 54%, transparent 62%),
+    linear-gradient(115deg, transparent 60%, rgba(255, 150, 40, 0.10) 67%, rgba(255, 190, 80, 0.16) 70%, transparent 75%);
+  transform: skewY(-6deg);
+  animation: swoosh 14s ease-in-out infinite alternate;
+  pointer-events: none;
+}
+@keyframes swoosh {
+  from { transform: skewY(-6deg) translateX(-4%); }
+  to { transform: skewY(-6deg) translateX(4%); }
+}
+/* faint perspective grid floor (sense-of-speed nod) */
+.bgGrid {
+  position: absolute;
+  left: -20%;
+  right: -20%;
+  bottom: -30%;
+  height: 80%;
+  background-image:
+    linear-gradient(rgba(120, 180, 255, 0.12) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(120, 180, 255, 0.12) 1px, transparent 1px);
+  background-size: 64px 64px;
+  transform: perspective(420px) rotateX(62deg);
+  transform-origin: bottom center;
+  mask-image: linear-gradient(to top, #000 0%, transparent 70%);
+  -webkit-mask-image: linear-gradient(to top, #000 0%, transparent 70%);
+  pointer-events: none;
+}
+
+/* shared chrome headline + chunky italic word treatment */
+.menuHeader {
+  position: absolute;
+  top: 7%;
+  left: 0;
+  right: 0;
+  text-align: center;
+}
+.menuKicker {
+  font-size: 13px;
+  letter-spacing: 9px;
+  color: #ffb46b;
+  transform: skewX(-8deg);
+  text-shadow: 0 2px 0 rgba(0, 0, 0, 0.6);
+}
+.menuWordmark,
+.region {
+  margin-top: 8px;
+  font-size: 30px;
+  letter-spacing: 7px;
+  font-style: italic;
+  transform: skewX(-8deg);
+  background: linear-gradient(180deg, #eaf3ff 0%, #9fb8dd 42%, #5a7398 60%, #c7d8f0 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  filter: drop-shadow(0 3px 0 rgba(0, 0, 0, 0.5));
+}
+.menuWordmark.sm,
+.region {
+  font-size: 20px;
+  letter-spacing: 6px;
+}
+
+/* ---------- Title screen ---------- */
+.titleScreen { cursor: pointer; }
+.bumper {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  animation: bumperIn 1.6s ease-in-out;
+}
+.bumperKi {
+  font-size: 22px;
+  letter-spacing: 12px;
+  color: rgba(200, 220, 255, 0.8);
+  transform: skewX(-8deg);
+}
+@keyframes bumperIn {
+  0% { opacity: 0; }
+  25% { opacity: 1; }
+  80% { opacity: 1; }
+  100% { opacity: 0; }
+}
+.titleCard {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  animation: titleIn 0.6s ease-out;
+}
+@keyframes titleIn {
+  from { opacity: 0; transform: scale(1.04); }
+  to { opacity: 1; transform: scale(1); }
+}
+.gameWordmark {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  line-height: 0.86;
+  font-style: italic;
+  transform: skewX(-9deg);
+}
+.gameWordmark .wm1 {
+  font-size: 8vw;
+  letter-spacing: 4px;
+  background: linear-gradient(180deg, #ffd34d, #ff7a18 55%, #ff3b1f);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  filter: drop-shadow(0 4px 0 rgba(0, 0, 0, 0.55));
+}
+.gameWordmark .wm2 {
+  font-size: 12vw;
+  letter-spacing: 2px;
+  background: linear-gradient(180deg, #f0f6ff 0%, #aac4e8 40%, #5a7398 58%, #d6e4f6 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  filter: drop-shadow(0 5px 0 rgba(0, 0, 0, 0.6)) drop-shadow(0 0 30px rgba(120, 180, 255, 0.35));
+}
+.gameSub {
+  margin-top: 14px;
+  font-size: 15px;
+  letter-spacing: 10px;
+  color: rgba(220, 232, 255, 0.7);
+  transform: skewX(-8deg);
+}
+.pressStart {
+  margin-top: 7vh;
+  font-size: 26px;
+  letter-spacing: 8px;
+  color: #ffd34d;
+  transform: skewX(-8deg);
+  text-shadow: 0 0 22px rgba(255, 140, 40, 0.55), 0 2px 0 rgba(0, 0, 0, 0.6);
+  animation: pulse 1.2s ease-in-out infinite;
+}
+.startHint {
+  margin-top: 12px;
+  font-size: 11px;
+  letter-spacing: 4px;
+  color: rgba(255, 255, 255, 0.4);
+  transform: skewX(-8deg);
+}
+
+/* ---------- Main menu ---------- */
+.menuList {
+  position: absolute;
+  top: 34%;
+  left: 50%;
+  transform: translateX(-50%);
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  width: min(560px, 88vw);
+}
+.menuRow {
+  display: flex;
+  align-items: baseline;
+  gap: 16px;
+  width: 100%;
+  margin: 6px 0;
+  padding: 12px 22px;
+  cursor: pointer;
+  text-align: left;
+  background: rgba(8, 14, 24, 0.55);
+  border: 1px solid rgba(120, 170, 230, 0.22);
+  border-left: 3px solid transparent;
+  transform: skewX(-9deg);
+  transition: background 0.12s, border-color 0.12s, box-shadow 0.12s;
+  font-family: inherit;
+  color: inherit;
+}
+.menuRow:hover { border-color: rgba(120, 170, 230, 0.5); }
+.menuRow.sel {
+  background: rgba(20, 40, 66, 0.8);
+  border-color: rgba(255, 180, 70, 0.9);
+  border-left-color: #ff7a18;
+  box-shadow: 0 0 22px rgba(255, 140, 40, 0.28), inset 0 0 30px rgba(40, 80, 130, 0.4);
+}
+.menuRowLabel {
+  font-size: 30px;
+  letter-spacing: 4px;
+  font-style: italic;
+  color: rgba(255, 255, 255, 0.92);
+}
+.menuRow.sel .menuRowLabel {
+  background: linear-gradient(180deg, #ffd34d, #ff7a18 60%, #ff3b1f);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+.menuRowSub {
+  margin-left: auto;
+  font-size: 11px;
+  letter-spacing: 2px;
+  color: rgba(200, 216, 240, 0.55);
+}
+.menuFoot {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 5%;
+  text-align: center;
+  font-size: 12px;
+  letter-spacing: 3px;
+  color: rgba(200, 216, 240, 0.5);
+}
+
+/* shared BACK button (settings/event/car) */
+.backBtn {
+  position: absolute;
+  left: 4%;
+  bottom: 5%;
+  cursor: pointer;
+  font-family: inherit;
+  padding: 7px 16px;
+  font-size: 12px;
+  letter-spacing: 3px;
+  color: rgba(220, 232, 255, 0.7);
+  background: rgba(8, 14, 24, 0.6);
+  border: 1px solid rgba(120, 170, 230, 0.3);
+  transform: skewX(-8deg);
+  transition: color 0.15s, border-color 0.15s, box-shadow 0.15s;
+}
+.backBtn:hover {
+  color: #ffd34d;
+  border-color: rgba(255, 180, 70, 0.9);
+  box-shadow: 0 0 14px rgba(255, 140, 40, 0.3);
+}
+
+/* ---------- Settings ---------- */
+.setBody {
+  position: absolute;
+  top: 26%;
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(620px, 90vw);
+}
+.setGroup {
+  margin-bottom: 22px;
+  padding: 14px 18px;
+  background: rgba(8, 14, 24, 0.5);
+  border: 1px solid rgba(120, 170, 230, 0.2);
+  border-left: 3px solid rgba(255, 122, 24, 0.6);
+  transform: skewX(-4deg);
+}
+.setLabel {
+  font-size: 12px;
+  letter-spacing: 5px;
+  color: #ffb46b;
+}
+.setRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+.setHint {
+  margin-top: 9px;
+  font-size: 10px;
+  letter-spacing: 1.5px;
+  color: rgba(200, 216, 240, 0.45);
+}
+.pill {
+  cursor: pointer;
+  font-family: inherit;
+  padding: 7px 16px;
+  font-size: 13px;
+  letter-spacing: 2px;
+  color: rgba(220, 232, 255, 0.7);
+  background: rgba(8, 14, 24, 0.6);
+  border: 1px solid rgba(120, 170, 230, 0.3);
+  transform: skewX(-6deg);
+  transition: color 0.15s, border-color 0.15s, box-shadow 0.15s, background 0.15s;
+}
+.pill:hover {
+  color: #fff;
+  border-color: rgba(120, 170, 230, 0.6);
+}
+.pill.active {
+  color: #ffd34d;
+  background: rgba(40, 26, 8, 0.5);
+  border-color: rgba(255, 180, 70, 0.95);
+  box-shadow: 0 0 14px rgba(255, 140, 40, 0.3);
+}
+.setCredits {
+  margin-top: 10px;
+  text-align: center;
+  font-size: 10px;
+  letter-spacing: 2px;
+  color: rgba(200, 216, 240, 0.35);
+}
+
+/* ---------- Event select (cards reuse .card from the picker styling) ---------- */
+.eventScreen .eventCards {
+  position: absolute;
+  top: 28%;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: 16%;
+  align-content: flex-start;
+}
+
+/* ---------- Car select (placeholder roster) ---------- */
+.carList {
+  position: absolute;
+  top: 30%;
+  left: 50%;
+  transform: translateX(-50%);
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  width: min(620px, 90vw);
+}
+.carCard {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  grid-template-rows: auto auto;
+  align-items: baseline;
+  gap: 2px 16px;
+  width: 100%;
+  margin: 8px 0;
+  padding: 12px 20px;
+  cursor: pointer;
+  text-align: left;
+  background: rgba(8, 14, 24, 0.55);
+  border: 1px solid rgba(120, 170, 230, 0.22);
+  border-left: 3px solid transparent;
+  transform: skewX(-7deg);
+  transition: background 0.12s, border-color 0.12s, box-shadow 0.12s;
+  font-family: inherit;
+  color: inherit;
+}
+.carCard:hover { border-color: rgba(120, 170, 230, 0.5); }
+.carCard.sel {
+  background: rgba(20, 40, 66, 0.8);
+  border-color: rgba(255, 180, 70, 0.9);
+  border-left-color: #ff7a18;
+  box-shadow: 0 0 22px rgba(255, 140, 40, 0.28);
+}
+.carName {
+  font-size: 26px;
+  letter-spacing: 3px;
+  font-style: italic;
+  color: rgba(255, 255, 255, 0.92);
+}
+.carCard.sel .carName {
+  background: linear-gradient(180deg, #ffd34d, #ff7a18 60%, #ff3b1f);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+.carFlavor {
+  justify-self: end;
+  font-size: 11px;
+  letter-spacing: 3px;
+  color: #9fd8ff;
+}
+.carTag {
+  grid-column: 1 / -1;
+  font-size: 10px;
+  letter-spacing: 1.5px;
+  color: rgba(200, 216, 240, 0.5);
+}
+.driveBtn {
+  position: absolute;
+  left: 50%;
+  bottom: 12%;
+  transform: translateX(-50%) skewX(-8deg);
+  cursor: pointer;
+  font-family: inherit;
+  padding: 9px 30px;
+  font-size: 18px;
+  letter-spacing: 5px;
+  color: #fff;
+  background: linear-gradient(180deg, rgba(255, 122, 24, 0.25), rgba(255, 59, 31, 0.15));
+  border: 1px solid rgba(255, 180, 70, 0.9);
+  box-shadow: 0 0 22px rgba(255, 120, 30, 0.35);
+  animation: pulse 1.3s ease-in-out infinite;
+}
+.driveBtn:hover { color: #ffe27a; }
+
+/* ---------- Loading ---------- */
+.loadCard {
+  position: absolute;
+  top: 38%;
+  left: 50%;
+  transform: translate(-50%, -50%) skewX(-5deg);
+  width: min(560px, 88vw);
+  text-align: center;
+  padding: 30px 40px;
+  background: rgba(8, 14, 24, 0.7);
+  border: 1px solid rgba(120, 170, 230, 0.3);
+  box-shadow: 0 0 50px rgba(40, 90, 150, 0.3) inset, 0 14px 50px rgba(0, 0, 0, 0.6);
+}
+.loadKicker {
+  font-size: 12px;
+  letter-spacing: 7px;
+  color: #ffb46b;
+}
+.loadName {
+  margin-top: 6px;
+  font-size: 38px;
+  letter-spacing: 4px;
+  font-style: italic;
+  background: linear-gradient(180deg, #ffd34d, #ff7a18 55%, #ff3b1f);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  filter: drop-shadow(0 3px 0 rgba(0, 0, 0, 0.5));
+}
+.loadTag {
+  margin-top: 4px;
+  font-size: 11px;
+  letter-spacing: 3px;
+  color: rgba(200, 216, 240, 0.6);
+}
+.loadStakes {
+  margin-top: 3px;
+  font-size: 11px;
+  letter-spacing: 2px;
+  color: rgba(255, 255, 255, 0.5);
+}
+.loadBar {
+  margin-top: 22px;
+  height: 12px;
+  background: rgba(8, 10, 14, 0.7);
+  border: 1px solid rgba(120, 170, 230, 0.4);
+  overflow: hidden;
+}
+.loadFill {
+  height: 100%;
+  background: linear-gradient(90deg, #ff7a18, #ffd34d);
+  box-shadow: 0 0 12px rgba(255, 150, 40, 0.8);
+  transition: width 0.12s linear;
+}
+.loadPct {
+  margin-top: 8px;
+  font-size: 13px;
+  letter-spacing: 3px;
+  color: rgba(255, 255, 255, 0.65);
+  font-variant-numeric: tabular-nums;
+}
+.loadHint {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 14%;
+  text-align: center;
+  font-size: 12px;
+  letter-spacing: 4px;
+  color: rgba(200, 216, 240, 0.45);
+  animation: pulse 1.4s ease-in-out infinite;
+}
+
 @media (prefers-reduced-motion: reduce) {
-  .launchRow {
+  .launchRow,
+  .pressStart,
+  .driveBtn,
+  .loadHint {
+    animation: none;
+  }
+  .bgSwoosh {
     animation: none;
   }
   .bar,

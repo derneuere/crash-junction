@@ -201,13 +201,11 @@ try {
     if (res.status() >= 400) console.log(`[http ${res.status()}] ${res.url()}`);
   });
 
-  await page.goto(`http://localhost:${PORT}/`, { waitUntil: 'domcontentloaded' });
-  await page.waitForFunction(() => window.__game !== undefined, { timeout: 30_000, polling: 100 });
-
-  // day lighting + the GANTRY POINT level (persisted App state, so the order
-  // is safe: the level remount re-applies the time of day)
-  await clickButton(page, /\bDAY\b/);
-  await clickButton(page, /^GANTRY POINT$/);
+  // FAST PATH: the menu redesign decoupled menu navigation from level loading,
+  // so we no longer click through the event picker. ?level=&tod=&launch=1 jumps
+  // straight past the title/menu/car flow to GAMEPLAY on GANTRY POINT in day
+  // lighting (App.readFastPath); the Game mounts and publishes window.__game.
+  await page.goto(`http://localhost:${PORT}/?level=gantry&tod=day&launch=1`, { waitUntil: 'domcontentloaded' });
   await page.waitForFunction(() => window.__game?.levelId === 'gantry', { timeout: 30_000, polling: 100 });
 
   // the colliders are synchronous but the GLB visuals are not — give the
