@@ -49,6 +49,7 @@ import { Pickups } from './pickups';
 import { Effects } from './effects';
 import { GameAudio, type AudioFrameState, type EngineFlavor } from './audio';
 import { CameraDirector } from './camera';
+import { classifyTakedown, TakedownTracker } from './takedowns';
 
 interface DeformJob {
   actor: Actor;
@@ -263,6 +264,11 @@ export class Game {
   private lastGlance = -9; // simTime of the last wall-glance reroute
   private takedownCamT = 0; // seconds left on the takedown camera beat
   private takedownVictim: Actor | null = null;
+  // B3-style takedown banner: classifier + revenge ledger + a monotonic key so
+  // the HUD can stack/replace banners. PRESENTATION-ONLY — fed from sim reads
+  // at the takedown, never read back by the sim (pin-safe). See takedowns.ts.
+  private takedowns = new TakedownTracker();
+  private takedownBannerKey = 0;
   private deformQueue: DeformJob[] = [];
   private pairCooldown = new Map<string, number>();
   private checked = new Map<number, number>(); // bodyId → simTime of the shunt
@@ -902,6 +908,7 @@ export class Game {
     if (this.takedownCamT > 0) this.events.emit('cine', false);
     this.takedownCamT = 0;
     this.takedownVictim = null;
+    this.takedowns.reset(); // clear the revenge ledger for the fresh take
     this.playerWallGraceUntil = 0;
     this.pickups.reset();
     this.control.reset(Math.atan2(this.level.player.dir.x, this.level.player.dir.z));
@@ -1147,11 +1154,31 @@ export class Game {
         takedown = true;
         // junction: the shunted car; race: the rival that just met the wall
         const victim = out.wreckSelf && !self.isPlayer ? self : oa;
-        // signature zones (CRANE SMASH, CLIFF CRASH, …): scoring-only
-        // circles in the race def — a takedown whose victim lies inside one
-        // flashes the zone's name instead. Pure presentation, judged at the
-        // victim's position (the slam is where the wreck lands).
-        this.events.emit('flash', victim ? this.signatureName(victim) : 'TAKEDOWN');
+        // B3-style banner: classify HOW the takedown happened from the data the
+        // sim already has at this contact — signature zone, aftertouch steer,
+        // airborne victim, revenge grudge, slam geometry — and award the
+        // type's points. The rammer is the player on a direct slam; on an
+        // aftertouch the player's own wreck is doing the hitting (self is the
+        // victim there, so the rammer is the player either way). Signature
+        // zones (CRANE SMASH, CLIFF CRASH, …) are scoring-only circles in the
+        // race def. ALL PRESENTATION — see takedowns.ts determinism contract.
+        const info = classifyTakedown(
+          {
+            rammer: this.player ?? self,
+            victim: victim ?? null,
+            impact,
+            aftertouch: this.aftertouchActive,
+            signatureZone: victim ? this.signatureZone(victim) : null,
+            junction: this.level.mode.kind !== 'race',
+          },
+          this.takedowns,
+        );
+        this.events.emit('takedown', {
+          kind: info.kind,
+          label: info.label,
+          points: info.points,
+          key: ++this.takedownBannerKey,
+        });
         this.audio.kaching(); // takedowns pay — ring it up
         this.playerWallGraceUntil = this.simTime + TAKEDOWN_WALL_GRACE;
         if (this.replay) {
@@ -1163,6 +1190,7 @@ export class Game {
           if (out.graceOther && oa) this.checked.set(oa.body.id, this.simTime);
           _impact.set(victim.body.position.x, victim.body.position.y + 1, victim.body.position.z);
           this.mode.score?.takedownBonus(victim, _impact);
+          this.mode.score?.takedownPoints(info.points, _impact); // type-specific payout
           if (out.takedownCam) {
             this.takedownVictim = victim;
             this.takedownCamT = 1.7; // the autopilot drives while we watch
@@ -1325,10 +1353,11 @@ export class Game {
     }
   }
 
-  /** The takedown's flash text: the name of the signature zone the victim
-   *  sits in, or plain TAKEDOWN. Zones are circles in the race def with no
-   *  colliders — the red/white wall stays the actual wrecking surface. */
-  private signatureName(victim: Actor): string {
+  /** The named signature theatre the victim wrecked inside, or null. Zones are
+   *  circles in the race def with no colliders — the red/white wall stays the
+   *  actual wrecking surface; the classifier turns a non-null name into a
+   *  SIGNATURE takedown (takedowns.ts). */
+  private signatureZone(victim: Actor): string | null {
     const sigs = this.level.mode.kind === 'race' ? this.level.mode.race.signatures : undefined;
     if (sigs) {
       const p = victim.body.position;
@@ -1336,7 +1365,7 @@ export class Game {
         if (Math.hypot(p.x - z.x, p.z - z.z) <= z.r) return z.name;
       }
     }
-    return 'TAKEDOWN';
+    return null;
   }
 
   /** Wreck an actor: the full collision mask returns (wrecks tumble over
@@ -1350,6 +1379,11 @@ export class Game {
       const dt = this.simTime - this.replay.lastTakedownAt;
       if (dt < this.replay.stats.takedownToPlayerCrashMin) this.replay.stats.takedownToPlayerCrashMin = +dt.toFixed(3);
     }
+    // REVENGE ledger (presentation-only, takedowns.ts): if a rival just took
+    // the player down, that rival now owes a REVENGE TAKEDOWN. The shover's
+    // body id rides destabilizedBy until it's zeroed below; read it first.
+    // Pure sim READ — never read back by the sim, so it can't move a pin.
+    if (a.isPlayer) this.takedowns.rememberAggressor(this.byBody.get(a.destabilizedBy) ?? null);
     a.crashed = true;
     a.destabilized = 0; // a wreck is past losing control
     a.destabilizedByPlayer = false;

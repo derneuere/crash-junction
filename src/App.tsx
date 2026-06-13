@@ -6,7 +6,7 @@ import { LEVELS, type LevelId } from './game/levels';
 import { PLAYER_CARS, setPlayerCar, type PlayerCarId } from './game/models';
 import { GameState } from './game/types';
 import { parseReplayFile, type ReplayFile } from './game/replay';
-import type { CashFloatData, RaceStanding, ReportData } from './game/events';
+import type { CashFloatData, RaceStanding, ReportData, TakedownBanner } from './game/events';
 import { Hud, type FlashState } from './ui/Hud';
 import { DebugOverlay } from './ui/DebugOverlay';
 import {
@@ -25,6 +25,7 @@ export default function App() {
   const [state, setState] = useState(GameState.Idle);
   const [damage, setDamage] = useState(0);
   const [flash, setFlash] = useState<FlashState | null>(null);
+  const [takedown, setTakedown] = useState<TakedownBanner | null>(null);
   const [report, setReport] = useState<ReportData | null>(null);
   const [cash, setCash] = useState<CashFloatData[]>([]);
   const [crashbreaker, setCrashbreaker] = useState(0);
@@ -139,6 +140,7 @@ export default function App() {
     stateRef.current = GameState.Idle;
     setDamage(0);
     setFlash(null);
+    setTakedown(null);
     setReport(null);
     setCash([]);
     setCrashbreaker(0);
@@ -162,11 +164,13 @@ export default function App() {
         if (s === GameState.Idle) {
           setReport(null);
           setFlash(null);
+          setTakedown(null);
           setCash([]);
         }
       }),
       game.events.on('damage', setDamage),
       game.events.on('flash', (text) => setFlash((f) => ({ text, key: (f?.key ?? 0) + 1 }))),
+      game.events.on('takedown', setTakedown),
       game.events.on('report', (r) => {
         setReport(r);
         if (replayingRef.current) return; // a replayed tape sets no records
@@ -275,6 +279,7 @@ export default function App() {
         multiplier={multiplier}
         boost={boost}
         flash={flash}
+        takedown={takedown}
         report={report}
         cash={cash}
         crashbreaker={crashbreaker}
