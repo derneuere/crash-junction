@@ -7,6 +7,7 @@ import { Skidmarks } from './skidmarks';
 import { ExplosionFX } from './explosion';
 import { GlassFX } from './glass';
 import { Streaks } from './streaks';
+import { Nitrous } from './nitrous';
 
 /** All pooled visual effects behind one update/reset. */
 export class Effects {
@@ -18,6 +19,7 @@ export class Effects {
   readonly explosion: ExplosionFX;
   readonly glass: GlassFX;
   readonly streaks: Streaks;
+  readonly nitrous: Nitrous;
 
   constructor(scene: THREE.Scene) {
     this.sparks = new Sparks(scene);
@@ -28,6 +30,7 @@ export class Effects {
     this.explosion = new ExplosionFX(scene, this.smoke);
     this.glass = new GlassFX(scene);
     this.streaks = new Streaks(scene);
+    this.nitrous = new Nitrous(scene);
   }
 
   update(dt: number): void {
@@ -50,5 +53,6 @@ export class Effects {
     this.explosion.reset();
     this.glass.reset();
     this.streaks.reset();
+    this.nitrous.reset();
   }
 }

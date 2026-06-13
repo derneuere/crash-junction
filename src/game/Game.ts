@@ -33,7 +33,7 @@ import { buildEnvironment, makeHeightSampler } from './environment';
 import { setSeaCamera, type Sea } from './sea';
 import type { GrassField } from './grass';
 import { loadLevelProps } from './props';
-import { BRAKE_INTENSITY, HEADLIGHT_INTENSITY, charActor, createBarrel, createPole, createVehicle, deformActor, popWheel, repairVehicle, shatterGlass, type LoosePart } from './vehicles';
+import { BRAKE_INTENSITY, HEADLIGHT_INTENSITY, charActor, createBarrel, createPole, createVehicle, deformActor, exhaustAnchors, popWheel, repairVehicle, shatterGlass, type LoosePart } from './vehicles';
 import { applyCarEnvScale, applyGlassParams, glassParams, setCarEnvMap, setPlayerEnvMap, type GlassParams } from './geometry';
 import { applyTimeOfDay, type TimeOfDay } from './daynight';
 import { SKY_PRESETS, SkyRig, SunFlare } from './skyenv';
@@ -840,6 +840,48 @@ export class Game {
     return shatterGlass(p, wp, 1.6, power);
   }
 
+  /** Park the player still on the road, pointed along its forward axis, in the
+   *  driving (Launch) state with the boost FLAG and a chosen speed forced on,
+   *  so tools/boostshot.mjs can frame the blue nitrous flame out the back at
+   *  day + night. Harness-only — like crashTest/__debugParkForGlass it writes
+   *  state directly and is NEVER on a recorded take or replay (the recorder
+   *  records keys, not this), so it can't pollute determinism. Visual only.
+   *  `burnout` arms the full-bar sustained Burnout for the fiercer jet. */
+  __debugBoostPose(speed: number, burnout = false): void {
+    const p = this.player;
+    if (!p) return;
+    this.state = GameState.Launch;
+    this.timeScale = 1;
+    this.slowTimer = 0;
+    for (const a of this.actors) {
+      if (a === p) continue;
+      a.body.velocity.set(0, 0, 0);
+      a.body.angularVelocity.set(0, 0, 0);
+      a.body.position.set(a.body.position.x, -200, a.body.position.z);
+      a.body.sleep();
+      a.group.visible = false;
+    }
+    // keep the car on its own (clear-road) spawn so the chase shot isn't buried
+    // in scenery; the harness reads the car transform to place the camera.
+    const sp = this.level.player;
+    const yaw = Math.atan2(sp.dir.x, sp.dir.z) + Math.PI; // hull forward = -z
+    p.body.position.set(sp.x, (p.spec?.rideHeight ?? 0.8) + 0.05, sp.z);
+    p.body.quaternion.setFromAxisAngle(new CANNON.Vec3(0, 1, 0), yaw);
+    p.body.velocity.set(0, 0, 0);
+    p.body.angularVelocity.set(0, 0, 0);
+    p.crashed = false;
+    this.control.heading = yaw - Math.PI;
+    this.control.velAngle = this.control.heading;
+    this.control.boosting = true;
+    this.control.speed = speed;
+    this.control.burnout = burnout;
+    // prime the flame: place the car group and drive the jet to full intensity
+    // (the attack ramp needs a few presentation frames to grow out of the pipe)
+    // so a single harness render captures it lit, no sim step required.
+    this.syncMeshes(1 / 60);
+    for (let i = 0; i < 30; i++) this.updateBoostFlames(1 / 60);
+  }
+
   /** Detonate at a world position. power ≈ 1 is a barrel, ~2.4 a tanker. */
   explode(p: THREE.Vector3, power: number): void {
     this.perf.tag('explosion');
@@ -1032,6 +1074,9 @@ export class Game {
     const onCollide = (a: Actor, e: CollideEvent) => this.onCollide(a, e);
     this.player = createVehicle(this.scene, this.phys, onCollide, this.level.player, true);
     this.register(this.player);
+    // plant the blue nitrous boost jets at the player's rear exhausts — only
+    // the player boosts, so only the player car owns the flame
+    if (this.player.spec) this.fx.nitrous.attach(exhaustAnchors(this.player.spec));
     for (const spawn of this.level.traffic) this.register(createVehicle(this.scene, this.phys, onCollide, spawn, false));
     // furniture rides the road-grade base field (elevation.md Phase 1) —
     // base() is literal 0 on flat levels, so only the GANTRY POINT north
@@ -1934,12 +1979,24 @@ export class Game {
     }
   }
 
-  // boost flames out of the exhaust while burning
-  private updateBoostFlames(): void {
+  // BLUE NITROUS BOOST FLAME out of the exhausts while burning. Presentation
+  // only: driven off the boost FLAG (control.boosting) + render dt, never the
+  // other way round — it reads sim state, writes none. Always called (even off-
+  // boost) so the jet fades out cleanly instead of freezing. A few orange
+  // sparks ride along while actively burning for the gritty exhaust crackle.
+  private updateBoostFlames(simDt: number): void {
     const p = this.player;
-    if (!p || p.crashed || this.state !== GameState.Launch || !this.control.boosting) return;
+    const burning = !!p && !p.crashed && this.state === GameState.Launch && this.control.boosting;
+    this.fx.nitrous.update(
+      burning,
+      this.control.burnout,
+      this.control.speed,
+      p ? p.group : null,
+      simDt,
+    );
+    if (!burning || !p) return;
     _hood.set(0.35 * (Math.random() < 0.5 ? 1 : -1), 0.1, (p.spec ? p.spec.length / 2 : 2.3) + 0.15);
-    this.fx.sparks.spawn(p.group.localToWorld(_hood.clone()), 4, 3.5);
+    this.fx.sparks.spawn(p.group.localToWorld(_hood.clone()), 2, 3.0);
   }
 
   // ---------- bug reports & replay ----------
@@ -2182,7 +2239,7 @@ export class Game {
     this.updateSkid(simDt);
     this.fx.update(simDt);
     this.updateBurning(simDt);
-    this.updateBoostFlames();
+    this.updateBoostFlames(simDt);
     this.updateHud(dt);
     // the camera is part of the deterministic domain, not presentation:
     // aftertouch pushes the wreck along camera-relative axes, so the

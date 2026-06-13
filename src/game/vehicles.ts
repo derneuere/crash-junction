@@ -84,6 +84,19 @@ function makeModelHull(model: VehicleModel, color: number): THREE.Mesh {
 
 export type CollideHandler = (actor: Actor, e: CollideEvent) => void;
 
+/** The two rear-exhaust anchors in the car group's LOCAL space, where the
+ *  nitrous boost flame (effects/nitrous.ts) plants its twin jets. Derived from
+ *  the spec — the baked hulls carry no tailpipe geometry — at the rear face
+ *  (+z is the rear; hull forward is -z), low near the bumper, offset toward
+ *  the rear corners. The group origin rides at COM height, so the low exhaust
+ *  sits a little below it. Twin tips = the classic dual-pipe boost look. */
+export function exhaustAnchors(spec: VehicleSpec): [THREE.Vector3, THREE.Vector3] {
+  const z = spec.length / 2 - 0.08; // just inside the rear face
+  const y = -spec.rideHeight + 0.34; // low, near the rear bumper height
+  const x = Math.min(spec.width * 0.32, 0.55); // toward the corners, capped sane
+  return [new THREE.Vector3(-x, y, z), new THREE.Vector3(x, y, z)];
+}
+
 /** Model wheels carry tire/rim paint as vertex colors. */
 const modelWheelMat = new THREE.MeshStandardMaterial({ vertexColors: true, flatShading: true, roughness: 0.8 });
 
