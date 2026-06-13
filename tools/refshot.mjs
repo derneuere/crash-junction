@@ -39,6 +39,14 @@ const POSES = {
   // seam-2: the chicane verge — beach→bank skirt seam masks + the NW
   // drygrass tongue fading the headland gold into the shared turf
   'seam-2': { cam: [-218, 22, 40], look: [-285, 0, -10] },
+  // grass-sand: LOCKED art pose for the GRASS + grass→sand dune-lip pass.
+  // A low, raking angle across the SW beach dune lip: foreground green
+  // island grass on the left thins through the mottled drygrass dune band
+  // into the dry-sand apron of the Beach Run (rope fence on the lip, palms +
+  // sea beyond). The green→drygrass→tan transition fills the lower-mid
+  // frame, the motel is out of frame to the right. LOCKED — do not move the
+  // framing (art-grass-sand contract).
+  'grass-sand': { cam: [-198, 8, -120], look: [-238, 0, -180] },
 };
 
 // ---- CLI ----
