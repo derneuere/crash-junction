@@ -194,6 +194,12 @@ const TOD_PRESETS: Record<TimeOfDay, TodPreset> = {
   night: { fog: 0x0a0f1d, hemiSky: 0x33415c, hemiGround: 0x12141c, hemiInt: 0.55, sunColor: 0x9db6e8, sunInt: 0.55, envInt: 0.5 },
 };
 
+// PERF (perf-harbor): refresh the live player cube reflection every Nth
+// rendered frame instead of every frame. 2 = 30 Hz on a 60 Hz display, which
+// reads identically on the streaky clearcoat while roughly halving the
+// reflection's whole-scene re-render cost — the dockyard's dominant frame cost.
+const CUBE_EVERY_DEFAULT = 2;
+
 export class Game {
   readonly events = new Emitter<GameEvents>();
 
@@ -297,6 +303,13 @@ export class Game {
   private last = performance.now();
   private disposed = false;
   private resizeObserver: ResizeObserver;
+  // PERF (perf-harbor): render-frame counter + interval for throttling the
+  // live player cube reflection. RENDER-only (presentation), never read by the
+  // sim — both live in the pixels-only tail of frame(), so they can't touch a
+  // pin. cubeEvery is a debug-tunable (setCubeEvery) for profiling A/Bs; ships
+  // at CUBE_EVERY_DEFAULT.
+  private renderFrame = 0;
+  private cubeEvery = CUBE_EVERY_DEFAULT;
 
   constructor(
     private container: HTMLElement,
@@ -2029,7 +2042,20 @@ export class Game {
     this.updateShadowRig();
     this.sunFlare.update(this.camera, this.sunSprite.position, af.dt, this.sunSprite.visible, () => this.flareOccluded());
     if (this.cineActive()) {
-      if (p) {
+      this.renderFrame++;
+      // PERF (perf-harbor): the live cube reflection is the single biggest
+      // per-frame cost in the dockyard — it re-renders the WHOLE scene into 6
+      // cube faces, so at ~388 scene draws that is ~2300 draws a frame, and
+      // each face pays the full DUSK/NIGHT light set (19 lights vs 5 by day),
+      // which is exactly why the harbor lags hardest after dark. The capture is
+      // a STREAKY CLEARCOAT reflection, not a mirror — refreshing it every
+      // other render frame is indistinguishable on a moving car (the render
+      // target persists, so the off frame reuses last capture) and halves the
+      // cube cost. Standard reflection-probe throttling; pure presentation —
+      // the counter and the gate live below the sim's read-back line, so
+      // determinism is untouched. (cubeEvery is tunable via setCubeEvery — drop
+      // to 1 for an every-frame capture.)
+      if (p && this.renderFrame % this.cubeEvery === 0) {
         // the world sweeps through the player's paint: re-capture the cube
         // map (the car must not reflect itself; the flare is screen dressing)
         const tCube = performance.now();
@@ -2052,6 +2078,14 @@ export class Game {
    *  same spike list live. */
   perfReport(): PerfReport {
     return this.perf.report();
+  }
+
+  /** Debug/profiling knob (perf-harbor): how often the live player cube
+   *  reflection re-captures the scene — 1 = every render frame, 2 = every
+   *  other (the ship default), etc. Pure presentation; the harbor-probe flips
+   *  it to A/B the reflection-throttle win. Clamped to ≥ 1. */
+  setCubeEvery(n: number): void {
+    this.cubeEvery = Math.max(1, Math.floor(n));
   }
 
   /** One physics ray camera → sun: is something chunky in the way? The
