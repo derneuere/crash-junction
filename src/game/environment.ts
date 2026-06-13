@@ -18,6 +18,7 @@ import {
 } from './textures';
 import type { HeightSampler } from './suspension';
 import { buildSea, type Sea } from './sea';
+import { applyBakedAO } from './ao';
 
 // Z-ORDER CONTRACT for coplanar ground paint (the camera never goes under
 // the road, so tiny y offsets beat polygonOffset): grass/island ground 0 →
@@ -1586,6 +1587,12 @@ export function buildEnvironment(scene: THREE.Scene, phys: PhysicsContext, level
     const bld = new THREE.Mesh(new THREE.BoxGeometry(11, h, 11), bldMat);
     bld.position.set(cx, h / 2 + 0.16, cz);
     bld.castShadow = bld.receiveShadow = true;
+    // baked AO contact-darkening at the base of the block (ao.ts / the offline
+    // bake). A BoxGeometry is always 24 verts in a fixed order, so the bake's
+    // 'building' prototype — a unit box sat on its sidewalk — drapes onto any
+    // building height: the bottom ring darkens where wall meets ground while
+    // the sunlit upper faces keep their key light (ambient-only, see ao.ts).
+    applyBakedAO(bld, 'building');
     scene.add(bld);
     const bb = new CANNON.Body({ mass: 0, material: phys.matGround });
     bb.addShape(new CANNON.Box(new CANNON.Vec3(5.5, h / 2, 5.5)));
