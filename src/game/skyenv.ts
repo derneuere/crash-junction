@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { SKY_VERT, SKY_FRAG } from './skyscatter.glsl';
+import { CLOUD_PASS_VERT, CLOUD_PASS_FRAG } from './skyclouds.glsl';
 
 // The world's image-based lighting. A custom atmospheric-scattering dome
 // (Rayleigh + Mie + ozone single-pass raymarch, ported from Sebastian Lague's
@@ -103,6 +104,73 @@ function toVec(c: THREE.ColorRepresentation): THREE.Vector3 {
   return new THREE.Vector3(_col.r, _col.g, _col.b);
 }
 
+/** scratch for reading the renderer's current drawing-buffer size */
+const _sizeTmp = new THREE.Vector2();
+
+// ---- sun transmittance at the eye (JS port of skyscatter.glsl) ----
+// The cloud march needs the sun's atmospheric transmittance at the eye — the
+// ONE scattering value it can't compute on its own (it carries no atmosphere
+// model). In the inline dome path the frag computes sunTransmittance(ro); the
+// half-res cloud pass instead receives it as a uniform. This is a faithful,
+// byte-for-byte-intent port of skyscatter.glsl's sunTransmittance/getScattering
+// at ro = (0, groundRadius+0.2, 0): it depends only on the sun direction + the
+// (per-time-of-day) scattering coefficients, so it is computed ONCE per
+// configure() — zero per-frame cost — and matches what the dome computes inline.
+const ATMO = {
+  groundRadius: 6360.0,
+  atmoRadius: 6460.0,
+  rayleighScaleH: 8.0,
+  mieScaleH: 1.2,
+  ozoneCentre: 25.0,
+  ozoneWidth: 15.0,
+};
+
+/** ray–sphere from skyscatter.glsl: returns through-length (0 on miss). */
+function raySphereThrough(ro: THREE.Vector3, rd: THREE.Vector3, radius: number): number {
+  const b = ro.dot(rd);
+  const c = ro.dot(ro) - radius * radius;
+  const d = b * b - c;
+  if (d < 0) return 0;
+  const s = Math.sqrt(d);
+  const near = Math.max(0, -b - s);
+  const far = -b + s;
+  if (far < 0) return 0;
+  return far - near;
+}
+
+/** Sun transmittance at the eye — exp(-∫extinction) over an 8-step march toward
+ *  the sun, exactly mirroring skyscatter.glsl. rayleighCoeff/mieCoeff/ozoneCoeff
+ *  are the SAME values written into the dome uniforms in configure(). */
+function computeSunTransmittance(
+  sunDir: THREE.Vector3,
+  rayleighCoeff: THREE.Vector3,
+  mieCoeff: number,
+  ozoneCoeff: THREE.Vector3,
+): THREE.Vector3 {
+  const ro = new THREE.Vector3(0, ATMO.groundRadius + 0.2, 0);
+  const len = raySphereThrough(ro, sunDir, ATMO.atmoRadius);
+  const STEPS = 8;
+  const ds = len / STEPS;
+  let opticalR = 0,
+    opticalG = 0,
+    opticalB = 0;
+  const pos = ro.clone().addScaledVector(sunDir, ds * 0.5);
+  for (let i = 0; i < STEPS; i++) {
+    const h = pos.length() - ATMO.groundRadius;
+    const rDensity = Math.exp(-h / ATMO.rayleighScaleH);
+    const mDensity = Math.exp(-h / ATMO.mieScaleH);
+    const oDensity = Math.max(0, 1 - Math.abs(h - ATMO.ozoneCentre) / ATMO.ozoneWidth);
+    const mieS = mieCoeff * mDensity;
+    const mieAbs = mieCoeff * 0.1 * mDensity;
+    // extinction = rayleighS + mieS + mieAbsorption + ozone*oDensity
+    opticalR += (rayleighCoeff.x * rDensity + mieS + mieAbs + ozoneCoeff.x * oDensity) * ds;
+    opticalG += (rayleighCoeff.y * rDensity + mieS + mieAbs + ozoneCoeff.y * oDensity) * ds;
+    opticalB += (rayleighCoeff.z * rDensity + mieS + mieAbs + ozoneCoeff.z * oDensity) * ds;
+    pos.addScaledVector(sunDir, ds);
+  }
+  return new THREE.Vector3(Math.exp(-opticalR), Math.exp(-opticalG), Math.exp(-opticalB));
+}
+
 export class SkyRig {
   /** the background dome — lives in the main scene (vertex shader pins it
    *  to the far plane, so scale only needs to enclose the camera path).
@@ -113,6 +181,19 @@ export class SkyRig {
 
   private rt: THREE.WebGLRenderTarget | null = null;
   private readonly material: THREE.ShaderMaterial;
+
+  // ---- half-res cloud pass (the perf win) ----
+  /** Quarter-area HDR target the cloud march writes premultiplied RGBA into. */
+  private cloudRT: THREE.WebGLRenderTarget;
+  private readonly cloudMat: THREE.ShaderMaterial;
+  private readonly cloudScene = new THREE.Scene();
+  private readonly cloudCam = new THREE.Camera();
+  private readonly cloudQuad: THREE.Mesh;
+  /** divisor on the full render size — 2 = half-res (quarter the pixels). */
+  private readonly CLOUD_DOWNSCALE = 2;
+  private readonly _invViewProj = new THREE.Matrix4();
+  private fullW = 1;
+  private fullH = 1;
 
   constructor() {
     this.material = new THREE.ShaderMaterial({
@@ -146,6 +227,13 @@ export class SkyRig {
         // clouds). Tuned so the sky pose shows a handful of readable cumulus.
         uCloudHeight: { value: 1.4 },
         uCloudTint: { value: new THREE.Vector3(0.72, 0.78, 0.84) },
+        // HALF-RES CLOUD BUFFER: the dome samples this premultiplied RGBA target
+        // (filled by renderClouds() each frame) instead of marching clouds
+        // inline. uUseCloudBuffer gates it; the bake path turns it off so the
+        // inline fallback runs (with cloud density forced to 0 anyway).
+        uCloudBuffer: { value: null as THREE.Texture | null },
+        uUseCloudBuffer: { value: 0 },
+        uResolution: { value: new THREE.Vector2(1, 1) },
       },
     });
     // a unit sphere scaled large enough to enclose the camera path; the vertex
@@ -155,6 +243,98 @@ export class SkyRig {
     this.mesh.scale.setScalar(2000);
     this.mesh.frustumCulled = false;
     this.mesh.renderOrder = -1; // draw the background first
+
+    // --- cloud pass setup ---
+    // HDR target (HalfFloat) so the cloud march's >1 sunlit radiance + the
+    // composer's bloom survive; RGBA so the premultiplied colour + coverage
+    // alpha round-trip. Linear filtering gives the free bilinear upscale that
+    // makes half-res clouds read as full-res (they're low-frequency).
+    this.cloudRT = new THREE.WebGLRenderTarget(1, 1, {
+      type: THREE.HalfFloatType,
+      format: THREE.RGBAFormat,
+      minFilter: THREE.LinearFilter,
+      magFilter: THREE.LinearFilter,
+      depthBuffer: false,
+      stencilBuffer: false,
+    });
+    // the cloud-pass material shares the dome's cloud/sun uniform OBJECTS so a
+    // single configure()/setCloudTime() write drives both paths in lockstep —
+    // no risk of the buffer and the (fallback) inline march disagreeing.
+    const du = this.material.uniforms;
+    this.cloudMat = new THREE.ShaderMaterial({
+      name: 'CloudHalfResPass',
+      vertexShader: CLOUD_PASS_VERT,
+      fragmentShader: CLOUD_PASS_FRAG,
+      depthWrite: false,
+      depthTest: false,
+      uniforms: {
+        // shared with the dome (same uniform objects — write once, both see it)
+        uSunDir: du.uSunDir,
+        uSunTint: du.uSunTint,
+        uSunIntensity: du.uSunIntensity,
+        uNight: du.uNight,
+        uCloudTime: du.uCloudTime,
+        uCloudCoverage: du.uCloudCoverage,
+        uCloudDensity: du.uCloudDensity,
+        uCloudHeight: du.uCloudHeight,
+        uCloudTint: du.uCloudTint,
+        // cloud-pass only: the sun transmittance at the eye (computed per
+        // configure) + the camera reconstruction matrices (set per frame)
+        uSunTrans: { value: new THREE.Vector3(1, 1, 1) },
+        uInvViewProj: { value: new THREE.Matrix4() },
+        uCameraPos: { value: new THREE.Vector3() },
+      },
+    });
+    // a fullscreen triangle (oversized quad clipped to the viewport); the vertex
+    // shader ignores the projection and writes clip space directly.
+    const quadGeo = new THREE.PlaneGeometry(2, 2);
+    this.cloudQuad = new THREE.Mesh(quadGeo, this.cloudMat);
+    this.cloudQuad.frustumCulled = false;
+    this.cloudScene.add(this.cloudQuad);
+  }
+
+  /** Render the half-res cloud buffer for THIS frame's camera, then point the
+   *  dome at it. Call once per frame from the render path, AFTER setCloudTime()
+   *  and BEFORE the main scene render. Presentation-only: it reads the render
+   *  camera + render clock and writes an offscreen texture — never sim state, so
+   *  it's pin-safe exactly like the sea/grass drift it sits beside. */
+  renderClouds(renderer: THREE.WebGLRenderer, camera: THREE.PerspectiveCamera): void {
+    // self-sync the full-res size to whatever the renderer is currently drawing
+    // at. The dome composites via gl_FragCoord.xy / uResolution, and gl_FragCoord
+    // is in DRAWING-BUFFER pixels (CSS size × pixelRatio), which is also the
+    // resolution the composer's RenderPass and the raw canvas render at — so
+    // uResolution + the cloud buffer must track the drawing-buffer size. This
+    // also keeps offscreen captures correct: refshot/probes call
+    // renderer.setSize()/setPixelRatio() directly, never onResize/setSize.
+    renderer.getDrawingBufferSize(_sizeTmp);
+    if (_sizeTmp.x !== this.fullW || _sizeTmp.y !== this.fullH) {
+      this.setSize(_sizeTmp.x, _sizeTmp.y);
+    }
+
+    // reconstruct the world-space view ray in the pass from inverse(P*V)
+    this._invViewProj.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse).invert();
+    (this.cloudMat.uniforms.uInvViewProj.value as THREE.Matrix4).copy(this._invViewProj);
+    (this.cloudMat.uniforms.uCameraPos.value as THREE.Vector3).setFromMatrixPosition(camera.matrixWorld);
+
+    const prevTarget = renderer.getRenderTarget();
+    renderer.setRenderTarget(this.cloudRT);
+    renderer.render(this.cloudScene, this.cloudCam);
+    renderer.setRenderTarget(prevTarget);
+
+    // point the dome at the fresh buffer + enable the sample path
+    this.material.uniforms.uCloudBuffer.value = this.cloudRT.texture;
+    this.material.uniforms.uUseCloudBuffer.value = 1;
+  }
+
+  /** Size the cloud buffer + the dome's screen-lookup resolution to the full
+   *  render size. Half-res buffer = ceil(full / CLOUD_DOWNSCALE). */
+  setSize(width: number, height: number): void {
+    this.fullW = Math.max(1, width);
+    this.fullH = Math.max(1, height);
+    (this.material.uniforms.uResolution.value as THREE.Vector2).set(this.fullW, this.fullH);
+    const cw = Math.max(1, Math.ceil(this.fullW / this.CLOUD_DOWNSCALE));
+    const ch = Math.max(1, Math.ceil(this.fullH / this.CLOUD_DOWNSCALE));
+    this.cloudRT.setSize(cw, ch);
   }
 
   configure(preset: SkyPreset): void {
@@ -190,6 +370,18 @@ export class SkyRig {
       THREE.MathUtils.degToRad(preset.azimuth),
     );
     (u.uSunDir.value as THREE.Vector3).copy(this.sunDir);
+
+    // Cloud pass: the sun transmittance at the eye is constant over the dome and
+    // depends only on the sun dir + the scattering coefficients just written —
+    // compute it ONCE here (the inline dome path computes the same value in the
+    // frag). Feeds the half-res cloud march's warm-rim colour at dusk.
+    const sunTrans = computeSunTransmittance(
+      this.sunDir,
+      u.uRayleighCoeff.value as THREE.Vector3,
+      u.uMieCoeff.value as number,
+      u.uOzoneCoeff.value as THREE.Vector3,
+    );
+    (this.cloudMat.uniforms.uSunTrans.value as THREE.Vector3).copy(sunTrans);
   }
 
   /** Advance the cloud drift clock. Driven off Game's RENDER time (the same
@@ -215,7 +407,12 @@ export class SkyRig {
     const parent = this.mesh.parent;
     const wasVisible = this.mesh.visible;
     const cloudDensity = this.material.uniforms.uCloudDensity.value as number;
+    const useBuffer = this.material.uniforms.uUseCloudBuffer.value as number;
     this.material.uniforms.uCloudDensity.value = 0; // dome-only: no clouds in env
+    // bake reads the dome through the PMREM cube faces, NOT this frame's
+    // screen-space cloud buffer — force the inline (density-0 → empty) path so
+    // the bake never samples a stale/mis-sized buffer at the cube-face UVs.
+    this.material.uniforms.uUseCloudBuffer.value = 0;
     this.mesh.visible = true; // bake even if the live dome is hidden (night)
     const bakeScene = new THREE.Scene();
     bakeScene.add(this.mesh);
@@ -224,6 +421,7 @@ export class SkyRig {
     pmrem.dispose();
     if (parent) parent.add(this.mesh); // reclaim from the bake scene
     this.material.uniforms.uCloudDensity.value = cloudDensity; // restore for the live dome
+    this.material.uniforms.uUseCloudBuffer.value = useBuffer; // restore sample path
     this.mesh.visible = wasVisible;
     this.rt?.dispose();
     this.rt = rt;
@@ -233,6 +431,9 @@ export class SkyRig {
   dispose(): void {
     this.rt?.dispose();
     this.rt = null;
+    this.cloudRT.dispose();
+    this.cloudMat.dispose();
+    this.cloudQuad.geometry.dispose();
     this.material.dispose();
     this.mesh.geometry.dispose();
   }

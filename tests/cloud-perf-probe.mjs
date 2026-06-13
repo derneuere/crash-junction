@@ -97,7 +97,13 @@ try {
     });
     if (cloudU) cloudPreset = cloudU.value;
 
-    const renderFrame = () => { if (g.postfx && r.toneMapping === 0) g.postfx.render(1 / 60); else r.render(g.scene, c); };
+    // clouds now render in a separate half-res pass (skyenv.ts) that the Game
+    // loop drives; include it here so the timing reflects the FULL cloud cost
+    // (half-res march + the dome's cheap buffer sample), not just the composite.
+    const renderFrame = () => {
+      if (g.skyRig) { c.updateMatrixWorld(); g.skyRig.renderClouds(r, c); }
+      if (g.postfx && r.toneMapping === 0) g.postfx.render(1 / 60); else r.render(g.scene, c);
+    };
 
     const timeN = (n) => {
       // warm up

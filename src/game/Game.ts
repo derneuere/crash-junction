@@ -390,6 +390,8 @@ export class Game {
     this.cam0.quat.copy(this.camera.quaternion);
 
     this.postfx = new Postfx(this.renderer, this.scene, this.camera, container.clientWidth, container.clientHeight);
+    // size the half-res cloud buffer + the dome's screen-lookup resolution
+    this.skyRig.setSize(container.clientWidth, container.clientHeight);
 
     this.hemi = new THREE.HemisphereLight(0xbfd6ff, 0x4a4036, 1.45);
     this.scene.add(this.hemi);
@@ -1136,6 +1138,7 @@ export class Game {
     this.camera.updateProjectionMatrix();
     this.renderer.setSize(w, h);
     this.postfx.setSize(w, h);
+    this.skyRig.setSize(w, h); // keep the cloud buffer at half the new size
   }
 
   private tryCrashbreaker(): void {
@@ -2192,6 +2195,14 @@ export class Game {
     this.grass?.update(af.dt, this.camera.position); // sway + distance-cull off RENDER time (pin-safe)
     this.skyClock += af.dt; // drift the dome clouds off RENDER time (pin-safe)
     this.skyRig.setCloudTime(this.skyClock);
+    // Fill the HALF-RES cloud buffer for this frame's camera, then the dome
+    // samples it instead of marching clouds per-pixel at full res (skyenv.ts).
+    // Presentation-only (reads the render camera + render clock, writes an
+    // offscreen texture) — pin-safe, same contract as the sea/grass drift above.
+    // The camera world matrix is current here (the camera rig ran earlier this
+    // frame), so the reconstructed view rays match the dome's.
+    this.camera.updateMatrixWorld();
+    this.skyRig.renderClouds(this.renderer, this.camera);
     this.updateShadowRig();
     this.sunFlare.update(this.camera, this.sunSprite.position, af.dt, this.sunSprite.visible, () => this.flareOccluded());
     if (this.cineActive()) {
