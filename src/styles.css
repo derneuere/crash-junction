@@ -628,6 +628,29 @@ canvas {
   line-height: 1.7;
   color: rgba(255, 255, 255, 0.7);
 }
+.debug .dbgSlider {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 5px;
+  font-size: 9px;
+  letter-spacing: 1px;
+  color: rgba(255, 255, 255, 0.6);
+}
+.debug .dbgSlider > span:first-child {
+  flex: 0 0 58px;
+}
+.debug .dbgSlider input[type='range'] {
+  flex: 1 1 auto;
+  min-width: 80px;
+  accent-color: #6fb0d8;
+}
+.debug .dbgSlider .dbgNum {
+  flex: 0 0 34px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  color: rgba(255, 255, 255, 0.85);
+}
 
 @media (prefers-reduced-motion: reduce) {
   .launchRow {

@@ -31,7 +31,7 @@ import { GROUP_DECOR, createPhysics, type PhysicsContext } from './physics';
 import { buildEnvironment, makeHeightSampler } from './environment';
 import { loadLevelProps } from './props';
 import { BRAKE_INTENSITY, HEADLIGHT_INTENSITY, charActor, createBarrel, createPole, createVehicle, deformActor, popWheel, repairVehicle, shatterGlass, type LoosePart } from './vehicles';
-import { applyCarEnvScale, setCarEnvMap, setPlayerEnvMap } from './geometry';
+import { applyCarEnvScale, applyGlassParams, glassParams, setCarEnvMap, setPlayerEnvMap, type GlassParams } from './geometry';
 import { applyTimeOfDay, type TimeOfDay } from './daynight';
 import { SKY_PRESETS, SkyRig, SunFlare } from './skyenv';
 import { PlayerReflections } from './reflections';
@@ -526,6 +526,22 @@ export class Game {
     this.refreshPlayerEnv();
   }
 
+  /** Live car-glass tweak surface for the debug overlay (tint / transmission /
+   *  roughness / thickness / ior / reflection / frost). Pure visuals — the
+   *  glass material is presentation-only, so this never touches the sim. The
+   *  overlay reaches it through window.__game like the refshot poses. */
+  setGlassParams(p: Partial<GlassParams>): GlassParams {
+    const out = applyGlassParams(p);
+    // a reflection-strength tweak must survive the next day/night swap, which
+    // re-points the env scale — re-seed the player clone now
+    this.refreshPlayerEnv();
+    return out;
+  }
+
+  getGlassParams(): GlassParams {
+    return { ...glassParams };
+  }
+
   private cineActive(): boolean {
     return this.gfx === 'cine' && !this.forceFast;
   }
@@ -573,6 +589,125 @@ export class Game {
   }
 
   // ---------- public API ----------
+
+  /** DEBUG-ONLY side-profile glass crash test (tools/glass-crash.mjs). Drops a
+   *  static wall a few metres to the car's +X side, teleports the player onto
+   *  the road facing the wall, marks it a wreck so the crumple + glass damage
+   *  pipeline engages, and launches it LATERALLY at `speed` m/s straight into
+   *  the wall. A locked side camera then watches the windscreen crack →
+   *  frost → blow.
+   *
+   *  DETERMINISM: this writes physics state directly (body velocity/position,
+   *  a one-off static body) and is NEVER called during a recorded take or a
+   *  replay — only the headless harness reaches it through window.__game. The
+   *  recorder records KEYS, not this method, so it cannot pollute a take; the
+   *  replay verifier forces ?verify=1 (forceFast) and runs fixtures, never
+   *  this. It is, by construction, the "clearly-isolated debug-only path the
+   *  recorder never sees". Visual/diagnostic only. */
+  crashTest(speed: number): void {
+    const p = this.player;
+    if (!p) return;
+    this.state = GameState.Launch;
+    this.timeScale = 1;
+    this.slowTimer = 0;
+
+    // banish every other actor far below the floor and freeze it asleep, so
+    // the player crashes cleanly into OUR wall and the side shot stays empty
+    // but for the car + wall (junction traffic includes an explosive tanker —
+    // a stray T-bone there would fireball over the glass we're judging)
+    for (const a of this.actors) {
+      if (a === p) continue;
+      a.body.velocity.set(0, 0, 0);
+      a.body.angularVelocity.set(0, 0, 0);
+      a.body.position.set(a.body.position.x, -200, a.body.position.z);
+      a.body.sleep();
+      a.group.visible = false;
+    }
+
+    // park the car on the road, nose along -z (its forward), a clear run-up to
+    // the +X wall; lift slightly so the suspension settles, not clips. The
+    // run-up scales with speed so a slow 8 m/s tap still reaches the wall
+    // before damping stalls it, while a 40 m/s hit still gets an approach beat.
+    const carX = -Math.max(7, Math.min(16, 2 + speed * 0.45));
+    const carY = (p.spec?.rideHeight ?? 0.8) + 0.05;
+    p.body.position.set(carX, carY, 0);
+    p.body.quaternion.setFromAxisAngle(new CANNON.Vec3(0, 1, 0), 0);
+    p.body.angularVelocity.set(0, 0, 0);
+    // launch sideways into the wall at the requested speed (a pure +X shove —
+    // a T-bone into the driver's door, the classic glass shot)
+    p.body.velocity.set(speed, 0, 0);
+    p.body.wakeUp();
+    p.body.collisionFilterMask = -1; // hit the wall (and everything)
+    this.markCrashed(p); // a wreck: crumple + glass break on contact
+    p.damageLvl = 0;
+
+    // a fresh static wall at +X. mass 0 = immovable; the full mask so the
+    // chassis box actually collides. Only ever spawned by the harness, so the
+    // leak across repeated calls is irrelevant (one process, one shot each).
+    const wallX = 2.5;
+    const wallHalf = new CANNON.Vec3(0.4, 2.2, 6);
+    const wb = new CANNON.Body({ mass: 0, material: this.phys.matGround });
+    wb.addShape(new CANNON.Box(wallHalf));
+    wb.position.set(wallX, wallHalf.y, 0);
+    this.phys.world.addBody(wb);
+    const wallMesh = new THREE.Mesh(
+      new THREE.BoxGeometry(wallHalf.x * 2, wallHalf.y * 2, wallHalf.z * 2),
+      new THREE.MeshStandardMaterial({ color: 0x6b7178, roughness: 0.9 }),
+    );
+    wallMesh.position.copy(wb.position as unknown as THREE.Vector3);
+    wallMesh.castShadow = wallMesh.receiveShadow = true;
+    this.scene.add(wallMesh);
+  }
+
+  /** Debug-only accessors for tools/glass-crash.mjs (never used in play). */
+  __debugPlayer(): Actor | null {
+    return this.player;
+  }
+  __debugPlayerX(): number | null {
+    return this.player ? this.player.body.position.x : null;
+  }
+  /** Reset the take so the next crashTest starts from an intact car. Reuses
+   *  the same reset() the Done→Idle flow runs; harness-only. */
+  __debugReset(): void {
+    this.reset();
+  }
+
+  /** Park the player still at the world origin for a static glass close-up
+   *  (tools/glass-crash.mjs --detail), facing the camera so the windscreen
+   *  reads. Marks it crashed so a debug glass hit takes. Harness-only. */
+  __debugParkForGlass(): void {
+    const p = this.player;
+    if (!p) return;
+    this.state = GameState.Launch;
+    this.timeScale = 1;
+    this.slowTimer = 0;
+    for (const a of this.actors) {
+      if (a === p) continue;
+      a.body.position.set(a.body.position.x, -200, a.body.position.z);
+      a.body.sleep();
+      a.group.visible = false;
+    }
+    p.body.position.set(0, (p.spec?.rideHeight ?? 0.8) + 0.05, 0);
+    // yaw 180° so the NOSE (and windscreen) faces a +z camera — hull forward
+    // is -z, so a half-turn points it at the lens
+    p.body.quaternion.setFromAxisAngle(new CANNON.Vec3(0, 1, 0), Math.PI);
+    p.body.velocity.set(0, 0, 0);
+    p.body.angularVelocity.set(0, 0, 0);
+    this.markCrashed(p);
+  }
+
+  /** Apply one controlled glass hit at the windscreen (upper front), so the
+   *  --detail sheet can step a single pane through crack → frost → blow.
+   *  `power` drives the stage jump (≤3 cracks, >6 frosts/blows). Harness-only. */
+  __debugGlassHit(power: number): number {
+    const p = this.player;
+    if (!p) return 0;
+    p.group.updateMatrixWorld(true);
+    // upper-front of the hull = the windscreen band (nose is -z, forward)
+    const wp = new THREE.Vector3(0.2, 0.5, -0.6);
+    p.group.localToWorld(wp);
+    return shatterGlass(p, wp, 1.6, power);
+  }
 
   /** Detonate at a world position. power ≈ 1 is a barrel, ~2.4 a tanker. */
   explode(p: THREE.Vector3, power: number): void {
@@ -627,7 +762,7 @@ export class Game {
         const bdir = new THREE.Vector3(a.body.position.x - p.x, 0, a.body.position.z - p.z);
         this.deformQueue.push({ actor: a, p: p.clone(), strength: (6 + 7 * power) * fall, dir: bdir.lengthSq() > 0.01 ? bdir.normalize() : null });
         accumulatePanelDamage(a, p, (6 + 7 * power) * fall, this.detachPanel);
-        if (fall > 0.45 && shatterGlass(a, p, 999) > 8) {
+        if (fall > 0.45 && shatterGlass(a, p, 999, 99) > 8) {
           _impact.set(a.body.position.x, a.body.position.y + 0.9, a.body.position.z);
           this.fx.glass.spawn(_impact, 26, 3 + power);
           this.audio.glassBreak(_impact, true);
@@ -1055,10 +1190,13 @@ export class Game {
       if (self.spec?.explosive && self.damageLvl > self.spec.explosive.fuseDamage && !self.exploded && self.fuse === null) {
         self.fuse = 0.3;
       }
-      // windows near the hit let go in a glitter burst
-      if (impact > 5.5) {
-        const broken = shatterGlass(self, p, 0.5 + impact * 0.09);
-        if (broken > 6) {
+      // windows near the hit crack, then frost, then blow as the tumble lands
+      // more hits — a soft knock only spider-webs, a hard hit frosts/blows.
+      // The shard burst + break sound only fire once a pane actually frosts or
+      // lets go (broken verts at stage ≥2), not on the first hairline crack.
+      if (impact > 4.2) {
+        const broken = shatterGlass(self, p, 0.5 + impact * 0.09, impact);
+        if (broken > 6 && impact > 5.5) {
           this.fx.glass.spawn(p, Math.min(40, broken >> 1), impact * 0.45);
           this.audio.glassBreak(p);
         }

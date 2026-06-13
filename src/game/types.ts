@@ -286,6 +286,12 @@ export interface DeformablePart {
   /** Pristine triangle index, stashed the first time shatterGlass blows a
    *  pane out of the hull — repairVehicle reglazes from it. */
   baseIndex?: Uint16Array | Uint32Array;
+  /** Per glass-vertex damage stage (0 virgin · 1 cracked/spider-web · 2
+   *  frosted/spalled · 3 blown out). Lets shatterGlass run its three stages
+   *  off explicit state instead of a fragile colour threshold (transmission
+   *  glass starts at a bright neutral tone, so "is it broken?" can't be read
+   *  from brightness). Built lazily on first hit, reset by repairVehicle. */
+  glassStage?: Uint8Array;
   /** Creased-normal smoothing clusters (built from pristine normals) —
    *  computeVertexNormals() always rebuilds flat split normals, so every
    *  recompute is followed by applyNormalSmoothing with this map. */
