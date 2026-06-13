@@ -242,6 +242,10 @@ export class Game {
   private settleTimer = 0;
   private simTime = 0;
   private clock = 0; // take-local wall time (sum of recorded dts) — feeds the camera
+  // RENDER-time accumulator for cloud drift — purely presentation, summed from
+  // af.dt (real frame time), NOT recorded sim dts, so it never enters the
+  // deterministic domain (replay/pins). Same pin-safe contract as sea/grass.
+  private skyClock = 0;
   private accumulator = 0;
   private mode!: GameMode; // composed per level in buildActors()
   private pickups: Pickups;
@@ -2026,6 +2030,8 @@ export class Game {
     // presentation pixels only from here down — the sim never reads back
     this.sea?.update(af.dt); // animate the waves off RENDER time (pin-safe)
     this.grass?.update(af.dt); // sway the blades off RENDER time (pin-safe)
+    this.skyClock += af.dt; // drift the dome clouds off RENDER time (pin-safe)
+    this.skyRig.setCloudTime(this.skyClock);
     this.updateShadowRig();
     this.sunFlare.update(this.camera, this.sunSprite.position, af.dt, this.sunSprite.visible, () => this.flareOccluded());
     if (this.cineActive()) {

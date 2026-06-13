@@ -49,6 +49,14 @@ export interface SkyPreset {
   nightTint?: THREE.ColorRepresentation;
   /** star-field brightness (only visible while night > 0) */
   starStrength?: number;
+  // ---- cloud layer (skyclouds.glsl.ts) ----
+  /** 0 clear .. 1 overcast — lowers the density cut so more sky fills with cloud */
+  cloudCoverage?: number;
+  /** overall opacity multiplier of the cloud layer (0 = no clouds) */
+  cloudDensity?: number;
+  /** ambient/shadow fill colour for clouds — usually the sky's mid tone, so
+   *  shaded cloud reads as lit-by-sky (warm-grey day, blue-grey dusk/night) */
+  cloudTint?: THREE.ColorRepresentation;
 }
 
 // Per-channel Rayleigh base coefficient ∝ 1/λ⁴ for λ ≈ (680, 550, 440) nm —
@@ -69,16 +77,23 @@ export const SKY_PRESETS: Record<'day' | 'dusk' | 'night', SkyPreset> = {
     elevation: 48, azimuth: 59.5, turbidity: 8, rayleigh: 1.0, mieCoefficient: 3.0, mieDirectionalG: 0.76,
     exposure: 16.0, sunDiscSize: 0.6, sunIntensity: 20.0, sunTint: 0xfff4e2, groundColor: 0x8a9bb0,
     night: 0,
+    // fair-weather cumulus: scattered, bright-white tops, blue-grey sky fill
+    cloudCoverage: 0.42, cloudDensity: 0.9, cloudTint: 0xb9c6d6,
   },
   dusk: {
     elevation: 6, azimuth: 59.5, turbidity: 6, rayleigh: 1.35, mieCoefficient: 4.0, mieDirectionalG: 0.86,
     exposure: 18.0, sunDiscSize: 0.9, sunIntensity: 26.0, sunTint: 0xffc070, groundColor: 0x8a7a6a,
     night: 0,
+    // golden-hour: a touch more coverage so the warm sun catches the cloud
+    // rims; cooler purple-grey ambient so the lit edges pop against shadow
+    cloudCoverage: 0.50, cloudDensity: 0.95, cloudTint: 0x6a6680,
   },
   night: {
     elevation: -8, azimuth: 59.5, turbidity: 4, rayleigh: 1.1, mieCoefficient: 2.0, mieDirectionalG: 0.8,
     exposure: 16.0, sunDiscSize: 0.5, sunIntensity: 0.0, sunTint: 0x9db6e8, groundColor: 0x05080f,
     night: 1, nightTint: 0x0b1734, starStrength: 1.0,
+    // dark blue-grey cloud silhouettes against the star band; faint moon fill
+    cloudCoverage: 0.40, cloudDensity: 0.85, cloudTint: 0x1a2540,
   },
 };
 
@@ -122,6 +137,15 @@ export class SkyRig {
         uNight: { value: 0 },
         uNightTint: { value: new THREE.Vector3(0.04, 0.08, 0.19) },
         uStarStrength: { value: 0.9 },
+        // cloud layer (skyclouds.glsl.ts) — uCloudTime is driven per render
+        // frame off Game's RENDER clock (pin-safe, like the sea/grass drift)
+        uCloudTime: { value: 0 },
+        uCloudCoverage: { value: 0.42 },
+        uCloudDensity: { value: 0.9 },
+        // tile scale of the cloud field (bigger value = smaller, more numerous
+        // clouds). Tuned so the sky pose shows a handful of readable cumulus.
+        uCloudHeight: { value: 1.4 },
+        uCloudTint: { value: new THREE.Vector3(0.72, 0.78, 0.84) },
       },
     });
     // a unit sphere scaled large enough to enclose the camera path; the vertex
@@ -155,6 +179,10 @@ export class SkyRig {
     u.uNight.value = preset.night ?? 0;
     (u.uNightTint.value as THREE.Vector3).copy(toVec(preset.nightTint ?? 0x0a1430));
     u.uStarStrength.value = preset.starStrength ?? 0.9;
+    // cloud layer per-tod knobs (uCloudTime is set every frame, not here)
+    u.uCloudCoverage.value = preset.cloudCoverage ?? 0.42;
+    u.uCloudDensity.value = preset.cloudDensity ?? 0.9;
+    (u.uCloudTint.value as THREE.Vector3).copy(toVec(preset.cloudTint ?? 0xb9c6d6));
 
     this.sunDir.setFromSphericalCoords(
       1,
@@ -164,12 +192,30 @@ export class SkyRig {
     (u.uSunDir.value as THREE.Vector3).copy(this.sunDir);
   }
 
+  /** Advance the cloud drift clock. Driven off Game's RENDER time (the same
+   *  pin-safe source the sea/grass use), never sim time — so clouds drift
+   *  smoothly but never perturb replay determinism. Visual-only. */
+  setCloudTime(t: number): void {
+    this.material.uniforms.uCloudTime.value = t;
+  }
+
   /** PMREM-capture the configured sky for scene.environment. The dome is
    *  borrowed into a bake scene and handed back — same trick as three's
-   *  webgl_shaders_sky example. */
+   *  webgl_shaders_sky example.
+   *
+   *  CLOUDS ARE DOME-ONLY, NOT BAKED INTO THE ENV. The env is re-baked only on
+   *  a time-of-day change, but the visible clouds drift every frame — baking
+   *  them would freeze one cloud pattern into every reflection (water/glass/car)
+   *  while the sky overhead keeps moving, which reads as broken. The clouds'
+   *  soft ambient contributes almost nothing to the integrated IBL irradiance
+   *  anyway, so suppressing them for the bake keeps the env/palette/sun
+   *  contract byte-for-byte what the ocean and car reflections already consume.
+   *  We zero cloud density for the bake and restore it after. */
   bake(renderer: THREE.WebGLRenderer): THREE.Texture {
     const parent = this.mesh.parent;
     const wasVisible = this.mesh.visible;
+    const cloudDensity = this.material.uniforms.uCloudDensity.value as number;
+    this.material.uniforms.uCloudDensity.value = 0; // dome-only: no clouds in env
     this.mesh.visible = true; // bake even if the live dome is hidden (night)
     const bakeScene = new THREE.Scene();
     bakeScene.add(this.mesh);
@@ -177,6 +223,7 @@ export class SkyRig {
     const rt = pmrem.fromScene(bakeScene);
     pmrem.dispose();
     if (parent) parent.add(this.mesh); // reclaim from the bake scene
+    this.material.uniforms.uCloudDensity.value = cloudDensity; // restore for the live dome
     this.mesh.visible = wasVisible;
     this.rt?.dispose();
     this.rt = rt;
