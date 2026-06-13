@@ -18,6 +18,15 @@ import {
 } from './textures';
 import type { HeightSampler } from './suspension';
 import { buildSea, type Sea } from './sea';
+import { buildGrass, type GrassField } from './grass';
+
+/** What buildEnvironment hands back to the frame loop: the animated sea (coast
+ *  levels) and the instanced blade-grass field (coast levels). Both are
+ *  render-driven, pin-safe presentation handles — never in the sim hash. */
+export interface Environment {
+  sea: Sea | null;
+  grass: GrassField | null;
+}
 
 // Z-ORDER CONTRACT for coplanar ground paint (the camera never goes under
 // the road, so tiny y offsets beat polygonOffset): grass/island ground 0 →
@@ -1088,11 +1097,13 @@ function addDuneFringe(scene: THREE.Scene, level: LevelDef): void {
   scene.add(fringe);
 }
 
-/** @returns the animated-sea handle (coast levels only), so the frame loop
- *  can drive its render-time waves; null on inland levels with no sea. */
-export function buildEnvironment(scene: THREE.Scene, phys: PhysicsContext, level: LevelDef): Sea | null {
+/** @returns the render-driven presentation handles (coast levels populate the
+ *  animated sea + instanced grass field; both null on inland levels). The
+ *  frame loop drives their render-time animation — neither is in the sim hash. */
+export function buildEnvironment(scene: THREE.Scene, phys: PhysicsContext, level: LevelDef): Environment {
   const race = level.mode.kind === 'race' ? level.mode.race : null;
   let sea: Sea | null = null;
+  let grass: GrassField | null = null;
 
   if (level.coast) {
     // an island in the sea: the outline polygon IS the grass, with skirts
@@ -1154,6 +1165,13 @@ export function buildEnvironment(scene: THREE.Scene, phys: PhysicsContext, level
   // thinning into sand, not a polygon seam. Own block; reads patch geometry
   // only, never edits the shared patch loop above.
   addDuneFringe(scene, level);
+
+  // [art-grass round-2] Instanced 3D-blade grass over the SW beach-approach
+  // band, swaying in the wind and thinning into the sand at the dune lip. It
+  // AUGMENTS the textured ground + dune fringe above (does not replace them).
+  // Coast levels only (the band is GANTRY-specific); render-driven, pin-safe.
+  // See grass.ts for the bounded-band + tier perf strategy and attribution.
+  if (level.coast) grass = buildGrass(scene);
 
   const roadMat = new THREE.MeshStandardMaterial({ color: 0x2e3138, roughness: 0.95 });
 
@@ -1620,5 +1638,5 @@ export function buildEnvironment(scene: THREE.Scene, phys: PhysicsContext, level
     phys.noCrashIds.add(body.id);
   }
 
-  return sea;
+  return { sea, grass };
 }
