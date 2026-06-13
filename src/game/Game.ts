@@ -2382,6 +2382,14 @@ export class Game {
         this.reflections.update(this.renderer, this.scene, p.group.position, [p.group, this.sunFlare.group]);
         this.perf.cubeMs = performance.now() - tCube;
       }
+      // RADIAL EDGE SPEED BLUR (postfx.ts): feed THIS frame's player speed so
+      // the periphery smears with velocity (centre stays sharp). Driving only —
+      // menu/idle/crashed frames pass speed 0 and render pixel-exact. Render
+      // state only (control.speed/boosting); the sim never reads it back.
+      this.postfx.setSpeedBlur(
+        this.state === GameState.Launch && p && !p.crashed ? this.control.speed : 0,
+        this.control.boosting,
+      );
       const tPost = performance.now();
       this.postfx.render(af.dt);
       this.perf.postMs = performance.now() - tPost;

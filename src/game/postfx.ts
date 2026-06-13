@@ -13,6 +13,7 @@ import {
 } from 'postprocessing';
 import { N8AOPostPass } from 'n8ao';
 import { MotionBlurEffect, VelocityDepthNormalPass } from 'realism-effects';
+import { RadialBlurEffect } from './effects/radialBlur';
 
 // The film-look chain — the game's ONLY render path now: HDR scene render →
 // ambient occlusion → per-pixel motion blur → bloom → ACES tonemap → vignette
@@ -28,8 +29,26 @@ import { MotionBlurEffect, VelocityDepthNormalPass } from 'realism-effects';
 // captures) fall back to renderer.render with renderer-level ACES, so
 // swiftshader doesn't pay for cine pixels nobody hashes (Game.forceFast).
 
+// Speed → blur-strength curve (m/s). Below ONSET the periphery is sharp; the
+// smear ramps in above cruising and saturates near boost top speed. BOOST adds
+// an extra kick so nitrous reads as a clear (but not nauseating) edge streak.
+const SPEED_ONSET = 34; // m/s — calm below this (matches the wind-streak onset feel)
+const SPEED_FULL = 52; // m/s — full smear at/above boost top speed
+const BOOST_BONUS = 0.22; // extra strength while boosting (clamped to 1 in the effect)
+
+/** Map player speed (m/s) + boost flag to the radial-blur strength [0..1].
+ *  Exported so the wiring (Game.ts) and the effect stay in lockstep. */
+export function speedBlurStrength(speed: number, boosting: boolean): number {
+  const t = (speed - SPEED_ONSET) / (SPEED_FULL - SPEED_ONSET);
+  const base = Math.min(1, Math.max(0, t));
+  // ease-in so cruising stays subtle and the climb to top speed is where the
+  // periphery really opens up (square the linear ramp)
+  return Math.min(1, base * base + (boosting ? BOOST_BONUS : 0));
+}
+
 export class Postfx {
   private composer: EffectComposer;
+  private radialBlur: RadialBlurEffect;
 
   constructor(renderer: THREE.WebGLRenderer, scene: THREE.Scene, camera: THREE.PerspectiveCamera, width: number, height: number) {
     this.composer = new EffectComposer(renderer, {
@@ -62,6 +81,15 @@ export class Postfx {
     const tone = new ToneMappingEffect({ mode: ToneMappingMode.ACES_FILMIC });
     this.composer.addPass(new EffectPass(camera, motionBlur, bloom, tone));
 
+    // RADIAL EDGE SPEED BLUR (its own pass): the scene + AO + per-pixel motion
+    // blur + bloom + tonemap are baked into the frame by now, so the radial
+    // smear streaks the finished, graded image at the periphery — exactly what
+    // a Burnout-3 boost run looks like. It's a CONVOLUTION effect (samples the
+    // input at offsets) so it can't share a pass with bloom/aberration anyway;
+    // its own EffectPass keeps the chain clean. setSpeedBlur() drives it.
+    this.radialBlur = new RadialBlurEffect();
+    this.composer.addPass(new EffectPass(camera, this.radialBlur));
+
     const vignette = new VignetteEffect({ offset: 0.28, darkness: 0.42 });
     const aberration = new ChromaticAberrationEffect({
       offset: new THREE.Vector2(0.0007, 0.0007),
@@ -75,6 +103,14 @@ export class Postfx {
 
   render(dt: number): void {
     this.composer.render(dt);
+  }
+
+  /** Per render frame: feed the player's speed (m/s) + boost flag; the radial
+   *  edge blur strength follows the speed→strength curve (subtle at cruise,
+   *  full peripheral smear near boost top speed). Presentation-only — reads
+   *  render state, writes a uniform, never the sim. */
+  setSpeedBlur(speed: number, boosting: boolean): void {
+    this.radialBlur.setStrength(speedBlurStrength(speed, boosting));
   }
 
   setSize(w: number, h: number): void {
