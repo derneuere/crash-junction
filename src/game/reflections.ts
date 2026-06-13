@@ -9,9 +9,13 @@ import * as THREE from 'three';
 // Presentation only: reads the scene, writes a texture. The sim, and so
 // replay determinism, never sees it.
 
-const CUBE_SIZE = 128; // per face — reflections are streaks on curved paint,
-// not mirrors; 128 reads sharp on a clearcoat and keeps the 6-face
-// re-render + PMREM refilter comfortably under ~2 ms
+const CUBE_SIZE = 96; // per face — reflections are streaks on curved paint,
+// not mirrors, so per-face resolution buys almost nothing here: the clearcoat
+// blurs the capture and the PMREM roughness prefilter throws away the high
+// frequencies anyway. 96 reads identically to 128 on the moving car while
+// cutting each face's fragment fill ~44% (96²/128² ≈ 0.56) across all 6 faces
+// — a pure GPU win on the dockyard's co-dominant per-frame cost. (Draw-call
+// count per face is unchanged; this is the fragment/bandwidth half.)
 
 export class PlayerReflections {
   private rt = new THREE.WebGLCubeRenderTarget(CUBE_SIZE, { type: THREE.HalfFloatType });
