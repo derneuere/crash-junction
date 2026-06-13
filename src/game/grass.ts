@@ -27,21 +27,32 @@ import type { LevelDef, GroundPatchDef } from './types';
 //   with a hard mask that rejects only genuine non-grass — sand, gravel and
 //   concrete patches, the road + shortcut corridors, building plinths, and
 //   anything seaward of the coast rim or the dune lip. drygrass (the golden
-//   headland/cliff verges) is REAL drying grass, so it keeps its blades. Then
-//   the density is DOUBLED over that corrected coverage.
+//   headland/cliff verges) is REAL drying grass, so it keeps its blades.
+//
+// ── DENSITY: MATCHED TO THE FLUFFYGRASS DEMO (2026-06-13) ────────────────────
+//   The reference https://fluffygrass.vercel.app/ scatters 8000 tuft instances
+//   over a ~2546 m² terrain → ~3.14 tufts/m² (tools/fluffy-measure.mjs proves
+//   this from its source; note island.glb has no vertex colour, so its
+//   setWeightAttribute("color") is a no-op and the scatter is UNIFORM). We now
+//   match that NEAR-FIELD density: DENSITY = 3.1 tufts/m², each a small 3-blade
+//   tuft like the demo's clump, so the lawn reads as a lush mat. The old pass
+//   sat at 0.42 (≈0.27 measured) — ~12x too sparse. Because our island is huge
+//   (not a ~55 m demo patch), full-island coverage at 3.1/m² is unaffordable to
+//   DRAW, so render-time distance LOD (see FULL_RADIUS / MIN_LOD_FRAC) keeps the
+//   near field at full demo density and thins the mid/far field hard.
 //
 // TECHNIQUE — adapted from FluffyGrass by Ebenezer (MIT):
 //   https://github.com/thebenezer/FluffyGrass
-//   The blade approach, the vertex-shader wind sway (a noise-perturbed sine
-//   that scales by (1 - uv.y) so the base stays planted while the tip whips),
-//   and the base->tip colour gradient are adapted from that project's
-//   GrassMaterial.ts. We do NOT port its code verbatim: the blade geometry is
-//   built procedurally here (FluffyGrass loads a GLB LOD), placement is a
-//   bounded deterministic-hash scatter (FluffyGrass uses MeshSurfaceSampler),
-//   and the material is grafted onto MeshStandardMaterial (FluffyGrass uses
-//   Lambert) so the blades catch this engine's PMREM sky env + fog + shadows.
-//   MIT requires keeping the copyright/attribution — see this comment + the
-//   art-grass report. License text: _ref/FluffyGrass/LICENSE (not committed).
+//   The tuft/clump geometry, the vertex-shader wind sway (a noise-perturbed
+//   sine that scales by (1 - uv.y) so the base stays planted while the tip
+//   whips), and the base->tip colour gradient are adapted from that project's
+//   GrassMaterial.ts + GrassLOD00. We do NOT port its code verbatim: the tuft
+//   geometry is built procedurally here (FluffyGrass loads a GLB LOD), placement
+//   is a bounded deterministic-hash scatter (FluffyGrass uses MeshSurfaceSampler
+//   on a small terrain), and the material is grafted onto MeshStandardMaterial
+//   (FluffyGrass uses Lambert) so the blades catch this engine's PMREM sky env +
+//   fog + shadows. MIT requires keeping the copyright/attribution — see this
+//   comment + the art-grass report. License text: _ref/FluffyGrass/LICENSE.
 //
 // PIN-SAFE / VISUAL ONLY: blades are placed at BUILD TIME (deterministic hash),
 // carry NO collider, and the wind animates off a RENDER-time clock (update(dt)
@@ -64,12 +75,18 @@ import type { LevelDef, GroundPatchDef } from './types';
 //   golden headland and cliff verges the player drifts along). The mask is a
 //   hard accept/reject, so ZERO blades sit on sand, gravel, concrete or road.
 //
-// ── DISTANCE CULLING ─────────────────────────────────────────────────────────
+// ── DISTANCE CULLING + LOD (what makes demo near-density affordable) ─────────
 //   The island is partitioned into a grid of TILES; each non-empty tile is its
-//   own InstancedMesh with its own bounding sphere. update(dt, camPos) hides a
-//   whole tile when its centre is beyond CULL_RADIUS from the camera, so the
-//   far field draws nothing. three's own frustumCulled (left on per tile) drops
-//   off-screen tiles too. The far field costs ~one cheap distance check / tile.
+//   own InstancedMesh with its own bounding sphere. update(dt, camPos):
+//     * hides a tile whose centre is beyond CULL_RADIUS (far field draws zero);
+//     * draws FULL allocated density inside FULL_RADIUS (the lush near field);
+//     * between the two, scales mesh.count down (ease-out to MIN_LOD_FRAC) so
+//       the mid/far ring thins HARD. Because placement order within a tile is
+//       hash-uniform, drawing the first K instances is an even spatial
+//       subsample — no clustering artefact from the thinning.
+//   three's own frustumCulled (left on per tile) drops off-screen tiles too.
+//   This near-full / far-thin split is what lets us match the demo's ~3.1
+//   tufts/m² in the near field on a 600 m island without drawing it everywhere.
 //
 //   * ONE InstancedMesh PER TILE = one draw call per VISIBLE tile (off-screen /
 //     far tiles issue none). Wind is entirely in the vertex shader (zero CPU
@@ -81,27 +98,62 @@ import type { LevelDef, GroundPatchDef } from './types';
 //   resolves to the single full-density path — no sparse-subset branch.
 // ============================================================================
 
-/** Per-area blade density (blades per m² of accepted grass), DOUBLED from the
- *  prior coverage's effective density. The total allocation is this × the
- *  measured grass area, capped at MAX_BLADES so a huge island can't blow the
- *  instance budget. */
-const DENSITY = 0.42;
+/** Per-area blade density (blade-tufts per m² of accepted grass).
+ *
+ *  TARGET = the FluffyGrass demo (https://fluffygrass.vercel.app/). Measured
+ *  from its source (tools/fluffy-measure.mjs replicates main.ts exactly):
+ *  8000 instances scattered by MeshSurfaceSampler over the island.glb terrain
+ *  (scaled 3x), whose grass surface is ~2546 m² of triangle area / ~3180 m² of
+ *  footprint → **~3.14 instances/m²** (3.1 over triangle area, 2.5 over the
+ *  flat footprint). Each demo instance is a 66-triangle TUFT of ~6 fanned
+ *  blades, ~0.70 m tall and ~1.6 m wide after its 5x scale — so the ground
+ *  reads as a continuous lush mat, not isolated spikes.
+ *
+ *  We match that NEAR-FIELD instance density (3.1 tufts/m²) and make our own
+ *  blade a small 2-blade cross tuft so each instance reads as full as the
+ *  demo's clump. The prior pass sat at 0.42 (≈0.27 measured) — ~12x too sparse.
+ *
+ *  Allocation = DENSITY × accepted grass area, capped at MAX_BLADES. The island
+ *  is huge (~186k m² of grass), so full island coverage at 3.1/m² would need
+ *  ~580k tufts; the cap bounds that, and render-time distance LOD (see
+ *  FULL_RADIUS/MIN_LOD_FRAC) keeps the DRAWN count affordable — full demo
+ *  density in the near field, thinning to a cheap far field. */
+const DENSITY = 3.1;
 
-/** Hard ceiling on allocated blades across the whole island, so the field
- *  stays one cheap pass regardless of map size. The verges are tile-culled to
- *  CULL_RADIUS, so only a fraction ever draws at once. */
-const MAX_BLADES = 60000;
+/** Hard ceiling on allocated blade-tufts across the whole island. Sized so the
+ *  near + mid field around the track can be fully demo-dense while the build
+ *  cost stays a one-time ~0.3 s / ~40 MB pass (measured). Render-time LOD makes
+ *  only a fraction of the allocated tufts DRAW at once. */
+const MAX_BLADES = 600000;
 
 /** Distance-cull radius (m): a tile whose centre is farther than this from the
- *  live camera is hidden. Sized so the verges read all the way to the scene
- *  fog (Game's gantry fog is 90..340 m), keeping the near + mid field lush
- *  while the far island drops out before it would pop through the fog. */
+ *  live camera draws nothing. Sized so the verges read out toward the scene fog
+ *  (Game's gantry fog is 90..340 m). Between FULL_RADIUS and here the per-tile
+ *  LOD thins the draw, so the far edge is cheap. */
 const CULL_RADIUS = 200;
 
-/** Spatial tile size (m) for the culling grid. A 32 m tile over the ~600 m
- *  island gives a ~19 x 17 grid — coarse enough that per-tile overhead is
- *  trivial, fine enough that culling and three's frustum test are meaningful. */
-const TILE_SIZE = 32;
+/** Inside this radius (m) a tile draws its FULL allocated density — the demo's
+ *  ~3.1 tufts/m². This is the "near field" the player sees in detail; it must
+ *  read exactly as lush as the demo. The demo's whole patch is only ~55 m, so
+ *  50 m of full density already covers everything the eye resolves as
+ *  individual tufts. Beyond it the per-tile LOD ramps the drawn fraction down
+ *  to MIN_LOD_FRAC at CULL_RADIUS, so the mid/far field is cheap. Keeping this
+ *  tight (vs the 200 m cull) is what makes matching the demo's near-density
+ *  affordable on our huge island. */
+const FULL_RADIUS = 50;
+
+/** Floor on the per-tile drawn fraction at the cull edge. A distant-but-visible
+ *  tile draws this fraction of its tufts (uniformly thinned — hash placement is
+ *  spatially uniform, so drawing the first K instances is an even subsample).
+ *  Low enough that the 120..200 m ring is cheap, high enough that the field
+ *  doesn't visibly terrace into a bald ring before the fog hides it. */
+const MIN_LOD_FRAC = 0.04;
+
+/** Spatial tile size (m) for the culling + LOD grid. A 24 m tile over the
+ *  ~600 m island gives a ~25 x 22 grid — fine enough that the distance LOD
+ *  steps smoothly across the field and three's frustum test is tight, coarse
+ *  enough that per-tile overhead stays trivial. */
+const TILE_SIZE = 24;
 
 // ── ROAD/SURFACE MASK GEOMETRY (read from the level; never mutated) ─────────
 
@@ -333,34 +385,60 @@ function isGrass(x: number, z: number, mask: SurfaceMask): boolean {
   return true;
 }
 
-/** Build ONE tapered grass blade as a thin vertical strip. uv.y runs 0 at the
- *  base (planted) -> 1 at the tip (where the wind sway is full and the colour
- *  is lightest). A handful of height segments keeps the wind bend smooth. The
- *  blade narrows to a point so the silhouette reads as grass, not a quad. */
+/** Build ONE grass TUFT: a small fan of CROSSED tapered blades sharing an
+ *  origin, mirroring the FluffyGrass demo's clump geometry (its LOD00 is a
+ *  ~6-blade fan, not a single strip) so each placed instance reads as a full
+ *  bushy clump and the dense field looks like a lush mat rather than rows of
+ *  isolated spikes. We use a 3-blade fan at 3 yaw angles — 3x the silhouette
+ *  of a single strip at the same instance count, still only 12 triangles.
+ *
+ *  uv.y runs 0 at the base (planted) -> 1 at the tip (where the wind sway is
+ *  full and the colour is lightest). Each blade narrows to a point so the
+ *  silhouette reads as grass. The blades are slightly splayed and offset so the
+ *  tuft has volume from any view angle. */
 function makeBladeGeometry(): THREE.BufferGeometry {
   const SEGMENTS = 4;
   const HEIGHT = 1; // unit blade; per-instance scale sizes it in metres
-  const HALF_W = 0.07; // base half-width (m at unit scale) — fuller silhouette
+  const HALF_W = 0.06; // base half-width (m at unit scale)
   const pos: number[] = [];
   const uv: number[] = [];
   const nrm: number[] = [];
   const idx: number[] = [];
-  for (let s = 0; s <= SEGMENTS; s++) {
-    const v = s / SEGMENTS;
-    const y = v * HEIGHT;
-    // taper to a point; a gentle curve keeps a little width up high so mid
-    // blade isn't a needle, then pinches at the very tip
-    const w = HALF_W * (1 - v) * (1 - v * 0.25);
-    // left, right
-    pos.push(-w, y, 0, w, y, 0);
-    uv.push(0, v, 1, v);
-    // face the +z hemisphere; the wind/lighting shader will treat both sides
-    nrm.push(0, 0, 1, 0, 0, 1);
+
+  // BLADES_PER_TUFT crossed strips fanned around the tuft's vertical axis, each
+  // with a small lateral offset + a forward lean so the clump has body.
+  const BLADES_PER_TUFT = 3;
+  for (let b = 0; b < BLADES_PER_TUFT; b++) {
+    const ang = (b / BLADES_PER_TUFT) * Math.PI; // 0, 60, 120° (strip is 2-sided)
+    const ca = Math.cos(ang);
+    const sa = Math.sin(ang);
+    // lateral root offset so the three blades don't all sprout from one point
+    const ox = ca * 0.03;
+    const oz = sa * 0.03;
+    // each blade leans outward a touch as it rises (lean grows with height)
+    const leanX = ca * 0.12;
+    const leanZ = sa * 0.12;
+    const base = pos.length / 3;
+    for (let s = 0; s <= SEGMENTS; s++) {
+      const v = s / SEGMENTS;
+      const y = v * HEIGHT;
+      const w = HALF_W * (1 - v) * (1 - v * 0.25); // taper to a point
+      // strip runs along the blade's own width axis (perpendicular to its lean)
+      const wx = -sa * w;
+      const wz = ca * w;
+      const lx = ox + leanX * v * v;
+      const lz = oz + leanZ * v * v;
+      pos.push(lx - wx, y, lz - wz, lx + wx, y, lz + wz);
+      uv.push(0, v, 1, v);
+      // normal faces along the lean direction so lighting reads per blade
+      nrm.push(ca, 0.2, sa, ca, 0.2, sa);
+    }
+    for (let s = 0; s < SEGMENTS; s++) {
+      const a = base + s * 2;
+      idx.push(a, a + 1, a + 2, a + 1, a + 3, a + 2);
+    }
   }
-  for (let s = 0; s < SEGMENTS; s++) {
-    const a = s * 2;
-    idx.push(a, a + 1, a + 2, a + 1, a + 3, a + 2);
-  }
+
   const geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(pos), 3));
   geo.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(uv), 2));
@@ -401,12 +479,14 @@ export interface GrassPalette {
   tint: number;
 }
 
-/** One spatial tile of the island: an InstancedMesh + its world-space centre,
- *  for the distance cull. */
+/** One spatial tile of the island: an InstancedMesh + its world-space centre
+ *  (for the distance cull) + its full allocated instance count (for the
+ *  distance LOD, which scales mesh.count down for far tiles). */
 interface GrassTile {
   mesh: THREE.InstancedMesh;
   cx: number;
   cz: number;
+  full: number;
 }
 
 /**
@@ -546,7 +626,19 @@ export function buildGrass(scene: THREE.Scene, level: LevelDef): GrassField {
   // island can't blow MAX_BLADES (the loop stops once it places MAX_BLADES).
   const candidates = Math.min(Math.ceil(bboxArea * DENSITY), MAX_BLADES * 6);
 
-  const tileBlades = new Map<string, THREE.Matrix4[]>();
+  // Accept candidates and compose each into a 16-float matrix, BINNED by tile.
+  // We accumulate into per-tile growable Float32 chunks (no per-blade Matrix4
+  // clone — at demo density that would be hundreds of thousands of throwaway
+  // objects). The candidate index `i` is hash-scattered uniformly across the
+  // bbox, so within any tile the instances arrive in spatially-random order —
+  // which is exactly what the render-time LOD relies on: drawing the FIRST K
+  // instances of a tile is then an even, uniform subsample of that tile.
+  interface Bin {
+    data: number[]; // flat 16-float matrices
+    sumX: number;
+    sumZ: number;
+  }
+  const bins = new Map<string, Bin>();
   const m = new THREE.Matrix4();
   const q = new THREE.Quaternion();
   const yAxis = new THREE.Vector3(0, 1, 0);
@@ -574,14 +666,15 @@ export function buildGrass(scene: THREE.Scene, level: LevelDef): GrassField {
       if (hash01(i * 2.0 + 333.1) > lipKeep) continue;
     }
 
-    // size: taller/lusher inland, shrinking as it nears the SW sand so that
-    // transition reads as the lawn thinning out, not a hard edge. Away from the
-    // lip (sd <= -6) thin = 0 -> full height, so the verges round the lap are
-    // full-height grass. Blades sized to read at driving distance.
+    // size: at demo density the field reads as a mat, so blades are SHORTER +
+    // more varied than the old sparse pass (a dense field of tall blades turns
+    // into a solid green wall). The demo tuft is ~0.7 m; ours jitter 0.45..1.0 m
+    // and taper toward the SW sand. Width jitter keeps each tuft's silhouette
+    // varied so the dense field shimmers instead of reading as one surface.
     const thin = Math.max(0, Math.min(1, (sd + 6) / 6)); // 0 inland -> 1 at lip
-    const baseH = 0.7 + hash01(i * 3.0 + 7.1) * 0.85; // 0.7..1.55 m tall
-    const h = baseH * (1 - thin * 0.5);
-    const w = 0.9 + hash01(i * 3.0 + 51.9) * 0.7; // width jitter (fuller silhouette)
+    const baseH = 0.45 + hash01(i * 3.0 + 7.1) * 0.55; // 0.45..1.0 m tall
+    const h = baseH * (1 - thin * 0.45);
+    const w = 0.75 + hash01(i * 3.0 + 51.9) * 0.6; // 0.75..1.35 width jitter
     s.set(w, h, 1);
 
     pos.set(x, 0, z);
@@ -589,49 +682,52 @@ export function buildGrass(scene: THREE.Scene, level: LevelDef): GrassField {
     q.setFromAxisAngle(yAxis, yaw);
     m.compose(pos, q, s);
 
-    // bin into its spatial tile (for the distance cull)
+    // bin into its spatial tile (for the distance cull + LOD)
     const tcol = Math.min(cols - 1, Math.floor((x - minX) / TILE_SIZE));
     const trow = Math.floor((z - minZ) / TILE_SIZE);
     const key = `${tcol},${trow}`;
-    let bucket = tileBlades.get(key);
-    if (!bucket) {
-      bucket = [];
-      tileBlades.set(key, bucket);
+    let bin = bins.get(key);
+    if (!bin) {
+      bin = { data: [], sumX: 0, sumZ: 0 };
+      bins.set(key, bin);
     }
-    bucket.push(m.clone());
+    const e = m.elements;
+    for (let k = 0; k < 16; k++) bin.data.push(e[k]);
+    bin.sumX += x;
+    bin.sumZ += z;
     placed++;
   }
 
   // ── REALISE TILES ──────────────────────────────────────────────────────
   // one InstancedMesh per non-empty tile; each carries its own bounding sphere
-  // so three's frustumCulled drops off-screen tiles, and we distance-cull whole
-  // tiles by their centre each frame.
+  // so three's frustumCulled drops off-screen tiles, and we distance-cull +
+  // distance-LOD whole tiles by their centre each frame. `full` caches the
+  // tile's allocated instance count so the LOD can scale mesh.count off it.
   const tiles: GrassTile[] = [];
   const meshes: THREE.InstancedMesh[] = [];
-  for (const [, bucket] of tileBlades) {
-    const n = bucket.length;
+  for (const [, bin] of bins) {
+    const n = bin.data.length / 16;
     if (n === 0) continue;
+    const arr = new Float32Array(bin.data); // contiguous instance-matrix buffer
     const mesh = new THREE.InstancedMesh(geo, mat, n);
+    mesh.instanceMatrix.array.set(arr);
+    mesh.instanceMatrix.needsUpdate = true;
     mesh.castShadow = false; // self-shadowing thousands of blades is a perf trap
     mesh.receiveShadow = true;
     mesh.frustumCulled = true; // off-screen tiles skipped by three's frustum test
     mesh.name = 'cj-grass-blades';
-    let sumX = 0;
-    let sumZ = 0;
-    for (let k = 0; k < n; k++) {
-      mesh.setMatrixAt(k, bucket[k]);
-      sumX += bucket[k].elements[12];
-      sumZ += bucket[k].elements[14];
-    }
-    mesh.instanceMatrix.needsUpdate = true;
     mesh.computeBoundingSphere(); // tight sphere -> accurate frustum cull
-    mesh.count = n; // CINE-only: always full density
+    mesh.count = n; // starts full; the render-time LOD scales this each frame
     scene.add(mesh);
     meshes.push(mesh);
-    tiles.push({ mesh, cx: sumX / n, cz: sumZ / n });
+    tiles.push({ mesh, cx: bin.sumX / n, cz: bin.sumZ / n, full: n });
   }
 
   const cullR2 = CULL_RADIUS * CULL_RADIUS;
+  const fullR2 = FULL_RADIUS * FULL_RADIUS;
+  // LOD ramps the drawn fraction from 1 at FULL_RADIUS down to MIN_LOD_FRAC at
+  // CULL_RADIUS. Precompute the span so update() is a couple of mults per tile.
+  const lodSpan = Math.max(1, CULL_RADIUS - FULL_RADIUS);
   const allocated = placed;
   let tilesDrawn = tiles.length; // tiles inside the cull radius last update
 
@@ -639,22 +735,49 @@ export function buildGrass(scene: THREE.Scene, level: LevelDef): GrassField {
     meshes,
     update(dt, camPos) {
       uTime.value += dt;
-      // distance-cull whole tiles: hide any tile whose centre is beyond the
-      // cull radius from the live camera. Pure visibility flip — pin-safe,
+      // DISTANCE CULL + LOD per tile. Pure visibility/count flip — pin-safe,
       // reads only the render-time camera position. (Frustum culling of
       // on-screen-but-off-frustum tiles is handled by three via frustumCulled.)
+      //   * beyond CULL_RADIUS -> hidden (draws nothing).
+      //   * within FULL_RADIUS -> full allocated density (the demo's ~3.1/m²,
+      //     the lush near field the player sees in detail).
+      //   * between the two -> mesh.count scaled by a fraction ramping 1 ->
+      //     MIN_LOD_FRAC, so the mid/far field thins out smoothly and stays
+      //     cheap. Drawing the FIRST K instances is an even subsample because
+      //     placement order is hash-uniform within each tile.
       if (camPos) {
         let drawn = 0;
         for (const t of tiles) {
           const dx = t.cx - camPos.x;
           const dz = t.cz - camPos.z;
-          const vis = dx * dx + dz * dz <= cullR2;
-          t.mesh.visible = vis;
-          if (vis) drawn++;
+          const d2 = dx * dx + dz * dz;
+          if (d2 > cullR2) {
+            t.mesh.visible = false;
+            continue;
+          }
+          t.mesh.visible = true;
+          drawn++;
+          if (d2 <= fullR2) {
+            t.mesh.count = t.full; // full demo density in the near field
+          } else {
+            const d = Math.sqrt(d2);
+            // EASE-OUT falloff: frac = MIN + (1-MIN)*(1-td)². At td=0 (just past
+            // FULL_RADIUS) frac=1; it drops FAST through the near-mid ring
+            // (td=0.5 -> ~0.27) then flattens toward MIN_LOD_FRAC at the cull
+            // edge. The fast early drop is what keeps the DRAWN instance budget
+            // bounded while the near field stays at full demo density.
+            const td = (d - FULL_RADIUS) / lodSpan; // 0..1
+            const inv = 1 - td;
+            const frac = MIN_LOD_FRAC + (1 - MIN_LOD_FRAC) * inv * inv;
+            t.mesh.count = Math.max(1, Math.round(t.full * frac));
+          }
         }
         tilesDrawn = drawn;
       } else {
-        for (const t of tiles) t.mesh.visible = true;
+        for (const t of tiles) {
+          t.mesh.visible = true;
+          t.mesh.count = t.full;
+        }
         tilesDrawn = tiles.length;
       }
     },

@@ -238,6 +238,27 @@ try {
       let inView = 0;
       let tilesDrawn = 0;
       let activeBlades = 0;
+      // NEAR-FIELD DENSITY: count blades whose BASE is within R metres of the
+      // camera's ground point (x,z) and that are in the frustum. Dividing by the
+      // grass-occupied area of that near disc gives blades/m² we can compare to
+      // the FluffyGrass demo's ~3.14 blades/m². We don't know the grass area
+      // inside the disc here, so we report the disc-density (raw, includes any
+      // road/sand gaps) AND occupancy-corrected via a tile-coverage estimate:
+      // tiles within R contribute their actual blade footprint, so summing
+      // near-blades over the swept disc area is a fair lower bound on true
+      // grass density. The headline is nearDensityGrass below.
+      const NEAR_R = 35; // m — comparable to the demo's ~55 m patch half-extent
+      const nearR2 = NEAR_R * NEAR_R;
+      const camGX = cam[0];
+      const camGZ = cam[2];
+      let near = 0; // blades within NEAR_R of camera ground point (any frustum)
+      let nearInView = 0; // ...and in the frustum
+      // occupancy: bucket near blades into 3 m cells to estimate the grass-
+      // covered area of the disc (cells with ≥1 blade × cellArea), so density
+      // ignores the road/sand/sea holes the demo's small patch doesn't have.
+      // 3 m cells are tight enough not to over-credit grass area at our density.
+      const CELL = 3;
+      const occ = new Set();
       for (const mesh of meshes) {
         if (!mesh.visible) continue; // distance-culled tile draws nothing
         tilesDrawn++;
@@ -253,9 +274,29 @@ try {
           // grass blades stand up to ~2.5 m; sample the mid-height so a blade
           // whose base is just below the bottom plane but body is in view counts
           if (inFrustum(x, y + 0.8, z)) inView++;
+          const ddx = x - camGX;
+          const ddz = z - camGZ;
+          if (ddx * ddx + ddz * ddz <= nearR2) {
+            near++;
+            occ.add(`${Math.floor(x / CELL)},${Math.floor(z / CELL)}`);
+            if (inFrustum(x, y + 0.8, z)) nearInView++;
+          }
         }
       }
-      return { inView, tilesDrawn, tilesTotal: meshes.length, activeBlades };
+      const discArea = Math.PI * nearR2;
+      const grassArea = Math.max(CELL * CELL, occ.size * CELL * CELL); // m² of cells holding grass
+      const nearDensityDisc = near / discArea; // raw, includes road/sand holes
+      const nearDensityGrass = near / grassArea; // grass-only blades/m²
+      return {
+        inView,
+        tilesDrawn,
+        tilesTotal: meshes.length,
+        activeBlades,
+        near,
+        nearInView,
+        nearDensityDisc: Math.round(nearDensityDisc * 100) / 100,
+        nearDensityGrass: Math.round(nearDensityGrass * 100) / 100,
+      };
     }
 
     for (const [name, pose] of Object.entries(posesArg)) {
@@ -271,13 +312,16 @@ try {
   console.log('');
   const names = Object.keys(results.perPose);
   const pad = Math.max(...names.map((n) => n.length));
-  console.log(`  ${'pose'.padEnd(pad)}  blades-in-view  tiles-drawn  active-in-drawn`);
+  console.log(`  ${'pose'.padEnd(pad)}  in-view  near(35m)  dens(grass)  dens(disc)  tiles`);
   for (const n of names) {
     const r = results.perPose[n];
     console.log(
-      `  ${n.padEnd(pad)}  ${String(r.inView).padStart(13)}  ${String(`${r.tilesDrawn}/${r.tilesTotal}`).padStart(11)}  ${String(r.activeBlades).padStart(15)}`,
+      `  ${n.padEnd(pad)}  ${String(r.inView).padStart(7)}  ${String(r.near).padStart(9)}  ${String(r.nearDensityGrass).padStart(11)}  ${String(r.nearDensityDisc).padStart(10)}  ${`${r.tilesDrawn}/${r.tilesTotal}`}`,
     );
   }
+  console.log('');
+  console.log('  dens(grass) = near-field blades / grass-occupied area (blades/m²) — compare to FluffyGrass demo ~3.14');
+  console.log('  dens(disc)  = near-field blades / full 35 m disc area (includes road/sand/sea holes)');
   console.log('');
   // machine-readable line for diffing before/after
   console.log('JSON ' + JSON.stringify(results));
