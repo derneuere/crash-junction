@@ -5,6 +5,7 @@ import type { LevelDef } from './types';
 import type { PhysicsContext } from './physics';
 import { BUILTINS } from './builtins';
 import { applyBakedAO, aoKeyForUrl } from './ao';
+import { PropInstancer } from './propinstancer';
 
 // Level props: GLB set dressing (gantry cranes, containers, rocks) with
 // hand-placed box colliders. The split is the determinism contract, same as
@@ -57,34 +58,40 @@ function loadPropScene(url: string): Promise<THREE.Group> {
   return p;
 }
 
-/** Multiply every opaque material's base color toward the tint, cloning per
- *  tinted instance so the cached template (and untinted siblings) keep
- *  their colors. Transparent and glass-named materials are skipped — a
- *  green-tinted container shouldn't get green windows. */
-function applyTint(root: THREE.Group, tint: number): void {
-  const t = new THREE.Color(tint);
-  const cloned = new Map<THREE.Material, THREE.Material>();
-  root.traverse((o) => {
-    const mesh = o as THREE.Mesh;
-    if (!mesh.isMesh) return;
-    const swap = (m: THREE.Material): THREE.Material => {
-      if (m.transparent || /glass|window/i.test(m.name)) return m;
-      let c = cloned.get(m);
-      if (!c) {
-        c = m.clone(); // clone() deep-copies userData, so night tags survive
-        (c as THREE.MeshStandardMaterial).color?.multiply(t);
-        cloned.set(m, c);
-      }
-      return c;
-    };
-    mesh.material = Array.isArray(mesh.material) ? mesh.material.map(swap) : swap(mesh.material);
-  });
-}
+// TINT IS NOW A PER-INSTANCE COLOR, not a per-prop material clone.
+//
+// The old path clone()'d each prop's material and multiplied its base colour by
+// the tint. That gave every distinctly-tinted container its OWN material, which
+// fragmented the instancer (one InstancedMesh per geometry+material) so a
+// container row in five weathered tints became five tiny batches. Instead we
+// keep the ONE shared base material and carry the tint as the instance's
+// per-instance colour (InstancedMesh.instanceColor) — three multiplies the
+// material colour by it exactly as the clone did (`colormap · matColor · tint`),
+// so the look is identical while ALL same-geometry containers, every tint,
+// collapse into one instanced draw per region.
+//
+// The glass/window skip survives: applyTint's rule was "don't tint transparent
+// or glass-named materials". The instancer reproduces it by forcing those
+// sub-meshes' instance colour to white regardless of the prop's tint (see
+// propinstancer.ts), so a green-tinted container still gets clear windows.
+//
+// White (0xffffff) is the identity multiplier, so untinted props need no
+// special case — they simply carry a white instance colour.
 
 /** Build every PropDef of the level: colliders synchronously (call this
  *  before the first physics step), visuals async. collider 'none' or
  *  absent = pure decor, no body. */
 export function loadLevelProps(scene: THREE.Scene, phys: PhysicsContext, level: LevelDef): void {
+  // The DRAW-CALL BATCHER (propinstancer.ts): every positioned prop visual is
+  // harvested into this collector instead of being added to the scene one mesh
+  // at a time. Once all the GLBs have streamed in we flush() — collapsing the
+  // ~300 hand-placed props' repeated geometry (containers, rocks, crates,
+  // builtins, …) into per-region instanced draws. Identical scene, far fewer
+  // draw calls; that win then multiplies ×6 through the live cube reflection.
+  // PRESENTATION ONLY — colliders below are untouched (the determinism contract).
+  const instancer = new PropInstancer(scene);
+  const visuals: Promise<unknown>[] = [];
+
   for (const def of level.props ?? []) {
     if (def.collider && def.collider !== 'none') {
       const { hx, hy, hz } = def.collider;
@@ -98,33 +105,47 @@ export function loadLevelProps(scene: THREE.Scene, phys: PhysicsContext, level: 
       phys.wallDirs.set(body.id, { x: Math.sin(def.yaw), z: Math.cos(def.yaw) });
     }
 
-    void loadPropScene(def.url)
-      .then((tpl) => {
-        const inst = tpl.clone(true);
-        if (def.tint !== undefined) applyTint(inst, def.tint);
-        inst.position.set(def.x, def.y ?? 0, def.z);
-        inst.rotation.y = def.yaw;
-        inst.scale.setScalar(def.scale);
-        inst.traverse((o) => {
-          const m = o as THREE.Mesh;
-          if (m.isMesh) m.castShadow = m.receiveShadow = true;
-        });
-        // baked ambient occlusion (tools/bake-ao.mjs → public/baked-ao.json):
-        // per-prototype self-occlusion darkening dropped into a vertex `aoVert`
-        // attribute and folded into ONLY the indirect/ambient light (see
-        // ao.ts). Geometric, so the one bake reads identically day/dusk/night,
-        // and ambient-only so it deepens the boxes' corners and the crane
-        // lattice without re-darkening what the screen-space N8AO already
-        // catches. Keyed off the prop URL; no-op when no bake covers it.
-        applyBakedAO(inst, aoKeyForUrl(def.url));
-        scene.add(inst);
-      })
-      .catch((err) => {
-        // visuals are best-effort: a missing GLB leaves the (already live)
-        // collider as an invisible wall, never a broken sim
-        console.error(`[props] failed to load ${def.url}`, err);
-      });
+    visuals.push(
+      loadPropScene(def.url)
+        .then((tpl) => {
+          const inst = tpl.clone(true);
+          inst.position.set(def.x, def.y ?? 0, def.z);
+          inst.rotation.y = def.yaw;
+          inst.scale.setScalar(def.scale);
+          inst.traverse((o) => {
+            const m = o as THREE.Mesh;
+            if (m.isMesh) m.castShadow = m.receiveShadow = true;
+          });
+          // baked ambient occlusion (tools/bake-ao.mjs → public/baked-ao.json):
+          // per-prototype self-occlusion darkening dropped into a vertex `aoVert`
+          // attribute and folded into ONLY the indirect/ambient light (see
+          // ao.ts). Geometric, so the one bake reads identically day/dusk/night,
+          // and ambient-only so it deepens the boxes' corners and the crane
+          // lattice without re-darkening what the screen-space N8AO already
+          // catches. Keyed off the prop URL; no-op when no bake covers it.
+          // Runs on the cloned instance BEFORE batching so the shared
+          // geometry's aoVert attribute and the material's AO shader patch are
+          // in place when the InstancedMesh inherits them (tint is no longer a
+          // material clone — it rides as the per-instance colour, so AO patches
+          // the one shared base material exactly once).
+          applyBakedAO(inst, aoKeyForUrl(def.url));
+          // batch instead of scene.add: collect this positioned prop's meshes
+          // (world matrices folded in) for the per-region instanced flush below.
+          // tint rides along as a per-instance colour (see propinstancer.ts).
+          instancer.collect(inst, def.tint);
+        })
+        .catch((err) => {
+          // visuals are best-effort: a missing GLB leaves the (already live)
+          // collider as an invisible wall, never a broken sim
+          console.error(`[props] failed to load ${def.url}`, err);
+        }),
+    );
   }
+
+  // once every prop visual has resolved (or failed), emit the batched draws.
+  // Ordering is pure presentation — colliders already exist — so awaiting the
+  // whole set here can't touch determinism.
+  void Promise.all(visuals).then(() => instancer.flush());
 }
 
 const UP = new CANNON.Vec3(0, 1, 0);
