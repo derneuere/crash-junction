@@ -6,7 +6,7 @@ import { LEVELS, type LevelId } from './game/levels';
 import { PLAYER_CARS, setPlayerCar, type PlayerCarId } from './game/models';
 import { GameState } from './game/types';
 import { parseReplayFile, type ReplayFile } from './game/replay';
-import type { CashFloatData, RaceStanding, ReportData } from './game/events';
+import type { BoostState, CashFloatData, RaceStanding, ReportData } from './game/events';
 import { Hud, type FlashState } from './ui/Hud';
 import { DebugOverlay } from './ui/DebugOverlay';
 import {
@@ -29,7 +29,7 @@ export default function App() {
   const [cash, setCash] = useState<CashFloatData[]>([]);
   const [crashbreaker, setCrashbreaker] = useState(0);
   const [multiplier, setMultiplier] = useState(1);
-  const [boost, setBoost] = useState(1);
+  const [boost, setBoost] = useState<BoostState>({ fill: 0, segments: 1, maxSegments: 4, burnout: false, chain: 0 });
   const [race, setRace] = useState<RaceStanding | null>(null);
   const [replaying, setReplaying] = useState(false);
   const [cineCam, setCineCam] = useState(false);

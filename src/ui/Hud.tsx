@@ -1,7 +1,7 @@
 import { GameState, type ModeKind } from '../game/types';
 import type { TimeOfDay } from '../game/daynight';
 import type { GfxMode } from '../game/Game';
-import type { CashFloatData, RaceStanding, ReportData } from '../game/events';
+import type { BoostState, CashFloatData, RaceStanding, ReportData } from '../game/events';
 import type { LevelId } from '../game/levels';
 import type { PlayerCarId } from '../game/models';
 import { BoostBar, CrashbreakerBar, RaceChip, RaceTagline, ScoreChip } from './chips';
@@ -21,7 +21,7 @@ interface HudProps {
   goldTarget: number;
   levelId: LevelId;
   multiplier: number;
-  boost: number; // 0..1
+  boost: BoostState; // segmented boost meter
   flash: FlashState | null;
   report: ReportData | null;
   cash: CashFloatData[];

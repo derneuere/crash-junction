@@ -22,7 +22,7 @@ npm test         # replay regression suite (needs installed Chrome or Edge)
 | Click / Space | Launch |
 | ↑ / W | Accelerate |
 | ← → / A D | Steer |
-| Space / Shift | **Boost** (meter refills from drifting and airtime) |
+| Space / Shift | **Boost** — earned, not free. The engine alone cruises; boost unlocks the top-speed band. Fill the bar by **dangerous driving** (drifting, airtime, near-missing traffic); a full bar tips into a sustained **Burnout** (faster still). **Takedowns extend the bar one segment (1×→4×, B3-style) and instantly refill it** — chain them. Crashing collapses it back to 1×. |
 | ↓ / S | Brake — **tap while steering to drift**; the slide holds while you steer |
 | Arrow keys (after crashing) | Aftertouch — steer the wreck mid-flight |
 | **E** | **Crashbreaker** — detonate your wreck (1 charge) |

@@ -1,5 +1,13 @@
 import * as CANNON from 'cannon-es';
-import { FIXED_DT, LAUNCH_SPEED } from './constants';
+import {
+  BOOST_MAX_SEGMENTS,
+  BOOST_SEGMENT_SECS,
+  BOOST_START_SEGMENTS,
+  BURNOUT_SPEED,
+  CRUISE_SPEED,
+  FIXED_DT,
+  LAUNCH_SPEED,
+} from './constants';
 import type { Actor } from './types';
 import type { HeightSampler } from './suspension';
 
@@ -28,9 +36,21 @@ const _qTilt = new CANNON.Quaternion();
 //  - boost: +8 m/s² sustained (BoostAcceleration mean), an initial kick of
 //    +15 m/s² for up to 0.75 s below ~42 m/s (BoostKickAcceleration /
 //    BoostKickMinTime / BoostKickMaxStartSpeed), and a raised top speed
-//    (MaxBoostSpeed sits ~+20 mph over MaxSpeed). 5-unit bar (GamePlayData
-//    boost Capacity default). Refill-from-drift/airtime rates are invented —
-//    BP keeps earn rules in code (Stunt-type behavior, ECarType 2).
+//    (MaxBoostSpeed sits ~+20 mph over MaxSpeed). Refill-from-drift/airtime
+//    rates are invented — BP keeps earn rules in code (Stunt-type behavior).
+//
+// BOOST ECONOMY (Burnout 3 / Revenge "aggressive boost", modelled here):
+//  - The engine ALONE tops out at CRUISE_SPEED; the top-speed band is gated
+//    behind boost, so boost is the reward, not the default route to fast.
+//  - The bar is EARNED by dangerous driving: drifting (deeper = faster),
+//    airtime, and near-misses/oncoming traffic (Game feeds nearMiss()). It is
+//    NOT free — it starts empty-ish and you spend it down while burning.
+//  - The bar is segmented (B3's 1x→4x). Each TAKEDOWN extends it one segment
+//    AND instantly refills the whole bar (addSegment(); the chained reward
+//    loop). Crashing resets it to one segment.
+//  - A FULL bar lets you tip into a sustained "Burnout": boost burns stronger
+//    and reaches BURNOUT_SPEED. Refilling to full again mid-Burnout (keeping
+//    the dangerous driving up) CHAINS another Burnout — the B3 loop.
 
 // locks run ×1.5 over the BP-derived values (10°/1.6°) — hands-on verdict:
 // authentic locks made ramming at speed nearly impossible on these tight maps
@@ -74,27 +94,42 @@ const PITCH_PER_ACCEL = 0.0045; // squat/dive vs longitudinal accel
 const PITCH_MIN = -0.05; // brake dive ~3°
 const PITCH_MAX = 0.035; // boost squat ~2°
 
-const TOP_SPEED = LAUNCH_SPEED;
-const BOOST_TOP = 48;
+// Three speed tiers (Burnout risk/reward): engine-only CRUISE, regular boost
+// to BOOST_TOP, and the full-bar "Burnout" to BURNOUT_SPEED (the reward
+// ceiling). CRUISE sits a clear step below boosted speed so the engine alone
+// never feels as fast as earning + burning boost.
+const TOP_CRUISE = CRUISE_SPEED; // engine-only ceiling (31)
+const BOOST_TOP = LAUNCH_SPEED; // regular-boost ceiling (39 — the familiar fast)
+const BURNOUT_TOP = BURNOUT_SPEED; // sustained-Burnout ceiling (44 — the reward)
+const TOP_HARD = 48; // absolute speed clamp (e.g. downhill carry)
 
 // gears: BP runs up to 6 ratios (GearRatios1/2 vec slots) shifting up at
 // 4500–7900 RPM. GearChangeTime is 0 in every retail vault — the felt
 // "step" comes from torque×ratio dropping at each shift — but we keep a
-// tiny torque gap so the steps read on a keyboard. Gear 6 is the boost
-// band (MaxBoostSpeed sits ~20 mph over MaxSpeed).
-const GEAR_TOPS = [7, 13, 21, 29, TOP_SPEED, BOOST_TOP]; // m/s ceiling per gear
+// tiny torque gap so the steps read on a keyboard. The top gears are the
+// boost band (MaxBoostSpeed sits over MaxSpeed; the engine alone tops out
+// in gear 5 at CRUISE).
+const GEAR_TOPS = [7, 13, 21, 29, TOP_CRUISE, BURNOUT_TOP]; // m/s ceiling per gear
 const GEAR_ACCEL = [23, 20.5, 17.5, 15, 13, 10.5]; // m/s² of engine shove per gear
 const SHIFT_CUT = 0.12; // s of torque gap on an upshift
 
-const BOOST_ACCEL = 8;
+const BOOST_ACCEL = 8; // regular-boost sustained accel
+const BURNOUT_ACCEL = 11; // Burnout-state accel — markedly stronger
 const KICK_ACCEL = 15;
 const KICK_TIME = 0.75;
 const KICK_BELOW = 42;
 const BRAKE_DECEL = 26;
 const COAST_DRAG = 4.5; // m/s² rolloff with no throttle
-export const BOOST_CAP = 5; // seconds of full burn
-const REFILL_DRIFT = 0.45; // per s while drifting (invented)
-const REFILL_AIR = 0.6; // per s airborne (invented)
+
+// ---- boost economy (earned + segmented; see header) ----
+// One full segment is BOOST_SEGMENT_SECS of burn; the bar holds `segments` of
+// them. BOOST_CAP is kept as the *starting* capacity (one segment) so callers
+// that imported it as the fraction reference still read a sane base.
+export const BOOST_CAP = BOOST_SEGMENT_SECS * BOOST_START_SEGMENTS;
+const REFILL_DRIFT = 0.55; // per s while drifting at full slip (deeper = faster)
+const REFILL_AIR = 0.7; // per s airborne
+const REFILL_NEARMISS = 0.45; // per near-miss/oncoming event (Game feeds it)
+const BURNOUT_ENTER = 0.999; // bar fraction that arms the sustained Burnout
 
 export interface ControlInput {
   steer: number; // -1..1
@@ -113,7 +148,16 @@ export class PlayerControl {
   speed = 0;
   drifting = false;
   boosting = false;
-  boostMeter = BOOST_CAP;
+  // ---- boost economy ----
+  // Start with the first segment charged (B3 starts a run WITH boost in the
+  // bar): you can boost off the line, but it DRAINS and must be re-earned —
+  // that spend/earn loop is the change, not "begin empty".
+  boostMeter = BOOST_SEGMENT_SECS * BOOST_START_SEGMENTS;
+  boostSegments = BOOST_START_SEGMENTS; // bar length in segments (B3 1x→4x)
+  burnout = false; // sustained Burnout state (full-bar tip-in)
+  burnoutChain = 0; // Burnouts strung together without dropping out
+  private burnoutArmed = false; // bar reached full → next burn is a Burnout
+  private burnoutWasFull = false; // edge detector: only chain on refill-to-full
   gear = 0; // 0-based; GEAR_TOPS[gear] is this gear's ceiling
   rpm = 0.25; // 0..1 within the current gear band — drives the engine pitch
   visualPitch = 0; // squat/dive, applied to the visual hull only
@@ -127,6 +171,35 @@ export class PlayerControl {
   private recentBrake = 0; // tap buffer: a brake tap arms the drift briefly
   private brakeWasDown = false; // edge detector for mid-drift tighten taps
   private tighten = 0; // 1 right after a mid-drift tap, decays over ~0.6 s
+  private nearMissFill = 0; // pending boost credit from near-misses (Game feeds it)
+
+  /** Max meter the bar can hold right now (segments × segment length). */
+  get boostCap(): number {
+    return this.boostSegments * BOOST_SEGMENT_SECS;
+  }
+
+  /** A takedown extends the bar one segment (up to B3's 4x) AND instantly
+   *  refills the whole, now-larger bar — the chained reward loop. */
+  addBoostSegment(): void {
+    this.boostSegments = Math.min(BOOST_MAX_SEGMENTS, this.boostSegments + 1);
+    this.boostMeter = this.boostCap; // full refill on the extended bar
+  }
+
+  /** Crashing/getting wrecked collapses the earned bar back to one segment. */
+  resetBoostBar(): void {
+    this.boostSegments = BOOST_START_SEGMENTS;
+    this.boostMeter = Math.min(this.boostMeter, this.boostCap);
+    this.burnout = false;
+    this.burnoutChain = 0;
+    this.burnoutArmed = false;
+    this.burnoutWasFull = false;
+  }
+
+  /** Game reports a near-miss / oncoming pass; credits a pulse of boost
+   *  (Burnout's "Driving Skills" fill). Accumulated, spent next update. */
+  nearMiss(strength = 1): void {
+    this.nearMissFill += REFILL_NEARMISS * strength;
+  }
 
   reset(heading: number): void {
     this.heading = heading;
@@ -135,7 +208,13 @@ export class PlayerControl {
     this.speed = 0;
     this.drifting = false;
     this.boosting = false;
-    this.boostMeter = BOOST_CAP;
+    this.boostMeter = BOOST_SEGMENT_SECS * BOOST_START_SEGMENTS; // start charged
+    this.boostSegments = BOOST_START_SEGMENTS;
+    this.burnout = false;
+    this.burnoutChain = 0;
+    this.burnoutArmed = false;
+    this.burnoutWasFull = false;
+    this.nearMissFill = 0;
     this.gear = 0;
     this.rpm = 0.25;
     this.shiftT = 0;
@@ -211,11 +290,35 @@ export class PlayerControl {
     // ---- speed: throttle and boost are separate inputs (boost implies
     // full throttle, like BP's boost-over-gas). The engine works through
     // gears: each one shoves a little less, and an upshift cuts torque
-    // for a beat — acceleration in steps, not a smooth ramp ----
+    // for a beat — acceleration in steps, not a smooth ramp. The engine
+    // ALONE only reaches TOP_CRUISE; the speed band above is gated behind
+    // earned boost (Burnout risk/reward) ----
     this.boosting = input.boost && this.boostMeter > 0;
     if (input.boost && !this.boostHeld) this.kickLeft = KICK_TIME; // fresh press arms the kick
     this.boostHeld = input.boost;
-    const top = this.boosting ? BOOST_TOP : TOP_SPEED;
+
+    // Burnout state (B3): the bar reaching full ARMS a Burnout; while you keep
+    // burning, that arm is cashed into a sustained, stronger boost. Refilling
+    // to full again mid-Burnout chains another. Dropping out of boost (or
+    // emptying the bar) ends it. The chain counts discrete refill EVENTS (the
+    // rising edge into full), not every frame the bar happens to be topped.
+    const cap = this.boostCap;
+    const full = this.boostMeter >= cap * BURNOUT_ENTER;
+    if (full) {
+      if (!this.burnoutWasFull && this.boosting && this.burnout) this.burnoutChain++; // refilled mid-Burnout → chain
+      this.burnoutArmed = true;
+    }
+    this.burnoutWasFull = full;
+    if (this.boosting && this.burnoutArmed) {
+      this.burnout = true; // cash the armed Burnout the moment we're burning
+    }
+    if (!this.boosting || this.boostMeter <= 0) {
+      this.burnout = false;
+      this.burnoutArmed = false;
+      this.burnoutChain = 0;
+    }
+    // tier ceilings: engine-only cruise, regular boost, sustained Burnout
+    const top = this.burnout ? BURNOUT_TOP : this.boosting ? BOOST_TOP : TOP_CRUISE;
 
     let g = 0;
     while (g < GEAR_TOPS.length - 1 && this.speed > GEAR_TOPS[g]) g++;
@@ -225,18 +328,21 @@ export class PlayerControl {
     const gearLow = this.gear === 0 ? 0 : GEAR_TOPS[this.gear - 1];
     this.rpm = clamp(0.25 + (0.75 * (this.speed - gearLow)) / (GEAR_TOPS[this.gear] - gearLow), 0.25, 1);
 
-    if ((input.throttle || this.boosting) && this.speed < TOP_SPEED) {
+    if (input.throttle && !this.boosting && this.speed < TOP_CRUISE) {
       const acc = this.shiftT > 0 ? 0 : GEAR_ACCEL[this.gear];
-      this.speed = Math.min(TOP_SPEED, this.speed + acc * dt);
+      this.speed = Math.min(TOP_CRUISE, this.speed + acc * dt);
     } else if (!input.throttle && !this.boosting && !input.brake) {
       this.speed = Math.max(0, this.speed - COAST_DRAG * dt); // coast down
     }
     if (this.boosting) {
-      let acc = BOOST_ACCEL;
+      // boost carries the engine shove too (so it never feels weaker than
+      // flooring it), plus the boost accel on top, plus the launch kick
+      let acc = (this.shiftT > 0 ? 0 : GEAR_ACCEL[this.gear]) + (this.burnout ? BURNOUT_ACCEL : BOOST_ACCEL);
       if (this.kickLeft > 0 && this.speed < KICK_BELOW) acc += KICK_ACCEL;
       this.kickLeft -= dt;
       this.speed = Math.min(top, this.speed + acc * dt);
-      this.boostMeter = Math.max(0, this.boostMeter - dt);
+      // drain: a Burnout sips a little slower (a full bar is a real reward)
+      this.boostMeter = Math.max(0, this.boostMeter - dt * (this.burnout ? 0.85 : 1));
     }
     if (input.brake && !this.drifting) this.speed = Math.max(0, this.speed - BRAKE_DECEL * dt);
     if (this.drifting) {
@@ -244,7 +350,8 @@ export class PlayerControl {
       const sideways = Math.abs(wrapAngle(this.heading - this.velAngle)) / DRIFT_MAX_SLIP;
       this.speed = Math.max(10, this.speed - DRIFT_SCRUB * (0.35 + 0.65 * sideways) * dt);
     }
-    if (this.speed > top) this.speed = Math.max(top, this.speed - 6 * dt); // settle down off boost
+    if (this.speed > top) this.speed = Math.max(top, this.speed - 6 * dt); // settle down a tier
+    if (this.speed > TOP_HARD) this.speed = TOP_HARD; // absolute clamp
 
     // ---- yaw. The minus sign: with y up and headings mapped to
     // (sin h, 0, cos h), turning right (screen-right of travel) is -h ----
@@ -272,7 +379,7 @@ export class PlayerControl {
       this.heading = heading;
       if ((Math.abs(slip) < DRIFT_EXIT_SLIP && Math.abs(want) < DRIFT_EXIT_SLIP * 2) || this.speed < 12) {
         this.drifting = false; // straightened out — grip recovers over the next beat
-        this.speed = Math.min(TOP_SPEED, this.speed + 1.2); // BP's little exit kick
+        this.speed = Math.min(BURNOUT_TOP, this.speed + 1.2); // BP's little exit kick
       }
     } else {
       // ---- gripped: bicycle model with a fast-fading lock — good for
@@ -298,13 +405,17 @@ export class PlayerControl {
       }
     }
 
-    // ---- boost refill (invented: Stunt-style — earn by driving sideways
-    // and flying; a deeper slide earns faster) ----
+    // ---- boost EARN (B3/BP "Driving Skills"): drift sideways, fly, and pass
+    // traffic close (near-miss credit fed by Game). Boost is the reward for
+    // risk — a deeper slide earns faster. Fills the EXTENDED bar (boostCap). --
+    let earn = this.nearMissFill; // pending near-miss/oncoming credit, spent now
+    this.nearMissFill = 0;
     if (this.drifting) {
       const sideways = Math.abs(wrapAngle(this.heading - this.velAngle)) / DRIFT_MAX_SLIP;
-      this.boostMeter = Math.min(BOOST_CAP, this.boostMeter + REFILL_DRIFT * (0.4 + 0.6 * sideways) * dt);
+      earn += REFILL_DRIFT * (0.4 + 0.6 * sideways) * dt;
     }
-    if (airborne) this.boostMeter = Math.min(BOOST_CAP, this.boostMeter + REFILL_AIR * dt);
+    if (airborne) earn += REFILL_AIR * dt;
+    if (earn > 0) this.boostMeter = Math.min(this.boostCap, this.boostMeter + earn);
 
     // ---- weight transfer, visual only: lean out of corners, squat under
     // power, dive on the brakes ----
