@@ -1,12 +1,12 @@
 import { useState } from 'react';
 import { GameState, type ModeKind } from '../game/types';
 import type { TimeOfDay } from '../game/daynight';
+import { LEVEL_LABELS, type LevelId } from '../game/levels';
 import type { BoostState, CashFloatData, RaceStanding, ReportData, TakedownBanner } from '../game/events';
-import type { LevelId } from '../game/levels';
 import type { PlayerCarId } from '../game/models';
+import { synthKey } from './keys';
 import { BoostBar, CrashbreakerBar, RaceChip, RaceTagline, ScoreChip } from './chips';
 import { ControlsPanel } from './ControlsPanel';
-import { EventPicker } from './EventPicker';
 import { ReportPanel } from './ReportPanel';
 import type { BestMap } from './storage';
 
@@ -32,23 +32,25 @@ interface HudProps {
   replaying: boolean;
   cineCam: boolean; // takedown-cam beat — letterbox outside crashtime
   timeOfDay: TimeOfDay;
-  variants: Record<LevelId, TimeOfDay>; // what each event card opens with
+  variants: Record<LevelId, TimeOfDay>; // kept for the merge (debug/menu reuse)
   best: BestMap;
   carId: PlayerCarId;
   onSelectEvent: (id: LevelId, tod?: TimeOfDay) => void;
   onSelectCar: (id: PlayerCarId) => void;
+  onExit: () => void; // leave gameplay → back to the menu flow
   onOpenDebug: () => void;
   onCashDone: (id: number) => void;
 }
 
 /** HUD shell: the shared chrome (cine bars, flash, hints, cash floats) with
- *  the mode-specific chips composed in. The idle screen is the B3-style
- *  event picker (EventPicker) — the old level-button strip and the global
- *  DAY/NIGHT + engine toggles folded into its cards and footer. */
+ *  the mode-specific chips composed in. The IN-GAME idle state is now just a
+ *  launch prompt + a MENU exit — event/car/settings selection moved OUT to the
+ *  menu flow (src/ui/menu/*), which the App mounts BEFORE any Game, so browsing
+ *  no longer reloads a level. */
 export function Hud({
   state, mode, damage, goldTarget, levelId,
   multiplier, boost, flash, takedown, report, cash, crashbreaker, race, replaying, cineCam,
-  timeOfDay, variants, best, carId, onSelectEvent, onSelectCar, onOpenDebug, onCashDone,
+  onExit, onCashDone,
 }: HudProps) {
   const cine = state === GameState.Crash || cineCam;
   const inRun = state !== GameState.Idle && state !== GameState.Done;
@@ -90,22 +92,27 @@ export function Hud({
         </div>
       )}
 
+      {/* In-game pre-launch overlay (the level is loaded; events are chosen in
+          the menu now, so this is a launch prompt, not a picker). The Game
+          listens on window for Space → LAUNCH synthesizes it. */}
       {state === GameState.Idle && (
         <>
           <div className="titleTag">
-            <b>CRASH JUNCTION</b>
-            <span>react + three.js + cannon-es</span>
+            <b>{LEVEL_LABELS[levelId]}</b>
+            <span>READY</span>
           </div>
-          <EventPicker
-            levelId={levelId}
-            tod={timeOfDay}
-            variants={variants}
-            best={best}
-            carId={carId}
-            onSelectEvent={onSelectEvent}
-            onSelectCar={onSelectCar}
-            onOpenDebug={onOpenDebug}
-          />
+          <div className="launchPrompt">
+            <button
+              className="launchRow"
+              onClick={(e) => {
+                synthKey('Space');
+                e.currentTarget.blur();
+              }}
+            >
+              &#9658; LAUNCH
+            </button>
+            <div className="launchSub">SPACE / &#9655; START</div>
+          </div>
           <button
             className="controlsToggle"
             onClick={(e) => {
@@ -115,6 +122,16 @@ export function Hud({
             title="View keyboard &amp; controller bindings"
           >
             &#9000; CONTROLS
+          </button>
+          <button
+            className="exitBtn"
+            onClick={(e) => {
+              onExit();
+              e.currentTarget.blur();
+            }}
+            title="Back to the menu"
+          >
+            &#9664; MENU
           </button>
         </>
       )}
@@ -157,7 +174,21 @@ export function Hud({
         </div>
       ))}
 
-      {state === GameState.Done && report && <ReportPanel report={report} />}
+      {state === GameState.Done && report && (
+        <>
+          <ReportPanel report={report} />
+          <button
+            className="exitBtn results"
+            onClick={(e) => {
+              onExit();
+              e.currentTarget.blur();
+            }}
+            title="Back to the menu (switch events with no reload)"
+          >
+            &#9664; MENU
+          </button>
+        </>
+      )}
     </div>
   );
 }

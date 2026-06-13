@@ -246,7 +246,9 @@ try {
   });
   page.on('pageerror', (e) => console.log(`[page error] ${e.message}`));
 
-  await page.goto(`http://localhost:${PORT}/`, { waitUntil: 'domcontentloaded' });
+  // FAST PATH (menu redesign): the menu no longer mounts a level on boot —
+  // deep-link straight to junction gameplay so window.__game + the player exist.
+  await page.goto(`http://localhost:${PORT}/?level=junction&launch=1`, { waitUntil: 'domcontentloaded' });
   await page.waitForFunction(() => window.__game !== undefined, { timeout: 30_000, polling: 100 });
   // the baked car models stream in async — wait for the player to carry glass
   await page.waitForFunction(

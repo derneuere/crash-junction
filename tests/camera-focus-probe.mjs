@@ -102,11 +102,9 @@ try {
   const page = await browser.newPage();
   page.on('pageerror', (e) => console.log(`[page error] ${e.message}`));
 
-  await page.goto(`http://localhost:${PORT}/`, { waitUntil: 'domcontentloaded' });
-  await page.waitForFunction(() => window.__game !== undefined, { timeout: 30_000, polling: 100 });
-
-  // a RACE level (rivals crash into walls during the race)
-  await clickButton(page, /^GANTRY POINT$/);
+  // FAST PATH (menu redesign): jump straight to GANTRY POINT gameplay, no
+  // picker click. A RACE level (rivals crash into walls during the race).
+  await page.goto(`http://localhost:${PORT}/?level=gantry&launch=1`, { waitUntil: 'domcontentloaded' });
   await page.waitForFunction(() => window.__game?.levelId === 'gantry', { timeout: 30_000, polling: 100 });
   await new Promise((res) => setTimeout(res, 3500)); // GLB props land
 

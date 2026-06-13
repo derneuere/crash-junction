@@ -42,12 +42,9 @@ try {
   const browser = await launchBrowser();
   const page = await browser.newPage();
   await page.setViewport({ width: 640, height: 360 });
-  await page.evaluateOnNewDocument(() => {
-    localStorage.setItem('cj-sel', JSON.stringify({ level: 'gantry', tod: 'day', perEvent: {} }));
-    localStorage.setItem('cj-tod', 'day');
-    localStorage.setItem('cj-gfx', 'cine');
-  });
-  await page.goto(`http://localhost:${PORT}/`, { waitUntil: 'domcontentloaded' });
+  // FAST PATH (menu redesign): jump straight to GANTRY POINT day gameplay; the
+  // menu flow no longer auto-mounts a level from cj-sel.
+  await page.goto(`http://localhost:${PORT}/?level=gantry&tod=day&launch=1`, { waitUntil: 'domcontentloaded' });
   await page.waitForFunction(() => !!window.__game && window.__game.actors?.length > 0, { timeout: 30000, polling: 250 });
   await sleep(4000);
   const out = await page.evaluate(() => {

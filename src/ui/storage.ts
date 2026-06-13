@@ -93,3 +93,13 @@ export function readCar(): PlayerCarId {
   const raw = localStorage.getItem('cj-car');
   return PLAYER_CARS.some((c) => c.id === raw) ? (raw as PlayerCarId) : DEFAULT_CAR;
 }
+
+//   cj-mute  '1' = start muted. The in-game M key still toggles live; this is
+//            only the SETTINGS default applied once a Game mounts.
+export function readMuted(): boolean {
+  return localStorage.getItem('cj-mute') === '1';
+}
+
+export function writeMuted(m: boolean): void {
+  localStorage.setItem('cj-mute', m ? '1' : '0');
+}

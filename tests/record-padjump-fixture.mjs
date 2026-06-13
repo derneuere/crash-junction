@@ -62,15 +62,9 @@ try {
   }
   if (!browser) throw new Error('no Chrome or Edge found');
   const page = await browser.newPage();
-  await page.goto(`http://localhost:${PORT}/`, { waitUntil: 'domcontentloaded' });
-  await page.waitForFunction(() => !!window.__game, { timeout: 30_000 });
-  await page.evaluate(() => {
-    // the idle screen is now the event-picker card strip (no more `.levels`);
-    // match the level-name button by text — same contract refshot/record-race use
-    const btn = [...document.querySelectorAll('button')].find((b) => (b.textContent?.trim() ?? '').includes('PROVING'));
-    if (!btn) throw new Error('no PROVING GROUND button on the page');
-    btn.click();
-  });
+  // FAST PATH (menu redesign): jump straight to PROVING GROUND (track) — the
+  // menu flow no longer mounts a level while browsing, so we deep-link past it.
+  await page.goto(`http://localhost:${PORT}/?level=track&launch=1`, { waitUntil: 'domcontentloaded' });
   await page.waitForFunction(() => window.__game?.levelId === 'track', { timeout: 30_000 });
   await page.evaluate((timeline, captureAt) => {
     const k = (type, code) => window.dispatchEvent(new KeyboardEvent(type, { code }));

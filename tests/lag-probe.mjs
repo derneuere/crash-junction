@@ -103,7 +103,9 @@ try {
       failed = true;
       console.error(`PAGE ERROR: ${e.message}`);
     });
-    await page.goto(`http://localhost:${PORT}/`, { waitUntil: 'domcontentloaded' });
+    // FAST PATH (menu redesign): jump straight to junction gameplay — the menu
+    // flow no longer mounts the junction level on boot.
+    await page.goto(`http://localhost:${PORT}/?level=junction&launch=1`, { waitUntil: 'domcontentloaded' });
     await page.waitForFunction(() => !!window.__game && window.__game.actors?.length > 0, { timeout: 30_000, polling: 250 });
     await sleep(2000); // models stream in async — let the junction dress up
 

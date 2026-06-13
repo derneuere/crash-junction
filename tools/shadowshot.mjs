@@ -91,12 +91,9 @@ try {
     const page = await browser.newPage();
     await page.setViewport({ width: 1280, height: 720 });
     page.on('pageerror', (e) => { failed = true; console.error(`PAGE ERROR: ${e.message}`); });
-    await page.evaluateOnNewDocument((tod) => {
-      localStorage.setItem('cj-sel', JSON.stringify({ level: 'gantry', tod, perEvent: {} }));
-      localStorage.setItem('cj-tod', tod);
-      localStorage.setItem('cj-gfx', 'cine');
-    }, TOD);
-    await page.goto(`http://localhost:${PORT}/`, { waitUntil: 'domcontentloaded' });
+    // FAST PATH (menu redesign): jump straight to GANTRY POINT gameplay at the
+    // requested tod; browsing the menu no longer auto-mounts a level.
+    await page.goto(`http://localhost:${PORT}/?level=gantry&tod=${TOD}&launch=1`, { waitUntil: 'domcontentloaded' });
     await page.waitForFunction(() => !!window.__game && window.__game.actors?.length > 0, { timeout: 30_000, polling: 250 });
     await sleep(4000); // GLB props stream in
 

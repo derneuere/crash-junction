@@ -122,14 +122,10 @@ try {
       failed = true;
       console.error(`PAGE ERROR: ${e.message}`);
     });
-    // force GANTRY POINT before any app code runs (cj-sel contract, storage.ts)
-    await page.evaluateOnNewDocument((tod) => {
-      localStorage.setItem('cj-sel', JSON.stringify({ level: 'gantry', tod, perEvent: {} }));
-      localStorage.setItem('cj-tod', tod);
-      localStorage.setItem('cj-gfx', 'cine');
-    }, TOD);
-
-    await page.goto(`http://localhost:${PORT}/`, { waitUntil: 'domcontentloaded' });
+    // FAST PATH (menu redesign): jump straight to GANTRY POINT gameplay at the
+    // requested tod. The menu flow no longer mounts a level while browsing, so
+    // the old cj-sel auto-mount is gone; ?level=&tod=&launch=1 replaces it.
+    await page.goto(`http://localhost:${PORT}/?level=gantry&tod=${TOD}&launch=1`, { waitUntil: 'domcontentloaded' });
     await page.waitForFunction(() => !!window.__game && window.__game.actors?.length > 0, { timeout: 30_000, polling: 250 });
     await sleep(3500); // GLB props stream in async — let the whole port dress up
 
