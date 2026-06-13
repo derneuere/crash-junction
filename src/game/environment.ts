@@ -22,6 +22,7 @@ import type { HeightSampler } from './suspension';
 import { buildSea, SEA_MAX_AMPLITUDE, type Sea } from './sea';
 import { applyBakedAO } from './ao';
 import { buildGrass, type GrassField } from './grass';
+import { instanceChunked, mergeChunked, type ChunkMergeItem } from './chunkbatch';
 
 /** What buildEnvironment hands back to the frame loop: the animated sea (coast
  *  levels) and the instanced blade-grass field (coast levels). Both are
@@ -403,6 +404,7 @@ function addRibbon(
     new THREE.MeshStandardMaterial({ color, roughness: 0.95, side: THREE.DoubleSide }),
   );
   ribbon.receiveShadow = true;
+  ribbon.name = 'cj-ribbon';
   scene.add(ribbon);
 }
 
@@ -1474,27 +1476,45 @@ export function buildEnvironment(scene: THREE.Scene, phys: PhysicsContext, level
   // ground patches: textured aprons/sand/dry grass UNDER the paving — see
   // the z-order contract at the top of this file (default y 0.006 keeps
   // them beneath the 0.010/0.012 ribbons). Visual only, no grip change.
+  //
+  // [perf-geo] BATCHED: a level dresses ~10 patches, each its own ShapeGeometry
+  // mesh = a draw call (×6 through the cube reflection). Patches that share a
+  // KIND already share one material; we now also MERGE their geometry per
+  // (kind, spatial chunk) so same-kind patches in a region draw as one mesh.
+  // Each patch's transform (rotate -PI/2 about X so shape-Y → world-Z, plus its
+  // y slot) is baked into the merged buffer, so vertices — and the raw-shape-
+  // coord UVs that world-tile the texture — land exactly where the per-mesh
+  // build drew them. Chunking keeps frustum culling dropping off-screen tiles
+  // (a level-spanning merge would wrap the whole island and always draw). The
+  // material creation is unchanged (perf-mem owns texture/material dedup); only
+  // the mesh batching changed.
   if (level.patches?.length) {
     const patchMats = new Map<PatchKind, THREE.MeshStandardMaterial>();
     const TILE: Record<PatchKind, number> = { concrete: 9, sand: 6, drygrass: 8, gravel: 4 };
+    const patchItems = new Map<PatchKind, ChunkMergeItem[]>();
+    const rotX = new THREE.Matrix4().makeRotationX(-Math.PI / 2);
     for (const p of level.patches) {
-      let mat = patchMats.get(p.kind);
-      if (!mat) {
+      if (!patchMats.has(p.kind)) {
         const tex = makePatchTexture(p.kind);
         // ShapeGeometry UVs are raw shape coords (= world metres), so the
         // repeat alone gives seamless world-space tiling across patches
         tex.repeat.setScalar(1 / TILE[p.kind]);
-        mat = new THREE.MeshStandardMaterial({ map: tex, roughness: 1 });
-        patchMats.set(p.kind, mat);
+        patchMats.set(p.kind, new THREE.MeshStandardMaterial({ map: tex, roughness: 1 }));
       }
-      const mesh = new THREE.Mesh(
-        new THREE.ShapeGeometry(new THREE.Shape(p.poly.map(([x, z]) => new THREE.Vector2(x, -z)))),
-        mat,
-      );
-      mesh.rotation.x = -Math.PI / 2;
-      mesh.position.y = p.y ?? 0.006;
-      mesh.receiveShadow = true;
-      scene.add(mesh);
+      const geo = new THREE.ShapeGeometry(new THREE.Shape(p.poly.map(([x, z]) => new THREE.Vector2(x, -z))));
+      // bake rotation.x = -PI/2 then position.y = (p.y ?? 0.006), in that order
+      const mat = new THREE.Matrix4().makeTranslation(0, p.y ?? 0.006, 0).multiply(rotX);
+      // tile-assignment point: the patch polygon centroid (world x/z)
+      let cx = 0, cz = 0;
+      for (const [x, z] of p.poly) { cx += x; cz += z; }
+      cx /= p.poly.length; cz /= p.poly.length;
+      let arr = patchItems.get(p.kind);
+      if (!arr) patchItems.set(p.kind, (arr = []));
+      arr.push({ geometry: geo, matrix: mat, x: cx, z: cz });
+    }
+    for (const [kind, items] of patchItems) {
+      mergeChunked(scene, items, patchMats.get(kind)!, { receiveShadow: true, name: 'cj-patch-batch' });
+      for (const it of items) it.geometry.dispose(); // the source clones are merged
     }
   }
 
@@ -1700,6 +1720,18 @@ export function buildEnvironment(scene: THREE.Scene, phys: PhysicsContext, level
     }
     const wallGeo = new THREE.BoxGeometry(1, 1, 1);
     const wallColors = [0xd8dde2, 0xc23a2c]; // alternating white/red
+    // The barrier boxes (and the chain-link below) are ALREADY collapsed into a
+    // handful of InstancedMeshes / one merged mesh by a prior pass. NOTE
+    // (perf-geo): these are kept as the lap-wide batches on purpose. GANTRY
+    // POINT is a COMPACT island loop, so from almost every vantage a large arc
+    // of the barrier is in view at once; splitting these into per-region chunks
+    // (as we do for the sparse patches/walks) was measured to ADD draw calls at
+    // every pose — main frame AND each cube face — because the visible arc just
+    // fragments into more draws while little of the loop is ever off-screen to
+    // cull (tests/drawcall-poses.mjs sweep). For a draw-call goal the single
+    // instanced batch is already optimal here, so the chunked-batch helper is
+    // applied only to the genuinely sparse static one-offs (ground patches,
+    // building sidewalks), not to the omnipresent barrier chain.
     for (const parity of [0, 1]) {
       // parity over the FULL segment array keeps the chain pixel-identical
       // to the pre-wallStyles build when every segment is 'race'
@@ -1938,14 +1970,18 @@ export function buildEnvironment(scene: THREE.Scene, phys: PhysicsContext, level
 
   // corner blocks: sidewalk slabs + buildings (static colliders → pinball walls)
   const winTex = makeWindowTextures();
+  // [perf-geo] every building's sidewalk slab is the SAME box + SAME material,
+  // so the visual walks BATCH into one InstancedMesh per spatial chunk (the
+  // tower blocks above keep their per-building window materials — perf-mem's
+  // domain — so they stay separate). Colliders are untouched: the cannon
+  // sidewalk + tower bodies are still added per building below, so physics and
+  // takedown behaviour are identical. Shared geometry + material so the
+  // daynight sweep + any baked attribute still reach the batch.
+  const walkGeo = new THREE.BoxGeometry(14, 0.16, 14);
+  const walkMat = new THREE.MeshStandardMaterial({ color: 0x80868e, roughness: 1 });
+  const walkItems: { matrix: THREE.Matrix4; x: number; z: number }[] = [];
   for (const { x: cx, z: cz, h, color } of level.buildings) {
-    const walk = new THREE.Mesh(
-      new THREE.BoxGeometry(14, 0.16, 14),
-      new THREE.MeshStandardMaterial({ color: 0x80868e, roughness: 1 }),
-    );
-    walk.position.set(cx, 0.08, cz);
-    walk.receiveShadow = true;
-    scene.add(walk);
+    walkItems.push({ matrix: new THREE.Matrix4().makeTranslation(cx, 0.08, cz), x: cx, z: cz });
     const wb = new CANNON.Body({ mass: 0, material: phys.matGround });
     wb.addShape(new CANNON.Box(new CANNON.Vec3(7, 0.08, 7)));
     wb.position.set(cx, 0.08, cz);
@@ -1984,6 +2020,9 @@ export function buildEnvironment(scene: THREE.Scene, phys: PhysicsContext, level
     bb.position.set(cx, h / 2 + 0.16, cz);
     phys.world.addBody(bb);
   }
+  // emit the batched sidewalk walks (receiveShadow only, like the per-mesh
+  // build; the flat slab cast no meaningful shadow before and casts none now)
+  instanceChunked(scene, walkGeo, walkMat, walkItems, { receiveShadow: true, name: 'cj-walk-batch' });
 
   // launch ramps: a rotated slab; the suspension rays read the matching
   // height field, the physics box only matters for landings and wrecks
