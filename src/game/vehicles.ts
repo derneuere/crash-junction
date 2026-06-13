@@ -48,13 +48,14 @@ function registerDeformable(
 }
 
 // Virgin (unbroken) window vertex tone. The baked GLBs paint glass near-black
-// (rgba ≈ 0.03) — fine for the old mirror material, but transmission multiplies
-// the TINT (glassMat.color) by this per-vertex colour, so a near-black pane
-// crushes all transmitted light to black no matter the tint knob. Lift virgin
-// glass to a neutral grey so glassMat.color is the sole tint filter and the
-// dark interior actually shows through; the frost/crack stage then paints
-// these verts pale-white (well above), reading as the pane going opaque.
-const VIRGIN_GLASS = 0.6;
+// (rgba ≈ 0.03) — fine for the old mirror material, but the per-vertex colour
+// multiplies the pane's ALBEDO, so a near-black pane crushes the clear glass to
+// a dark surface no matter the tint knob. Round 2 moved the tint into the
+// transmitted VOLUME (attenuationColor), so the albedo wants to stay near-white
+// for a clear, see-through pane; lift virgin glass close to white and let the
+// depth-tint do the colouring. The frost/crack stage paints these verts
+// pale-bright (at/above this), reading as the pane going milky/opaque.
+const VIRGIN_GLASS = 0.92;
 
 /** Neutralise a hull's window verts to VIRGIN_GLASS so the transmission tint
  *  controls the look (clear ↔ privacy) rather than the near-black bake. */
@@ -521,33 +522,98 @@ export function repairVehicle(actor: Actor): void {
 // the crack-arm angles use Math.random like the rest of the FX — the sim and
 // replay hashes never read glass colour or the hull index.
 //
-// Spider-web painting: each struck vertex brightens by how close its angle
-// (around the impact, in the pane plane) lands to one of a few random radial
-// crack ARMS, plus a soft distance falloff — concentric darkening between the
-// arms. The technique mirrors the Voronoi/radial impact shaders surveyed
-// (godotshaders.com glass-shatter-impact-points, CJT-Jackton/SmashTheGlass)
-// but stays on the existing per-vertex-colour rail, so it costs nothing extra.
+// Spider-web painting (ROUND 2): the crack web is now the RAY + CONCENTRIC-RING
+// model from CJT-Jackton/SmashTheGlass (_ref/SmashTheGlass; learn-only, no
+// licence on the repo — TECHNIQUE adapted, no code ported). That project places
+// Voronoi crack sites on a polar grid centred on the impact: a set of radial
+// RAYS at evenly-spaced angles with a little Gaussian jitter, crossed by a few
+// concentric RINGS whose spacing widens outward (RandomPoint.cs:
+// base_radius[i] = base_radius[i-1] + 1 + i*centrifugation → densest near the
+// hit). We can't re-mesh a window into Voronoi shards on the per-vertex-colour
+// rail, but we CAN paint exactly that pattern: a struck vertex lights up bright
+// where it sits near a radial ray OR near a shock ring, brightest at the centre.
+// The result reads as real fracture propagation — sharp radial lines plus the
+// concentric "shatter rings" a stone leaves — instead of round-1's five flat
+// arms. SPEED-AWARE: a gentle tap gets a few short rays and one tight ring (a
+// local star-crack); a hard hit gets many rays + several rings reaching the
+// pane edge (a full craze before blowout). Still visual-only and Math.random
+// like the rest of the FX — the sim/replay hashes never read glass colour or
+// the hull index.
 
-const CRACK_ARMS = 5; // radial fracture lines from the impact
 const _glassN = new THREE.Vector3();
 const _glassT = new THREE.Vector3();
 const _glassB = new THREE.Vector3();
 const _glassRel = new THREE.Vector3();
 
-/** Spider-web crack tone for a glass vertex: distance falloff × proximity to
- *  the nearest crack arm. `armPhase` seeds where the arms point so different
- *  panes/hits don't all crack identically. Returns 0..1 brightness boost. */
-function crackBoost(angle: number, dist: number, radius: number, armPhase: number): number {
-  let nearest = Math.PI;
-  for (let a = 0; a < CRACK_ARMS; a++) {
-    const armAng = armPhase + (a / CRACK_ARMS) * Math.PI * 2;
+/** A per-impact crack web: ray angles + ring radii, sized by hit power. Built
+ *  once per shatterGlass call (per pane) so the whole web is coherent. */
+interface CrackWeb {
+  rays: number[]; // ray angles (radians)
+  rayJitter: number[]; // small per-ray angular wobble so lines aren't laser-straight
+  rings: number[]; // ring radii as a fraction of `radius` (0..1)
+  centerGlow: number; // pulverised bloom radius fraction at the impact
+}
+
+/** Build the ray/ring web for one hit. `power` (impact speed proxy) drives how
+ *  far the fracture propagates: soft → few rays, one near ring; hard → many
+ *  rays, rings out to the edge. Mirrors SmashTheGlass RandomPoint's ring/ray
+ *  counts and outward-widening ring spacing. */
+function buildCrackWeb(power: number): CrackWeb {
+  // SmashTheGlass uses ~9–11 rays; we scale with power for the speed-aware feel
+  const rayCount = Math.max(4, Math.min(12, Math.round(4 + power * 1.1)));
+  const ringCount = Math.max(1, Math.min(4, Math.round(1 + power * 0.45)));
+  const phase = Math.random() * Math.PI * 2;
+  const step = (Math.PI * 2) / rayCount;
+  const rays: number[] = [];
+  const rayJitter: number[] = [];
+  for (let i = 0; i < rayCount; i++) {
+    // even spacing + Gaussian-ish jitter (RandomPoint base_theta), so the star
+    // isn't perfectly regular
+    rays.push(phase + i * step + (Math.random() - 0.5) * step * 0.35);
+    rayJitter.push((Math.random() - 0.5) * 0.18);
+  }
+  // rings widen outward (centrifugation), normalised into 0..1 of the radius
+  const raw: number[] = [];
+  let r = 0.35;
+  for (let i = 0; i < ringCount; i++) {
+    r += 0.25 + i * 0.3;
+    raw.push(r);
+  }
+  const max = raw[raw.length - 1];
+  const rings = raw.map((v) => Math.min(0.96, v / max * 0.96));
+  // harder hits pulverise a wider patch at the very centre
+  const centerGlow = Math.min(0.5, 0.12 + power * 0.03);
+  return { rays, rayJitter, rings, centerGlow };
+}
+
+/** Spider-web crack tone for a glass vertex: max of its nearness to a radial
+ *  ray, to a concentric shock ring, and a bright centre bloom — all faded by
+ *  distance. Returns a 0..1 brightness boost; ~0 between the cracks (the pane
+ *  stays clear there), ~1 right on a fracture line. */
+function crackBoost(angle: number, dist: number, radius: number, web: CrackWeb): number {
+  const f = dist / radius; // 0 at impact … 1 at the crack radius
+  // nearest radial ray — the wobble makes the line waver as it runs outward
+  let nearestRay = Math.PI;
+  for (let a = 0; a < web.rays.length; a++) {
+    const armAng = web.rays[a] + web.rayJitter[a] * f * 4;
     let d = Math.abs(angle - armAng);
     if (d > Math.PI) d = Math.PI * 2 - d;
-    nearest = Math.min(nearest, d);
+    nearestRay = Math.min(nearestRay, d);
   }
-  const arm = Math.max(0, 1 - nearest / 0.62); // bright fracture lines (≈±36°)
-  const halo = Math.max(0, 1 - dist / radius); // frosted bloom toward centre
-  return Math.min(1, arm * arm * 1.15 + halo * halo * 0.6);
+  // ray lines thin out toward the tip (a real crack tapers)
+  const rayWidth = 0.5 - f * 0.32;
+  const ray = Math.max(0, 1 - nearestRay / Math.max(0.05, rayWidth));
+  // nearest concentric ring (a thin bright band at each ring radius)
+  let ring = 0;
+  for (const rr of web.rings) {
+    const band = Math.max(0, 1 - Math.abs(f - rr) / 0.09);
+    ring = Math.max(ring, band);
+  }
+  // pulverised centre
+  const center = Math.max(0, 1 - f / Math.max(0.05, web.centerGlow));
+  const arms = ray * ray * 1.2 + ring * ring * 0.85 + center * center * 0.9;
+  // overall fade so the web dims toward the crack radius
+  return Math.min(1, arms * (1 - f * 0.4));
 }
 
 export function shatterGlass(actor: Actor, worldPoint: THREE.Vector3, radius: number, power = 1): number {
@@ -567,7 +633,7 @@ export function shatterGlass(actor: Actor, worldPoint: THREE.Vector3, radius: nu
     // a pane plane to project the crack web onto: use the local up/right of
     // the mesh (windows are roughly vertical/curved — close enough for the
     // angular web), with the impact's local normal-ish removed
-    const armPhase = Math.random() * Math.PI * 2;
+    const web = buildCrackWeb(power);
     _glassN.set(_lp.x, 0, _lp.z); // outward-ish from hull centreline
     if (_glassN.lengthSq() < 1e-4) _glassN.set(0, 0, 1);
     _glassN.normalize();
@@ -591,14 +657,19 @@ export function shatterGlass(actor: Actor, worldPoint: THREE.Vector3, radius: nu
         touched = true;
 
         if (next === 1) {
-          // CRACK: spider-web recolour — bright cool-white fracture arms over
-          // the tinted pane (the glass goes milky where it has crazed)
+          // CRACK: ray+ring spider-web recolour. Virgin glass is near-white
+          // (clear), so a fracture line reads as a cool MILKY-WHITE craze that
+          // pops against the see-through pane; verts off the web stay clear.
           _glassRel.set(_v.x - _lp.x, _v.y - _lp.y, _v.z - _lp.z);
           const angle = Math.atan2(_glassRel.dot(_glassT), _glassRel.dot(_glassB));
-          const b = crackBoost(angle, dist, radius, armPhase);
-          const base = VIRGIN_GLASS;
-          const tone = base + (0.98 - base) * b;
-          col.setXYZ(i, tone, tone + 0.03 * b, tone + 0.05 * b);
+          const b = crackBoost(angle, dist, radius, web);
+          // a hint of grain so the craze isn't a clean gradient (LiquidGlass
+          // noise idea, carried onto the crack paint)
+          const grain = (Math.random() - 0.5) * 0.06 * b;
+          // off-web keeps the clear virgin tone; on-web goes bright milky-white
+          const tone = VIRGIN_GLASS - 0.08 + (1.02 - (VIRGIN_GLASS - 0.08)) * b + grain;
+          const c = Math.min(1, Math.max(0, tone));
+          col.setXYZ(i, c, Math.min(1, c + 0.02 * b), Math.min(1, c + 0.04 * b));
         } else if (next === 2) {
           // FROST: spalled, about to let go — the tweakable FROST amount sets
           // how white it goes (privacy glass can stay a touch darker)

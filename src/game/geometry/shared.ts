@@ -28,62 +28,171 @@ export const hullMat = new THREE.MeshPhysicalMaterial({
 // transmission pre-pass during renderer.render — which the composer's
 // RenderPass triggers too, so it works in both FAST and CINE tiers), so the
 // already-built dark interior (models.ts buildInterior) actually shows through
-// the windows, TINTED by the material colour. We keep the Burnout clearcoat
-// over the top: clearcoat reflects WHITE sky/cube glints over any base colour
-// (metalness would tint reflections by albedo → near-black glass reflects
-// nothing), so the sky still sweeps across the windscreen. Refs:
-//   pixel-capture.com/tutorials/glass-material-threejs-article (transmission
-//     1 / roughness 0 / ior 1.5 / thickness for a glass pane),
-//   threejs.org MeshPhysicalMaterial (color = tint filter over transmitted
-//     light; ior/thickness drive refraction),
-//   pmndrs/postprocessing#431 (HalfFloat composer + transmission can "burn"
-//     when HDR sky is refracted — so we keep thickness small, transmission
-//     below 1 and a real tint so the pane never samples blown-out HDR; the
-//     interior, not the sky, is what shows through). Single-sided shell, so
-//     no DoubleSide transmission feedback loop (three #33060).
+// the windows. We keep the Burnout clearcoat over the top: clearcoat reflects
+// WHITE sky/cube glints over any base colour (metalness would tint reflections
+// by albedo → near-black glass reflects nothing), so the sky still sweeps
+// across the windscreen.
 //
-// vertexColors stays on: shatterGlass paints the FROST/crack web per-vertex
-// (pale, bright), and the frost recolour reads as the pane going opaque-white
-// because frosted verts swamp the dark tint. glassMat.color is the live TINT
-// knob (clear-ish default; a darker "privacy" preset is one setter call away).
+// ROUND 2 — richer refraction/transparency drawing on OverShifted/LiquidGlass
+// (MIT, _ref/LiquidGlass). That demo is 2-D screen-space, but its glass recipe
+// is fully transferable to a 3-D MeshPhysicalMaterial pane:
+//   • LiquidGlass tints the *transmitted* sample by a depth falloff f(dist),
+//     not a flat surface colour → here `attenuationColor` + `attenuationDistance`
+//     (Beer-Lambert: light is filtered by how far it travels through the glass
+//     VOLUME), so the tint reads as real depth instead of a painted-on hue.
+//     The albedo `color` is now near-white so the tint comes purely from the
+//     volume — a clearer, more see-through pane that still carries colour.
+//   • LiquidGlass remaps the background sample outward near the rim (a lens) and
+//     adds grain noise → here a gentle generated clearcoat-normal map gives the
+//     surface a glassy micro-wobble (the same idea three's normalMap drives into
+//     the refraction direction), and `dispersion` splits the refraction by
+//     wavelength for the faint prismatic edge LiquidGlass fakes with noise.
+//   • LiquidGlass's rim `Glow()` term → here `specularColor`/`specularIntensity`
+//     + clearcoat keep a bright Fresnel rim where the pane curves away.
+// Refs: _ref/LiquidGlass/assets/shaders/BatchRenderer2D.glsl (LiquidGlass()
+//   refraction + f(dist) falloff + rim glow), threejs.org MeshPhysicalMaterial
+//   (attenuation = transmitted-light tint over distance; dispersion = chromatic
+//   refraction; ior/thickness drive the bend).
+//
+// COMPOSER SAFETY (pmndrs/postprocessing#431): a HalfFloat composer at
+// NoToneMapping can "burn" when an HDR sky is refracted through the pane. We
+// keep transmission below 1, thickness small, dispersion gentle, and now lean
+// on attenuation (which DARKENS toward the tint with depth) so the pane trends
+// toward its tint, never toward blown-out white — verified in CINE at 8/16/28/
+// 40 m/s. Single-sided shell, so no DoubleSide transmission feedback (three
+// #33060). vertexColors stays on: shatterGlass paints the crack web / frost
+// per-vertex, and a frosted vert (bright, near-opaque) swamps the clear pane.
 
-/** Live-tweakable glass look (DebugOverlay drives these). Defaults: a faintly
- *  cool, mostly-clear windscreen that still reflects the sky. */
+/** Live-tweakable glass look (DebugOverlay drives these). Defaults: a clear,
+ *  faintly cool windscreen with depth-tint, a prismatic refraction edge and a
+ *  bright Fresnel rim — see-through, but unmistakably glass. */
 export interface GlassParams {
-  tint: number; // base colour = transmission tint filter
+  tint: number; // depth-tint = colour transmitted light picks up through the glass volume
   transmission: number; // 0 opaque … 1 fully see-through
   roughness: number; // 0 mirror-clear … blurs both transmission and reflection
   thickness: number; // refraction depth (small — big values "burn" under the composer)
   ior: number; // index of refraction (glass ≈ 1.5)
+  dispersion: number; // chromatic refraction (prismatic split) — keep gentle for the composer
+  attenuation: number; // depth-tint strength: lower = more strongly tinted (Beer-Lambert distance)
   reflection: number; // clearcoat/env reflection strength (envMapIntensity baseline)
+  rim: number; // Fresnel rim-glow strength (specularIntensity) — LiquidGlass's Glow()
+  warp: number; // surface micro-wobble (clearcoat-normal map scale) — the "liquid" texture
   frost: number; // how white a frosted (cracked) pane goes (shatterGlass reads this)
 }
 
 export const glassParams: GlassParams = {
   tint: 0xafc4d4,
-  transmission: 0.82,
-  roughness: 0.12,
-  thickness: 0.18,
-  ior: 1.45,
+  transmission: 0.9,
+  roughness: 0.08,
+  thickness: 0.34,
+  ior: 1.5,
+  dispersion: 1.4,
+  attenuation: 1.1,
   reflection: 1.0,
+  rim: 1.0,
+  warp: 0.5,
   frost: 0.82,
 };
 
+// A small tileable value-noise normal map → a gentle glassy surface wobble that
+// bends the transmission/reflection a touch off-flat, the 3-D analogue of
+// LiquidGlass's grain + lens distortion. Built once at module load; driven onto
+// the pane as a clearcoatNormalMap (the clear lacquer ripples, the tint stays
+// even). Kept low-frequency and low-amplitude so it never reads as dirt.
+function makeGlassWarpMap(): THREE.DataTexture {
+  const S = 64;
+  const h = new Float32Array(S * S);
+  // a couple of octaves of hashed value noise, smoothed
+  const hash = (x: number, y: number): number => {
+    const s = Math.sin(x * 12.9898 + y * 78.233) * 43758.5453;
+    return s - Math.floor(s);
+  };
+  for (let y = 0; y < S; y++) {
+    for (let x = 0; x < S; x++) {
+      let v = 0;
+      let amp = 1;
+      let freq = 1;
+      for (let o = 0; o < 3; o++) {
+        const fx = (x / S) * freq * 6;
+        const fy = (y / S) * freq * 6;
+        const ix = Math.floor(fx);
+        const iy = Math.floor(fy);
+        const tx = fx - ix;
+        const ty = fy - iy;
+        const sx = tx * tx * (3 - 2 * tx);
+        const sy = ty * ty * (3 - 2 * ty);
+        const a = hash(ix, iy);
+        const b = hash(ix + 1, iy);
+        const c = hash(ix, iy + 1);
+        const d = hash(ix + 1, iy + 1);
+        v += amp * (a + (b - a) * sx + (c - a) * sy + (a - b - c + d) * sx * sy);
+        amp *= 0.5;
+        freq *= 2;
+      }
+      h[y * S + x] = v;
+    }
+  }
+  // height → tangent-space normal via central differences
+  const data = new Uint8Array(S * S * 4);
+  const at = (x: number, y: number) => h[((y + S) % S) * S + ((x + S) % S)];
+  const strength = 2.0;
+  for (let y = 0; y < S; y++) {
+    for (let x = 0; x < S; x++) {
+      const dx = (at(x + 1, y) - at(x - 1, y)) * strength;
+      const dy = (at(x, y + 1) - at(x, y - 1)) * strength;
+      const nx = -dx;
+      const ny = -dy;
+      const nz = 1;
+      const len = Math.hypot(nx, ny, nz);
+      const i = (y * S + x) * 4;
+      data[i] = Math.round((nx / len * 0.5 + 0.5) * 255);
+      data[i + 1] = Math.round((ny / len * 0.5 + 0.5) * 255);
+      data[i + 2] = Math.round((nz / len * 0.5 + 0.5) * 255);
+      data[i + 3] = 255;
+    }
+  }
+  const tex = new THREE.DataTexture(data, S, S, THREE.RGBAFormat);
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  tex.repeat.set(3, 3);
+  tex.needsUpdate = true;
+  return tex;
+}
+
+const glassWarpMap = makeGlassWarpMap();
+
 export const glassMat = new THREE.MeshPhysicalMaterial({
-  color: glassParams.tint,
+  // near-white albedo: the colour now comes from the transmitted VOLUME tint
+  // (attenuationColor), so the pane is clearer and the tint reads as depth
+  color: 0xeef3f6,
   vertexColors: true,
   roughness: glassParams.roughness,
   metalness: 0,
   transmission: glassParams.transmission,
   thickness: glassParams.thickness,
   ior: glassParams.ior,
+  dispersion: glassParams.dispersion,
+  attenuationColor: new THREE.Color(glassParams.tint),
+  attenuationDistance: attenuationDistanceFor(glassParams.attenuation),
+  specularColor: new THREE.Color(0xffffff),
+  specularIntensity: glassParams.rim,
   clearcoat: 1,
   clearcoatRoughness: 0.04,
+  clearcoatNormalMap: glassWarpMap,
+  clearcoatNormalScale: new THREE.Vector2(glassParams.warp, glassParams.warp),
   // the pane is a thin shell; transmission already gives it depth — keep
   // depthWrite so the interior blocks behind sort correctly, but the
   // transmission sampling handles the see-through, not alpha blending
   transparent: false,
 });
+
+/** Map the friendly `attenuation` knob (0…2, higher = clearer) to a
+ *  Beer-Lambert distance. Small distance = transmitted light is filtered by the
+ *  tint over a short path → strongly tinted; large = barely tinted. Clamped so
+ *  the slider's full range stays sane. */
+function attenuationDistanceFor(attenuation: number): number {
+  // 0.2 → ~0.07 (heavy privacy tint), 1.1 → ~0.55, 2.0 → ~1.4 (almost clear)
+  return Math.max(0.04, 0.5 * Math.max(0.05, attenuation) ** 1.6 + 0.05);
+}
 
 /** Push glassParams onto the live material(s). Re-applied whenever a tweak
  *  changes in the debug overlay; also seeds the player's cloned glass via
@@ -91,11 +200,17 @@ export const glassMat = new THREE.MeshPhysicalMaterial({
 export function applyGlassParams(p: Partial<GlassParams> = {}): GlassParams {
   Object.assign(glassParams, p);
   for (const m of glassMats()) {
-    m.color.setHex(glassParams.tint);
+    // tint now lives in the transmitted volume, not the albedo, so the pane
+    // stays clear while the colour reads as depth (LiquidGlass f(dist) idea)
+    m.attenuationColor.setHex(glassParams.tint);
+    m.attenuationDistance = attenuationDistanceFor(glassParams.attenuation);
     m.transmission = glassParams.transmission;
     m.roughness = glassParams.roughness;
     m.thickness = glassParams.thickness;
     m.ior = glassParams.ior;
+    m.dispersion = glassParams.dispersion;
+    m.specularIntensity = glassParams.rim;
+    m.clearcoatNormalScale.set(glassParams.warp, glassParams.warp);
     m.needsUpdate = true;
   }
   // reflection strength rides the env-map intensity baseline for glass, scaled

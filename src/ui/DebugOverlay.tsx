@@ -28,7 +28,11 @@ interface GlassParams {
   roughness: number;
   thickness: number;
   ior: number;
+  dispersion: number;
+  attenuation: number;
   reflection: number;
+  rim: number;
+  warp: number;
   frost: number;
 }
 
@@ -334,9 +338,13 @@ export function DebugOverlay({
             [
               ['transmission', 'SEE-THRU', 0, 1, 0.01],
               ['roughness', 'ROUGH', 0, 0.6, 0.01],
-              ['thickness', 'REFRACT', 0, 0.6, 0.01],
+              ['thickness', 'REFRACT', 0, 0.8, 0.01],
               ['ior', 'IOR', 1, 2.0, 0.01],
+              ['dispersion', 'PRISM', 0, 4, 0.05],
+              ['attenuation', 'DEPTH-TINT', 0.2, 2, 0.02],
+              ['warp', 'WARP', 0, 1.5, 0.02],
               ['reflection', 'REFLECT', 0, 2.0, 0.05],
+              ['rim', 'RIM', 0, 2.0, 0.05],
               ['frost', 'FROST', 0.5, 1, 0.01],
             ] as const
           ).map(([key, label, min, max, step]) => (
@@ -354,7 +362,8 @@ export function DebugOverlay({
             </label>
           ))}
           <div className="dbgNote">
-            Visuals only &middot; FROST = how white a cracked pane goes (next break)
+            Visuals only &middot; DEPTH-TINT = colour through the glass volume &middot;
+            PRISM = chromatic refraction &middot; RIM/WARP = LiquidGlass edge glow + surface wobble
           </div>
         </>
       ) : (
