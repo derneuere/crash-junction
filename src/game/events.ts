@@ -37,9 +37,21 @@ export interface RaceStanding {
   racers: number;
 }
 
+/** A classified takedown for the B3-style banner (takedowns.ts). The banner
+ *  shows the TYPE name and the POINTS; `kind` lets the HUD style signature /
+ *  aftertouch hits differently. Purely presentation — derived from sim state,
+ *  never fed back into it. */
+export interface TakedownBanner {
+  kind: string; // TakedownKind — 'signature' | 'aftertouch' | 'vertical' | …
+  label: string; // the big line: 'CRANE SMASH', 'AFTERTOUCH TAKEDOWN', …
+  points: number; // type-specific points awarded
+  key: number; // monotonic id so the HUD can stack/replace banners
+}
+
 export type CoreEvents = {
   state: GameState;
-  flash: string; // 'CRASHTIME' | 'CRASHBREAKER' | 'TAKEDOWN'
+  flash: string; // 'CRASHTIME' | 'CRASHBREAKER' | 'SLAMMED' | …
+  takedown: TakedownBanner; // classified takedown → the rich B3-style banner
   report: ReportData;
   boost: number; // boost meter fraction 0..1
   replay: boolean; // a recorded take is driving the sim (ESC exits)

@@ -51,6 +51,19 @@ export class Scoreboard {
     }
   }
 
+  /** Type-specific takedown payout (takedowns.ts classified the slam). Unlike
+   *  takedownBonus this is NOT drawn from the victim's finite budget — the
+   *  banner's points are the reward for HOW you took them down (signature,
+   *  aftertouch, vertical, …), so a flashy takedown pays even on a low-value
+   *  car. Rides the pickup multiplier like every other payout. Floated at the
+   *  wreck so the cash reads under the banner. */
+  takedownPoints(points: number, p: THREE.Vector3): void {
+    const pay = Math.round(points * this.mult);
+    if (pay <= 0) return;
+    this.damage += pay;
+    this.floatAt(p, '+$' + pay.toLocaleString('en-US'));
+  }
+
   /** Explosions pay one lump sum: a per-detonation base plus a draw from
    *  every vehicle caught in the blast, floated once at the fireball. */
   beginBlast(power: number): void {

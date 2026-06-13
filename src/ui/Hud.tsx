@@ -1,6 +1,6 @@
 import { GameState, type ModeKind } from '../game/types';
 import type { TimeOfDay } from '../game/daynight';
-import type { CashFloatData, RaceStanding, ReportData } from '../game/events';
+import type { CashFloatData, RaceStanding, ReportData, TakedownBanner } from '../game/events';
 import type { LevelId } from '../game/levels';
 import type { PlayerCarId } from '../game/models';
 import { BoostBar, CrashbreakerBar, RaceChip, RaceTagline, ScoreChip } from './chips';
@@ -22,6 +22,7 @@ interface HudProps {
   multiplier: number;
   boost: number; // 0..1
   flash: FlashState | null;
+  takedown: TakedownBanner | null; // classified takedown → B3-style banner
   report: ReportData | null;
   cash: CashFloatData[];
   crashbreaker: number; // charge fraction 0..1
@@ -44,7 +45,7 @@ interface HudProps {
  *  DAY/NIGHT + engine toggles folded into its cards and footer. */
 export function Hud({
   state, mode, damage, goldTarget, levelId,
-  multiplier, boost, flash, report, cash, crashbreaker, race, replaying, cineCam,
+  multiplier, boost, flash, takedown, report, cash, crashbreaker, race, replaying, cineCam,
   timeOfDay, variants, best, carId, onSelectEvent, onSelectCar, onOpenDebug, onCashDone,
 }: HudProps) {
   const cine = state === GameState.Crash || cineCam;
@@ -75,6 +76,17 @@ export function Hud({
       {flash && (
         <div className="flash" key={flash.key}>
           {flash.text}
+        </div>
+      )}
+
+      {/* B3-style takedown banner: the TYPE name + the points it paid. Keyed on
+          the banner id so each fresh takedown restarts the slam animation
+          (stacked takedowns read as a quick punchy replace). Signature and
+          aftertouch hits get a hotter treatment via the data-kind attribute. */}
+      {takedown && (
+        <div className="takedown" data-kind={takedown.kind} key={takedown.key}>
+          <div className="td-label">{takedown.label}</div>
+          <div className="td-points">+{takedown.points.toLocaleString('en-US')}</div>
         </div>
       )}
 
