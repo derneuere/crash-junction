@@ -31,6 +31,11 @@ const POSES = {
   harbor: { cam: [205, 32, 95], look: [290, 0, 150] },
   cliff: { cam: [212, 26, 150], look: [275, 2, 212] },
   beach: { cam: [-158, 30, -108], look: [-235, 0, -185] },
+  // ART PASS — the SEA. Locked open-water framing off the headland: lots
+  // of animated sea filling the lower frame, the horizon line where the sea
+  // meets the Preetham sky dome up top, and the cliff toe at frame-left to
+  // confirm the waterline/foam seam reads. Frozen for the water art agent.
+  water: { cam: [248, 20, 246], look: [338, -3, 322] },
   // merge-pass seam views (NOT canonical — the four poses above are the
   // contract and stay frozen; these exist to eyeball zone-border stitching)
   // seam-1: the headland crag + the cliff→quay-wall coast seam + the
@@ -47,7 +52,7 @@ const zone = args[0];
 const portIdx = args.indexOf('--port');
 const PORT = portIdx >= 0 ? Number(args[portIdx + 1]) : 5181;
 if (!POSES[zone] || !Number.isInteger(PORT)) {
-  console.error('usage: node tools/refshot.mjs <dockyard|harbor|cliff|beach|seam-1|seam-2> --port <port>');
+  console.error('usage: node tools/refshot.mjs <dockyard|harbor|cliff|beach|water|seam-1|seam-2> --port <port>');
   process.exit(1);
 }
 if (parseInt(process.versions.node, 10) < 18) {

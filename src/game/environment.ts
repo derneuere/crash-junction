@@ -10,11 +10,11 @@ import {
   makeFoamTexture,
   makePatchTexture,
   makeQuayTexture,
-  makeSeaTexture,
   makeWindowTextures,
   type PatchKind,
 } from './textures';
 import type { HeightSampler } from './suspension';
+import { buildSea, type Sea } from './sea';
 
 // Z-ORDER CONTRACT for coplanar ground paint (the camera never goes under
 // the road, so tiny y offsets beat polygonOffset): grass/island ground 0 →
@@ -245,8 +245,9 @@ const SKIRT_W = { beach: 18, wall: 0, cliff: 1.0, bank: 6 } as const;
 /** Island silhouette + sea + coastline skirts (LevelDef.coast). ALL VISUAL:
  *  the physics ground stays the flat y=0 plane out to infinity, so a car
  *  carried past the rim hovers over the water until the off-track rescue
- *  collects it — the accepted arcade tradeoff documented on CoastDef. */
-function buildCoast(scene: THREE.Scene, coast: CoastDef): void {
+ *  collects it — the accepted arcade tradeoff documented on CoastDef.
+ *  Returns the animated-sea handle so the frame loop can drive its waves. */
+function buildCoast(scene: THREE.Scene, coast: CoastDef): Sea {
   const o = coast.outline;
   const n = o.length;
   const sea = coast.seaLevel;
@@ -267,18 +268,16 @@ function buildCoast(scene: THREE.Scene, coast: CoastDef): void {
   island.receiveShadow = true;
   scene.add(island);
 
-  // the sea: one huge plane with baked whitecaps — a backdrop, never a
-  // surface anything lands on, so no animation and no physics
-  const seaTex = makeSeaTexture();
-  seaTex.repeat.set(40, 40); // ~100 m per tile: streaks read as metres of chop
-  const seaMesh = new THREE.Mesh(
-    new THREE.PlaneGeometry(4000, 4000),
-    new THREE.MeshStandardMaterial({ map: seaTex, roughness: 0.8 }),
-  );
-  seaMesh.rotation.x = -Math.PI / 2;
-  seaMesh.position.y = sea;
-  seaMesh.receiveShadow = true;
-  scene.add(seaMesh);
+  // ── SEA SEAM (art-water) ───────────────────────────────────────────────
+  // The old static blue-green plane with baked whitecaps lived here. It is
+  // now an ANIMATED Gerstner sea built in sea.ts (rolling waves + fresnel
+  // depth colour + analytic sky reflection + moving sparkle/whitecaps), still
+  // a pure-visual backdrop with no collider. seaLevel is UNCHANGED at -2.2;
+  // max wave amplitude at the shoreline is SEA_MAX_AMPLITUDE (~0.21 m), so
+  // the foam strip below (riding sea + 0.04) still sits clear of the crests.
+  // The returned handle's update() is driven from the render loop (Game.ts).
+  const seaHandle = buildSea(scene, sea);
+  // ───────────────────────────────────────────────────────────────────────
 
   // per-segment outward normals — the shoelace sign makes the offset robust
   // to either winding even though the CoastDef contract says CCW
@@ -575,6 +574,8 @@ function buildCoast(scene: THREE.Scene, coast: CoastDef): void {
     foam.renderOrder = 1; // after the sea
     scene.add(foam);
   }
+
+  return seaHandle;
 }
 
 /** Embankment drape: the VISUAL ground for the road-base elevation field.
@@ -732,13 +733,16 @@ function addEmbankments(
   scene.add(mesh);
 }
 
-export function buildEnvironment(scene: THREE.Scene, phys: PhysicsContext, level: LevelDef): void {
+/** @returns the animated-sea handle (coast levels only), so the frame loop
+ *  can drive its render-time waves; null on inland levels with no sea. */
+export function buildEnvironment(scene: THREE.Scene, phys: PhysicsContext, level: LevelDef): Sea | null {
   const race = level.mode.kind === 'race' ? level.mode.race : null;
+  let sea: Sea | null = null;
 
   if (level.coast) {
     // an island in the sea: the outline polygon IS the grass, with skirts
     // down to the water — the auto-sized square below would poke through it
-    buildCoast(scene, level.coast);
+    sea = buildCoast(scene, level.coast);
   } else {
     // ground plane sized from level content — the hard-coded 320 cropped any
     // circuit bigger than SILVER LAKE RING; sections, shortcut waypoints,
@@ -1254,4 +1258,6 @@ export function buildEnvironment(scene: THREE.Scene, phys: PhysicsContext, level
     phys.world.addBody(body);
     phys.noCrashIds.add(body.id);
   }
+
+  return sea;
 }
