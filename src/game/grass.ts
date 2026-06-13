@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { hash01 } from './textures';
+import type { LevelDef, GroundPatchDef } from './types';
 
 // ============================================================================
 // INSTANCED 3D-BLADE GRASS — the beach-approach dune lip (GANTRY POINT).
@@ -8,8 +9,8 @@ import { hash01 } from './textures';
 // Round-2 upgrade of the round-1 grass: the textured island-grass ground +
 // the alpha-tongue dune fringe (both in environment.ts) stay as the BASE; this
 // module AUGMENTS them with a field of real 3D blades that sit ON the grass and
-// sway in the wind, then THIN into the sand at the dune lip so the lawn looks
-// like it dissolves into the beach in blades, not at a polygon seam.
+// sway in the wind. Blades are placed ONLY where the ground is genuinely grass
+// and the far field is distance-culled so it costs ~nothing.
 //
 // TECHNIQUE — adapted from FluffyGrass by Ebenezer (MIT):
 //   https://github.com/thebenezer/FluffyGrass
@@ -25,45 +26,50 @@ import { hash01 } from './textures';
 //   art-grass report. License text: _ref/FluffyGrass/LICENSE (not committed).
 //
 // PIN-SAFE / VISUAL ONLY: blades are placed at BUILD TIME (deterministic hash),
-// carry NO collider, and the wind animates off a RENDER-time clock (the same
-// pin-safe pattern as sea.ts — update(dt) only writes a float uniform, never
-// reads sim state). Nothing here enters the world hash.
+// carry NO collider, and the wind animates off a RENDER-time clock (update(dt)
+// only writes a float uniform). Distance culling reads the RENDER-time camera
+// position (passed into update) and only flips per-tile mesh visibility — it
+// never touches sim state, RNG, or the world hash. Nothing here enters the
+// world hash.
 //
-// ── PERF STRATEGY (critical — a 500 m island of blades is ruinous) ──────────
-//   * BOUNDED BAND: blades only cover the SW beach-approach grass band that the
-//     locked `grass-sand` refshot pose actually frames (BAND below), NOT the
-//     whole island. Everything outside the band keeps the textured ground.
-//   * ONE InstancedMesh = ONE draw call. Wind is entirely in the vertex shader
-//     (zero CPU per blade per frame); placement is build-time only.
-//   * DENSITY FALLOFF + cull: instances are rejected (scaled to zero, parked
-//     far below ground) outside the band and past the dune lip, and biased
-//     DENSER toward the camera; blades shrink + drop out approaching the sand.
-//   * TIER GATE: CINE gets the full blade budget; FAST gets a sparse subset
-//     (BUDGET.fast) so the cheap tier leans on the textured-ground fallback.
-//     setTier() just flips InstancedMesh.count — no re-alloc, no re-place.
-//   * frustumCulled stays on: when the band is off-camera the whole mesh is
-//     skipped by three's frustum test.
+// ── GRASS-ONLY PLACEMENT (the fix) ──────────────────────────────────────────
+//   The round-1 band spilled blades onto the dry-SAND apron and across the
+//   BEACH RUN dirt ribbon (and a corner of the road). We now build a HARD mask
+//   from the LEVEL'S OWN surface geometry (read-only — we never edit the level)
+//   and REJECT every candidate that is not on real grass:
+//     * inside the 'sand' patch polygon  -> the dry apron (reject)
+//     * inside the 'gravel' patch polygon -> the motel lot (reject)
+//     * seaward of the 'drygrass' band's seaward edge -> sand (reject); the
+//       drygrass band itself is drying-but-real grass, so blades may live up
+//       to its seaward lip but never past it (this IS the dune lip, derived
+//       from data instead of a hand-typed polyline)
+//     * within (half-width + margin) of the MAIN race ribbon centreline (the
+//       road) or of any SHORTCUT ribbon centreline (the BEACH RUN dirt cut
+//       slices straight through the band) -> on/near road (reject)
+//   The mask is a hard accept/reject, not a probability ramp, so ZERO blades
+//   sit on sand, gravel, or road.
+//
+// ── DISTANCE CULLING (the other fix) ────────────────────────────────────────
+//   The band is partitioned into a grid of TILES; each non-empty tile is its
+//   own InstancedMesh with its own bounding sphere. update(dt, camPos) hides a
+//   whole tile when its centre is beyond CULL_RADIUS from the camera, so the
+//   far field draws nothing. three's own frustumCulled (left on per tile) drops
+//   off-screen tiles too. The far field costs ~one cheap distance check / tile.
+//
+//   * ONE InstancedMesh PER TILE = one draw call per VISIBLE tile (off-screen /
+//     far tiles issue none). Wind is entirely in the vertex shader (zero CPU
+//     per blade per frame); placement is build-time only.
+//   * TIER GATE: CINE gets the full per-tile blade budget; FAST gets a sparse
+//     subset (each tile's count scaled by BUDGET.fast/BUDGET.cine) so the cheap
+//     tier leans on the textured-ground fallback. setTier() just flips each
+//     tile's InstancedMesh.count — no re-alloc, no re-place.
 // ============================================================================
 
 /** Bounded grass band on the SW dune approach (world metres). Sized to the
  *  locked grass-sand pose: foreground green lawn on the LEFT thinning through
  *  the drygrass dune band into the dry-sand apron. We only scatter blades that
- *  land in this rectangle AND on the inland (grass) side of the dune lip. */
+ *  land in this rectangle AND pass the grass-only mask below. */
 const BAND = { minX: -262, maxX: -150, minZ: -240, maxZ: -86 } as const;
-
-/** The dune lip runs roughly NW->SE across the band — the same polyline the
- *  beach.ts tufts/sand patch track. We thin blades toward (and a little past)
- *  it. A point's "seaward distance" is measured along the band's seaward
- *  normal from this line; positive = toward the sand. */
-const LIP = [
-  [-245, -90],
-  [-228, -130],
-  [-209, -150],
-  [-190, -182],
-  [-174, -204],
-  [-156, -228],
-  [-128, -234],
-] as const;
 
 /** Per-tier instance budgets. CINE is the cinematic look; FAST stays sparse so
  *  the textured ground carries the cheap tier. Total allocated = cine. */
@@ -74,19 +80,165 @@ const BUDGET = { cine: 24000, fast: 5000 } as const;
  *  reaches of the band stay sparse. Visual bias only, not the real camera. */
 const POV = new THREE.Vector3(-198, 8, -120);
 
-/** Signed seaward distance (m) of (x,z) from the dune lip polyline. Negative =
- *  inland on the grass; positive = out onto the sand. Used to keep blades on
- *  the grass and thin them across the lip. */
-function seawardDist(x: number, z: number): number {
-  // nearest segment of the lip, then signed perpendicular distance using the
-  // band's seaward normal (the lip trends NW->SE; sand is to the SW/down-z).
+/** Distance-cull radius (m): a tile whose centre is farther than this from the
+ *  live camera is hidden. Sized generously past the framed foreground so the
+ *  near field always reads lush, while the far half of the band drops out. */
+const CULL_RADIUS = 150;
+
+/** Spatial tile size (m) for the culling grid. The band is ~112 x 154 m, so a
+ *  28 m tile yields a 4 x 6 grid — coarse enough that the per-tile overhead is
+ *  trivial, fine enough that culling and three's frustum test are meaningful. */
+const TILE_SIZE = 28;
+
+// ── ROAD/SURFACE MASK GEOMETRY (read from the level; never mutated) ─────────
+
+/** Even-odd point-in-polygon test (ray cast). poly is a closed ring of
+ *  [x, z] vertices (the level's GroundPatchDef.poly format). */
+function pointInPoly(x: number, z: number, poly: readonly (readonly [number, number])[]): boolean {
+  let inside = false;
+  const n = poly.length;
+  for (let i = 0, j = n - 1; i < n; j = i++) {
+    const xi = poly[i][0];
+    const zi = poly[i][1];
+    const xj = poly[j][0];
+    const zj = poly[j][1];
+    const intersect = zi > z !== zj > z && x < ((xj - xi) * (z - zi)) / (zj - zi) + xi;
+    if (intersect) inside = !inside;
+  }
+  return inside;
+}
+
+/** Squared distance from (x,z) to the polyline `pts` (a road/ribbon
+ *  centreline). Walks each segment and keeps the nearest perpendicular foot,
+ *  clamped to the segment. Returns metres² so callers compare against a
+ *  squared half-width without a sqrt. */
+function distToPolylineSq(x: number, z: number, pts: readonly (readonly [number, number])[]): number {
+  let best = Infinity;
+  for (let i = 0; i < pts.length - 1; i++) {
+    const ax = pts[i][0];
+    const az = pts[i][1];
+    const bx = pts[i + 1][0];
+    const bz = pts[i + 1][1];
+    const dx = bx - ax;
+    const dz = bz - az;
+    const len2 = dx * dx + dz * dz || 1;
+    let t = ((x - ax) * dx + (z - az) * dz) / len2;
+    t = Math.max(0, Math.min(1, t));
+    const px = ax + dx * t;
+    const pz = az + dz * t;
+    const d2 = (x - px) * (x - px) + (z - pz) * (z - pz);
+    if (d2 < best) best = d2;
+  }
+  return best;
+}
+
+/** A "road keep-out": a centreline polyline plus a clearance radius (m). A
+ *  candidate within `radius` of the line is on/near paving and is rejected. */
+interface RoadMask {
+  pts: [number, number][];
+  radiusSq: number;
+}
+
+/** The grass-only mask, built once from the level's surface geometry. */
+interface SurfaceMask {
+  /** Polygons that are NOT grass (sand apron, gravel lot) — reject if inside. */
+  rejectPolys: GroundPatchDef['poly'][];
+  /** The drygrass band's SEAWARD edge polyline = the real dune lip. Anything
+   *  on the seaward side of this is sand; null if the band can't be found. */
+  lip: { seaward: [number, number][]; sandInsideSign: number } | null;
+  /** Road/ribbon keep-outs (main loop + shortcuts). */
+  roads: RoadMask[];
+}
+
+/** Pull the SW-beach 'drygrass' band out of the level (the same patch the
+ *  dune fringe uses) and split its thin loop into a seaward and an inland edge
+ *  at its narrow ends (min/max x). The seaward edge is the dune lip: blades may
+ *  reach it but not pass it. Mirrors environment.ts addDuneFringe's split so
+ *  the blade lip and the painted fringe agree. */
+function findDuneLip(patches: GroundPatchDef[]): SurfaceMask['lip'] {
+  const band = patches.find(
+    (p) => p.kind === 'drygrass' && p.poly.length >= 6 && p.poly.every(([x, z]) => x <= -78 && z <= -60),
+  );
+  if (!band) return null;
+  const poly = band.poly;
+  const M = poly.length;
+  let iMin = 0;
+  let iMax = 0;
+  for (let i = 1; i < M; i++) {
+    if (poly[i][0] < poly[iMin][0]) iMin = i;
+    if (poly[i][0] > poly[iMax][0]) iMax = i;
+  }
+  const walk = (from: number, to: number): [number, number][] => {
+    const out: [number, number][] = [];
+    for (let i = from; ; i = (i + 1) % M) {
+      out.push([poly[i][0], poly[i][1]]);
+      if (i === to) break;
+    }
+    return out;
+  };
+  const edgeA = walk(iMin, iMax);
+  const edgeB = walk(iMax, iMin);
+  // inland edge sits at higher (less negative) z on average; seaward hugs sand
+  const meanZ = (e: [number, number][]): number => e.reduce((s, p) => s + p[1], 0) / e.length;
+  const seaward = meanZ(edgeA) > meanZ(edgeB) ? edgeB : edgeA;
+  // orient W->E so it runs the same way regardless of which loop half it is
+  if (seaward[0][0] > seaward[seaward.length - 1][0]) seaward.reverse();
+  return { seaward, sandInsideSign: 0 };
+}
+
+/** Build the grass-only mask from the level's own surface geometry. We read
+ *  level data (patches + race ribbon + shortcuts) but never mutate it. */
+function buildSurfaceMask(level: LevelDef): SurfaceMask {
+  const patches = level.patches ?? [];
+  // sand apron + gravel motel lot in the SW beach quadrant = NOT grass.
+  const rejectPolys: GroundPatchDef['poly'][] = patches
+    .filter(
+      (p) =>
+        (p.kind === 'sand' || p.kind === 'gravel') &&
+        p.poly.every(([x, z]) => x <= -60 && z <= -40),
+    )
+    .map((p) => p.poly);
+
+  const lip = findDuneLip(patches);
+
+  const roads: RoadMask[] = [];
+  const race = level.mode.kind === 'race' ? level.mode.race : null;
+  if (race) {
+    // MAIN loop centreline (closed) — half-width + a margin so blades never
+    // touch the ribbon edge or its kerb. Only the SW arc nears the band, but
+    // masking the whole loop is cheap and robust to waypoint tweaks.
+    const mainPts: [number, number][] = race.sections.map((s) => [s.x, s.z]);
+    if (mainPts.length > 1) {
+      mainPts.push([mainPts[0][0], mainPts[0][1]]); // close the loop
+      const r = race.width / 2 + 3; // 11 + 3 m clearance
+      roads.push({ pts: mainPts, radiusSq: r * r });
+    }
+    // SHORTCUT ribbons (BEACH RUN dirt cut slices through the band).
+    for (const sc of race.shortcuts ?? []) {
+      const pts: [number, number][] = sc.waypoints.map((w) => [w[0], w[1]]);
+      if (pts.length > 1) {
+        const r = sc.width / 2 + 2.5; // 6 + 2.5 m clearance for BEACH RUN
+        roads.push({ pts, radiusSq: r * r });
+      }
+    }
+  }
+
+  return { rejectPolys, lip, roads };
+}
+
+/** Signed seaward distance (m) of (x,z) from the dune-lip polyline. Negative =
+ *  inland on the grass; positive = out onto the sand. Drives the visual
+ *  thinning near the lip (the hard sand-rejection is the sand polygon). */
+function seawardDist(x: number, z: number, lip: SurfaceMask['lip']): number {
+  if (!lip) return -100; // no lip data -> treat everything as well inland
+  const pts = lip.seaward;
   let best = Infinity;
   let bestSigned = 0;
-  for (let i = 0; i < LIP.length - 1; i++) {
-    const ax = LIP[i][0];
-    const az = LIP[i][1];
-    const bx = LIP[i + 1][0];
-    const bz = LIP[i + 1][1];
+  for (let i = 0; i < pts.length - 1; i++) {
+    const ax = pts[i][0];
+    const az = pts[i][1];
+    const bx = pts[i + 1][0];
+    const bz = pts[i + 1][1];
     const dx = bx - ax;
     const dz = bz - az;
     const len2 = dx * dx + dz * dz || 1;
@@ -97,9 +249,8 @@ function seawardDist(x: number, z: number): number {
     const d = Math.hypot(x - px, z - pz);
     if (d < best) {
       best = d;
-      // seaward normal of this segment: rotate the along-lip dir so it points
-      // toward the sand (down-left in world == more negative x & z). The lip
-      // is authored W->E along the array, so (dz,-dx) points seaward here.
+      // seaward normal of this segment: the lip runs W->E and the sand lies
+      // down-z (more negative z), so (dz,-dx) points seaward.
       const nlen = Math.hypot(dz, dx) || 1;
       const nx = dz / nlen;
       const nz = -dx / nlen;
@@ -107,6 +258,16 @@ function seawardDist(x: number, z: number): number {
     }
   }
   return bestSigned;
+}
+
+/** True iff (x,z) is on genuine grass: not in a non-grass polygon, not seaward
+ *  of the dune lip, not on/near a road or shortcut ribbon. HARD mask. */
+function isGrass(x: number, z: number, mask: SurfaceMask): boolean {
+  for (const poly of mask.rejectPolys) if (pointInPoly(x, z, poly)) return false;
+  // seaward of the dune lip = sand (belt-and-suspenders with the sand polygon)
+  if (mask.lip && seawardDist(x, z, mask.lip) > 0) return false;
+  for (const road of mask.roads) if (distToPolylineSq(x, z, road.pts) < road.radiusSq) return false;
+  return true;
 }
 
 /** Build ONE tapered grass blade as a thin vertical strip. uv.y runs 0 at the
@@ -145,13 +306,17 @@ function makeBladeGeometry(): THREE.BufferGeometry {
   return geo;
 }
 
-/** Handle returned by buildGrass: the instanced mesh (already added) plus the
- *  render-loop hooks. update(dt) advances the wind clock; setTier() flips the
- *  CINE/FAST blade count; setTimeOfDay() tunes the lit base colour. */
+/** Handle returned by buildGrass: the instanced meshes (already added) plus the
+ *  render-loop hooks. update(dt, camPos) advances the wind clock and distance-
+ *  culls far tiles; setTier() flips the CINE/FAST blade count; setTimeOfDay()
+ *  tunes the lit base colour. */
 export interface GrassField {
-  mesh: THREE.InstancedMesh;
-  /** @param dtSeconds elapsed RENDER time since last frame (seconds) */
-  update(dtSeconds: number): void;
+  /** All per-tile instanced meshes (one draw call each when visible). */
+  meshes: THREE.InstancedMesh[];
+  /** @param dtSeconds elapsed RENDER time since last frame (seconds)
+   *  @param camPos live camera world position for distance culling (optional;
+   *         omit to leave every tile drawn) */
+  update(dtSeconds: number, camPos?: THREE.Vector3): void;
   /** CINE = full budget, FAST = sparse subset. Visual only. */
   setTier(gfx: 'cine' | 'fast'): void;
   /** Re-tint the blades' lit response to match the time-of-day sky. */
@@ -166,15 +331,28 @@ export interface GrassPalette {
   tint: number;
 }
 
+/** One spatial tile of the band: an InstancedMesh + its world-space centre,
+ *  for the distance cull. cineCount/fastCount are its per-tier blade counts. */
+interface GrassTile {
+  mesh: THREE.InstancedMesh;
+  cx: number;
+  cz: number;
+  cineCount: number;
+  fastCount: number;
+}
+
 /**
  * Build the instanced blade field for the SW dune approach and add it to
  * `scene`. The caller only invokes this on coast levels (the band is
  * GANTRY-specific); inland levels get no grass field.
  *
  * @param scene the world scene (its PMREM environment lights the blades)
+ * @param level the level def — READ (never mutated) for its surface geometry
+ *        so blades land only on real grass, off the sand/gravel/road.
  */
-export function buildGrass(scene: THREE.Scene): GrassField {
+export function buildGrass(scene: THREE.Scene, level: LevelDef): GrassField {
   const geo = makeBladeGeometry();
+  const mask = buildSurfaceMask(level);
 
   // Base material: MeshStandard so the blades pick up the PMREM sky env +
   // scene fog + shadows the same way the textured ground does — that's what
@@ -192,7 +370,8 @@ export function buildGrass(scene: THREE.Scene): GrassField {
     shadowSide: THREE.DoubleSide,
   });
 
-  // wind clock + per-tod tint, shared into the patched shader
+  // wind clock + per-tod tint, shared into the patched shader (one material
+  // shared by every tile mesh, so one uniform write tints/sways them all)
   const uTime = { value: 0 };
   const uAmbient = { value: 1 };
   const uBaseColor = { value: BASE_COL.clone() };
@@ -264,36 +443,36 @@ export function buildGrass(scene: THREE.Scene): GrassField {
   // a stable cache key so three doesn't think every blade mesh is a new program
   mat.customProgramCacheKey = () => 'cj-grass-blade';
 
-  const mesh = new THREE.InstancedMesh(geo, mat, BUDGET.cine);
-  mesh.castShadow = false; // self-shadowing thousands of blades is a perf trap
-  mesh.receiveShadow = true;
-  mesh.frustumCulled = true;
-  mesh.name = 'cj-grass-blades';
-
   // ── PLACEMENT (build-time, deterministic hash) ─────────────────────────
-  // Walk the bounded band, scatter candidate blades, keep the ones that land
-  // on the grass side of the dune lip. Density falls off with seaward distance
-  // (thinning into the sand) and with distance from the POV (foreground lush,
-  // background sparse). Rejected slots are parked far below ground at zero
-  // scale so they never draw.
+  // Walk the bounded band, scatter candidate blades, keep the ones that land on
+  // GENUINE GRASS (the hard surface mask). Each accepted blade is binned into a
+  // spatial TILE so we can distance-cull whole tiles cheaply. Density still
+  // biases denser toward the POV (foreground lush, background sparse) and the
+  // blades shrink approaching the lip so the lawn thins out rather than ending
+  // at a hard edge.
+  const tileBlades = new Map<string, THREE.Matrix4[]>();
   const m = new THREE.Matrix4();
   const q = new THREE.Quaternion();
   const yAxis = new THREE.Vector3(0, 1, 0);
   const s = new THREE.Vector3();
   const pos = new THREE.Vector3();
   let placed = 0;
-  // oversample the band, accept by probability — gives organic clumping
-  for (let i = 0; placed < BUDGET.cine && i < BUDGET.cine * 4; i++) {
+  const cols = Math.max(1, Math.ceil((BAND.maxX - BAND.minX) / TILE_SIZE));
+  // oversample the band, accept by probability AND the hard grass mask
+  for (let i = 0; placed < BUDGET.cine && i < BUDGET.cine * 6; i++) {
     const rx = hash01(i * 2.0 + 11.3);
     const rz = hash01(i * 2.0 + 91.7);
     const x = BAND.minX + rx * (BAND.maxX - BAND.minX);
     const z = BAND.minZ + rz * (BAND.maxZ - BAND.minZ);
 
-    // dune-lip gate: keep blades inland (sd < 0) and let a few finger a metre
-    // or two onto the sand (sd up to ~+2) where they thin to nothing.
-    const sd = seawardDist(x, z);
-    // probability 1 well inland, ramping to 0 a couple metres onto the sand
-    const lipKeep = sd < -4 ? 1 : sd > 2 ? 0 : (2 - sd) / 6;
+    // HARD grass-only mask: zero blades on sand / gravel / road / past the lip.
+    if (!isGrass(x, z, mask)) continue;
+
+    // visual thinning near the lip: probability ramps down over the last few
+    // metres of grass before the sand so the lawn fades in density too (this
+    // is cosmetic — the hard sand rejection already keeps blades off the sand).
+    const sd = seawardDist(x, z, mask.lip);
+    const lipKeep = sd < -6 ? 1 : (0 - sd) / 6; // sd in [-6,0] -> 1..0
 
     // POV falloff: lush within ~60 m of the framed foreground, sparse past
     // ~130 m, so the band's far end barely seeds blades.
@@ -305,9 +484,9 @@ export function buildGrass(scene: THREE.Scene): GrassField {
 
     // size: taller/lusher inland, shrinking as it nears the sand so the
     // transition reads as the lawn thinning out, not a hard edge
-    const thin = Math.max(0, Math.min(1, (sd + 4) / 6)); // 0 inland -> 1 at lip
+    const thin = Math.max(0, Math.min(1, (sd + 6) / 6)); // 0 inland -> 1 at lip
     const baseH = 0.55 + hash01(i * 3.0 + 7.1) * 0.7; // 0.55..1.25 m tall
-    const h = baseH * (1 - thin * 0.55);
+    const h = baseH * (1 - thin * 0.5);
     const w = 0.8 + hash01(i * 3.0 + 51.9) * 0.6; // width jitter
     s.set(w, h, 1);
 
@@ -315,30 +494,77 @@ export function buildGrass(scene: THREE.Scene): GrassField {
     const yaw = hash01(i * 3.0 + 13.7) * Math.PI * 2;
     q.setFromAxisAngle(yAxis, yaw);
     m.compose(pos, q, s);
-    mesh.setMatrixAt(placed, m);
+
+    // bin into its spatial tile (for the distance cull)
+    const tcol = Math.min(cols - 1, Math.floor((x - BAND.minX) / TILE_SIZE));
+    const trow = Math.floor((z - BAND.minZ) / TILE_SIZE);
+    const key = `${tcol},${trow}`;
+    let bucket = tileBlades.get(key);
+    if (!bucket) {
+      bucket = [];
+      tileBlades.set(key, bucket);
+    }
+    bucket.push(m.clone());
     placed++;
   }
-  // any unfilled tail (shouldn't happen, but be safe) -> zero-scale, buried
-  m.compose(new THREE.Vector3(0, -1000, 0), q, new THREE.Vector3(0, 0, 0));
-  for (let i = placed; i < BUDGET.cine; i++) mesh.setMatrixAt(i, m);
-  mesh.instanceMatrix.needsUpdate = true;
 
-  // FAST budget is a sparse contiguous prefix of the same buffer; because
-  // placement is interleaved hash (not sorted), the prefix is itself a
-  // well-spread subset — no separate placement pass needed.
-  const cineCount = placed;
-  const fastCount = Math.min(placed, BUDGET.fast);
-  mesh.count = cineCount;
+  // ── REALISE TILES ──────────────────────────────────────────────────────
+  // one InstancedMesh per non-empty tile; each carries its own bounding sphere
+  // so three's frustumCulled drops off-screen tiles, and we distance-cull whole
+  // tiles by their centre each frame. FAST budget is a per-tile prefix of the
+  // (hash-interleaved, well-spread) instance list — no separate placement pass.
+  const fastFrac = Math.min(1, BUDGET.fast / Math.max(1, placed));
+  const tiles: GrassTile[] = [];
+  const meshes: THREE.InstancedMesh[] = [];
+  for (const [, bucket] of tileBlades) {
+    const n = bucket.length;
+    if (n === 0) continue;
+    const mesh = new THREE.InstancedMesh(geo, mat, n);
+    mesh.castShadow = false; // self-shadowing thousands of blades is a perf trap
+    mesh.receiveShadow = true;
+    mesh.frustumCulled = true; // off-screen tiles skipped by three's frustum test
+    mesh.name = 'cj-grass-blades';
+    let sumX = 0;
+    let sumZ = 0;
+    for (let k = 0; k < n; k++) {
+      mesh.setMatrixAt(k, bucket[k]);
+      sumX += bucket[k].elements[12];
+      sumZ += bucket[k].elements[14];
+    }
+    mesh.instanceMatrix.needsUpdate = true;
+    mesh.computeBoundingSphere(); // tight sphere -> accurate frustum cull
+    const cineCount = n;
+    const fastCount = Math.max(1, Math.round(n * fastFrac));
+    mesh.count = cineCount;
+    scene.add(mesh);
+    meshes.push(mesh);
+    tiles.push({ mesh, cx: sumX / n, cz: sumZ / n, cineCount, fastCount });
+  }
 
-  scene.add(mesh);
+  let currentTier: 'cine' | 'fast' = 'cine';
+  const cullR2 = CULL_RADIUS * CULL_RADIUS;
 
   return {
-    mesh,
-    update(dt) {
+    meshes,
+    update(dt, camPos) {
       uTime.value += dt;
+      // distance-cull whole tiles: hide any tile whose centre is beyond the
+      // cull radius from the live camera. Pure visibility flip — pin-safe,
+      // reads only the render-time camera position. (Frustum culling of
+      // on-screen-but-off-frustum tiles is handled by three via frustumCulled.)
+      if (camPos) {
+        for (const t of tiles) {
+          const dx = t.cx - camPos.x;
+          const dz = t.cz - camPos.z;
+          t.mesh.visible = dx * dx + dz * dz <= cullR2;
+        }
+      } else {
+        for (const t of tiles) t.mesh.visible = true;
+      }
     },
     setTier(gfx) {
-      mesh.count = gfx === 'fast' ? fastCount : cineCount;
+      currentTier = gfx;
+      for (const t of tiles) t.mesh.count = gfx === 'fast' ? t.fastCount : t.cineCount;
     },
     setTimeOfDay(p) {
       uAmbient.value = p.ambient;
@@ -346,6 +572,7 @@ export function buildGrass(scene: THREE.Scene): GrassField {
       const t = new THREE.Color(p.tint);
       uBaseColor.value.copy(BASE_COL).lerp(t, 0.12);
       uTipColor.value.copy(TIP_COL).lerp(t, 0.08);
+      void currentTier;
     },
   };
 }

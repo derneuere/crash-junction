@@ -2042,7 +2042,7 @@ export class Game {
 
     // presentation pixels only from here down — the sim never reads back
     this.sea?.update(af.dt); // animate the waves off RENDER time (pin-safe)
-    this.grass?.update(af.dt); // sway the blades off RENDER time (pin-safe)
+    this.grass?.update(af.dt, this.camera.position); // sway + distance-cull off RENDER time (pin-safe)
     this.skyClock += af.dt; // drift the dome clouds off RENDER time (pin-safe)
     this.skyRig.setCloudTime(this.skyClock);
     this.updateShadowRig();
