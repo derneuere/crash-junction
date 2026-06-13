@@ -1562,6 +1562,16 @@ export function buildEnvironment(scene: THREE.Scene, phys: PhysicsContext, level
     // checkpoints: a painted stripe + glowing gate posts every 6th section,
     // so the racing line always has a visible next target. Posts and
     // stripes ride the section's road elevation on the north arc.
+    //
+    // The ~70 gate posts are one shared cylinder geometry + one shared
+    // (night-emissive) material, so they BATCH into instanced draws — but
+    // chunked SPATIALLY (per ~80 m run of the lap) so the batch's bounding
+    // sphere stays local and three's frustum culling still drops the gates
+    // behind the camera. A single level-spanning InstancedMesh would wrap the
+    // whole 2 km lap and draw every gate every frame (and ×6 through the cube
+    // reflection) — the spatial bins keep the cull working, same lesson as the
+    // prop batcher and grass. Pure presentation; the painted stripe (marks)
+    // and the gate placement are unchanged.
     const postGeo = new THREE.CylinderGeometry(0.12, 0.16, 2.6, 8);
     const postMat = new THREE.MeshStandardMaterial({
       color: 0x22262c,
@@ -1569,18 +1579,38 @@ export function buildEnvironment(scene: THREE.Scene, phys: PhysicsContext, level
       emissiveIntensity: 1.4,
     });
     postMat.userData.night = { intensity: 2.4, day: 1.4 };
+    const postBins = new Map<number, { x: number; y: number; z: number }[]>();
+    const POST_BIN = 80; // m of lap per instanced chunk
+    let postRun = 0; // running arc length, for the spatial bin
     for (let i = 6; i < N; i += 6) {
       const s = secs[i];
       marks.push({
         x: s.x, z: s.z, w: race.width - 2, l: 0.7, yaw: Math.atan2(s.dirX, s.dirZ),
         y: s.y + 0.015, pitch: -Math.atan(gradeAt(secs, i, true)),
       });
+      const bin = Math.floor((postRun += 6 * 8 /* ~section spacing */) / POST_BIN);
+      let bucket = postBins.get(bin);
+      if (!bucket) postBins.set(bin, (bucket = []));
       for (const side of [1, -1]) {
-        const post = new THREE.Mesh(postGeo, postMat);
-        post.position.set(s.x - side * s.dirZ * (w2 + 1.1), s.y + 1.3, s.z + side * s.dirX * (w2 + 1.1));
-        post.castShadow = true;
-        scene.add(post);
+        bucket.push({
+          x: s.x - side * s.dirZ * (w2 + 1.1),
+          y: s.y + 1.3,
+          z: s.z + side * s.dirX * (w2 + 1.1),
+        });
       }
+    }
+    for (const bucket of postBins.values()) {
+      const inst = new THREE.InstancedMesh(postGeo, postMat, bucket.length);
+      inst.castShadow = true;
+      inst.frustumCulled = true;
+      const pm = new THREE.Matrix4();
+      bucket.forEach((p, k) => {
+        pm.makeTranslation(p.x, p.y, p.z);
+        inst.setMatrixAt(k, pm);
+      });
+      inst.instanceMatrix.needsUpdate = true;
+      inst.computeBoundingSphere();
+      scene.add(inst);
     }
     // shortcut branch ribbons: same strip builder, own narrower chain, a
     // dirt or asphalt tint, and a hair LOWER than the main road (0.010 vs
