@@ -56,6 +56,14 @@ const POSES = {
   // grazing low-angle variants buried the wash in a one-pixel line; this
   // slight downward tilt is what makes the beach read AS a beach. FROZEN.
   sandwater: { cam: [-236, 9, -158], look: [-280, -2.2, -204] },
+  // grass-sand: LOCKED art pose for the GRASS + grass→sand dune-lip pass.
+  // A low, raking angle across the SW beach dune lip: foreground green
+  // island grass on the left thins through the mottled drygrass dune band
+  // into the dry-sand apron of the Beach Run (rope fence on the lip, palms +
+  // sea beyond). The green→drygrass→tan transition fills the lower-mid
+  // frame, the motel is out of frame to the right. LOCKED — do not move the
+  // framing (art-grass-sand contract).
+  'grass-sand': { cam: [-198, 8, -120], look: [-238, 0, -180] },
 };
 
 // ---- CLI ----
@@ -71,7 +79,7 @@ const TOD = todIdx >= 0 ? args[todIdx + 1] : 'day';
 const gfxIdx = args.indexOf('--gfx');
 const GFX = gfxIdx >= 0 ? args[gfxIdx + 1] : 'cine';
 if (!POSES[zone] || !Number.isInteger(PORT) || !['day', 'dusk', 'night'].includes(TOD) || !['cine', 'fast'].includes(GFX)) {
-  console.error('usage: node tools/refshot.mjs <dockyard|harbor|cliff|beach|water|seam-1|seam-2|sandwater> --port <port> [--tod day|dusk|night] [--gfx cine|fast]');
+  console.error('usage: node tools/refshot.mjs <dockyard|harbor|cliff|beach|water|seam-1|seam-2|sandwater|grass-sand> --port <port> [--tod day|dusk|night] [--gfx cine|fast]');
   process.exit(1);
 }
 if (parseInt(process.versions.node, 10) < 18) {

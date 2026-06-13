@@ -7,7 +7,9 @@ import {
   hash01,
   makeChainLinkTexture,
   makeChevronTexture,
+  makeDuneBlendTexture,
   makeFoamTexture,
+  makeGrassTexture,
   makePatchTexture,
   makeQuayTexture,
   makeWetSandTexture,
@@ -261,9 +263,16 @@ function buildCoast(scene: THREE.Scene, coast: CoastDef): Sea {
   // island ground: the outline polygon replaces the auto-sized grass
   // square. Shape space (x, -z) lands back on world (x, z) under the same
   // rotation.x = -PI/2 the plane ground uses.
+  // [art-grass-sand] Textured lawn instead of the old flat 0x59614f fill:
+  // ShapeGeometry UVs are raw shape coords (= world metres), so the repeat
+  // alone world-tiles the grass seamlessly across the whole island — same
+  // (x,−z) rule the ground patches use. A faint base tint keeps the lit
+  // material grounded under the Preetham sky; the map carries the variation.
+  const grassTex = makeGrassTexture();
+  grassTex.repeat.setScalar(1 / 7); // ~7 m tile: clumps read as metres of meadow
   const island = new THREE.Mesh(
     new THREE.ShapeGeometry(new THREE.Shape(o.map((p) => new THREE.Vector2(p.x, -p.z)))),
-    new THREE.MeshStandardMaterial({ color: 0x59614f, roughness: 1 }),
+    new THREE.MeshStandardMaterial({ map: grassTex, color: 0xdfe2d2, roughness: 1 }),
   );
   island.rotation.x = -Math.PI / 2;
   island.receiveShadow = true;
@@ -963,6 +972,122 @@ function addEmbankments(
   scene.add(mesh);
 }
 
+/** [art-grass-sand] Dune-lip transition overlay — the GRASS side of the
+ *  grass→sand boundary. Builds a thin alpha-masked grass-tongue strip that
+ *  rides just above the sand at the beach, so the island lawn appears to
+ *  THIN into the sand in broken fingers instead of stopping at a polygon
+ *  seam. Pure visual (no bodies, build-time only, zero determinism cost).
+ *
+ *  Seam contract: this OWNS the grass side only. The SAND patch is the
+ *  sand-water sibling's; we read its (and the dune band's) existing geometry
+ *  and align our fringe to it — we never edit the sand material/patch here.
+ *  The strip is generated from the beach DUNE BAND (the thin 'drygrass'
+ *  patch authored in beach.ts): its loop is split at the two narrow ends
+ *  (min/max x) into a SEAWARD polyline and an INLAND polyline; the fringe is
+ *  a quad strip between them with v=0 inland (full grass) → v=1 seaward
+ *  (bare). makeDuneBlendTexture supplies the height-thresholded grass tongues.
+ */
+function addDuneFringe(scene: THREE.Scene, level: LevelDef): void {
+  // the dune band = the 'drygrass' patch sitting in the SW beach quadrant
+  // (the headland drygrass tongues are drygrass too, but they live NE/E and
+  // meet gold grass, not sand — scope by the beach zone bounds x<-78,z<-60).
+  const band = (level.patches ?? []).find(
+    (p) =>
+      p.kind === 'drygrass' &&
+      p.poly.length >= 6 &&
+      p.poly.every(([x, z]) => x <= -78 && z <= -60),
+  );
+  if (!band) return;
+  const poly = band.poly;
+  const M = poly.length;
+  // split the thin loop into two long edges at its narrow ends (min/max x):
+  // walking from the min-x vertex to the max-x vertex one way is one edge,
+  // the other way is the other. One edge runs nearer the sea, one inland.
+  let iMin = 0;
+  let iMax = 0;
+  for (let i = 1; i < M; i++) {
+    if (poly[i][0] < poly[iMin][0]) iMin = i;
+    if (poly[i][0] > poly[iMax][0]) iMax = i;
+  }
+  const walk = (from: number, to: number): [number, number][] => {
+    const out: [number, number][] = [];
+    for (let i = from; ; i = (i + 1) % M) {
+      out.push(poly[i]);
+      if (i === to) break;
+    }
+    return out;
+  };
+  const edgeA = walk(iMin, iMax);
+  const edgeB = walk(iMax, iMin);
+  // the inland edge sits at higher (less negative) z on average — the band
+  // is authored ~10 m up the lawn on its inland side; the seaward side hugs
+  // the sand. Use mean z to label them robustly.
+  const meanZ = (e: [number, number][]): number => e.reduce((s, p) => s + p[1], 0) / e.length;
+  let inland = meanZ(edgeA) > meanZ(edgeB) ? edgeA : edgeB;
+  let seaward = inland === edgeA ? edgeB : edgeA;
+  // resample both edges to the SAME column count so the strip pairs cleanly,
+  // and orient them to run the same direction (by their first vertex x)
+  if (inland[0][0] > inland[inland.length - 1][0]) inland = [...inland].reverse();
+  if (seaward[0][0] > seaward[seaward.length - 1][0]) seaward = [...seaward].reverse();
+  const COLS = 48;
+  const lerpEdge = (e: [number, number][], t: number): [number, number] => {
+    const f = t * (e.length - 1);
+    const i = Math.min(e.length - 2, Math.floor(f));
+    const k = f - i;
+    return [e[i][0] + (e[i + 1][0] - e[i][0]) * k, e[i][1] + (e[i + 1][1] - e[i][1]) * k];
+  };
+  // push the seaward row a few metres FURTHER onto the sand than the band's
+  // own seaward edge, so the tongues finger past the existing drygrass→sand
+  // line and break that seam too (not just the green→drygrass one)
+  const pos: number[] = [];
+  const uv: number[] = [];
+  let u = 0;
+  let prevX = 0;
+  let prevZ = 0;
+  for (let cIdx = 0; cIdx < COLS; cIdx++) {
+    const t = cIdx / (COLS - 1);
+    const inP = lerpEdge(inland, t);
+    const seP = lerpEdge(seaward, t);
+    // extend ~4 m seaward along the inland→seaward direction
+    const dx = seP[0] - inP[0];
+    const dz = seP[1] - inP[1];
+    const dl = Math.hypot(dx, dz) || 1;
+    const seX = seP[0] + (dx / dl) * 4;
+    const seZ = seP[1] + (dz / dl) * 4;
+    if (cIdx > 0) u += Math.hypot(inP[0] - prevX, inP[1] - prevZ) / 9; // tile u every ~9 m
+    prevX = inP[0];
+    prevZ = inP[1];
+    // two rows: inland (v0) then seaward (v1)
+    pos.push(inP[0], 0, inP[1], seX, 0, seZ);
+    uv.push(u, 0, u, 1);
+  }
+  const idx: number[] = [];
+  for (let cIdx = 0; cIdx < COLS - 1; cIdx++) {
+    const a = cIdx * 2;
+    idx.push(a, a + 1, a + 2, a + 1, a + 3, a + 2);
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(pos), 3));
+  geo.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(uv), 2));
+  geo.setIndex(idx);
+  geo.computeVertexNormals();
+  const mat = new THREE.MeshStandardMaterial({
+    map: makeDuneBlendTexture(),
+    transparent: true,
+    alphaTest: 0.35, // cut the tongues crisply so they take light + shadow
+    roughness: 1,
+    side: THREE.DoubleSide,
+    polygonOffset: true, // float just over the sand patch (0.006) without z-fight
+    polygonOffsetFactor: -2,
+    polygonOffsetUnits: -2,
+  });
+  const fringe = new THREE.Mesh(geo, mat);
+  fringe.position.y = 0.0068; // above the sand patch (0.006), below the ribbons (0.010)
+  fringe.rotation.x = 0; // positions are already world (x, y, z)
+  fringe.receiveShadow = true;
+  scene.add(fringe);
+}
+
 /** @returns the animated-sea handle (coast levels only), so the frame loop
  *  can drive its render-time waves; null on inland levels with no sea. */
 export function buildEnvironment(scene: THREE.Scene, phys: PhysicsContext, level: LevelDef): Sea | null {
@@ -1023,6 +1148,12 @@ export function buildEnvironment(scene: THREE.Scene, phys: PhysicsContext, level
       scene.add(mesh);
     }
   }
+
+  // [art-grass-sand] grass-side dune-lip transition: a grass-tongue fringe
+  // over the sand at the beach so the green→tan boundary reads as the lawn
+  // thinning into sand, not a polygon seam. Own block; reads patch geometry
+  // only, never edits the shared patch loop above.
+  addDuneFringe(scene, level);
 
   const roadMat = new THREE.MeshStandardMaterial({ color: 0x2e3138, roughness: 0.95 });
 
