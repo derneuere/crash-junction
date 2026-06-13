@@ -3,6 +3,7 @@ export {
   makeColoredBox, applyUniformColor, smoothstep, registerCarMaterial, setCarEnvMap, applyCarEnvScale,
   registerPlayerSwappable, adoptPlayerMaterials, setPlayerEnvMap,
   buildNormalSmoothing, applyNormalSmoothing,
+  glassParams, applyGlassParams, type GlassParams,
 } from './shared';
 export { makeSedanGeometry } from './sedan';
 export { makeBoxHullGeometry } from './boxHull';

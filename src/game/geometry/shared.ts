@@ -22,16 +22,117 @@ export const hullMat = new THREE.MeshPhysicalMaterial({
   clearcoatRoughness: 0.07,
 });
 
-/** Window panes (the glass index groups of a baked hull): a full mirror
- *  clearcoat over the dark tint — bright sky reflections on near-black
- *  glass, and the frost recolor still reads underneath. */
+// ---------- car glass ----------
+// REAL transmission glass, not the old near-black mirror. MeshPhysicalMaterial
+// transmission samples the framebuffer behind the pane (three runs a hidden
+// transmission pre-pass during renderer.render — which the composer's
+// RenderPass triggers too, so it works in both FAST and CINE tiers), so the
+// already-built dark interior (models.ts buildInterior) actually shows through
+// the windows, TINTED by the material colour. We keep the Burnout clearcoat
+// over the top: clearcoat reflects WHITE sky/cube glints over any base colour
+// (metalness would tint reflections by albedo → near-black glass reflects
+// nothing), so the sky still sweeps across the windscreen. Refs:
+//   pixel-capture.com/tutorials/glass-material-threejs-article (transmission
+//     1 / roughness 0 / ior 1.5 / thickness for a glass pane),
+//   threejs.org MeshPhysicalMaterial (color = tint filter over transmitted
+//     light; ior/thickness drive refraction),
+//   pmndrs/postprocessing#431 (HalfFloat composer + transmission can "burn"
+//     when HDR sky is refracted — so we keep thickness small, transmission
+//     below 1 and a real tint so the pane never samples blown-out HDR; the
+//     interior, not the sky, is what shows through). Single-sided shell, so
+//     no DoubleSide transmission feedback loop (three #33060).
+//
+// vertexColors stays on: shatterGlass paints the FROST/crack web per-vertex
+// (pale, bright), and the frost recolour reads as the pane going opaque-white
+// because frosted verts swamp the dark tint. glassMat.color is the live TINT
+// knob (clear-ish default; a darker "privacy" preset is one setter call away).
+
+/** Live-tweakable glass look (DebugOverlay drives these). Defaults: a faintly
+ *  cool, mostly-clear windscreen that still reflects the sky. */
+export interface GlassParams {
+  tint: number; // base colour = transmission tint filter
+  transmission: number; // 0 opaque … 1 fully see-through
+  roughness: number; // 0 mirror-clear … blurs both transmission and reflection
+  thickness: number; // refraction depth (small — big values "burn" under the composer)
+  ior: number; // index of refraction (glass ≈ 1.5)
+  reflection: number; // clearcoat/env reflection strength (envMapIntensity baseline)
+  frost: number; // how white a frosted (cracked) pane goes (shatterGlass reads this)
+}
+
+export const glassParams: GlassParams = {
+  tint: 0xafc4d4,
+  transmission: 0.82,
+  roughness: 0.12,
+  thickness: 0.18,
+  ior: 1.45,
+  reflection: 1.0,
+  frost: 0.82,
+};
+
 export const glassMat = new THREE.MeshPhysicalMaterial({
+  color: glassParams.tint,
   vertexColors: true,
-  roughness: 0.3,
+  roughness: glassParams.roughness,
   metalness: 0,
+  transmission: glassParams.transmission,
+  thickness: glassParams.thickness,
+  ior: glassParams.ior,
   clearcoat: 1,
   clearcoatRoughness: 0.04,
+  // the pane is a thin shell; transmission already gives it depth — keep
+  // depthWrite so the interior blocks behind sort correctly, but the
+  // transmission sampling handles the see-through, not alpha blending
+  transparent: false,
 });
+
+/** Push glassParams onto the live material(s). Re-applied whenever a tweak
+ *  changes in the debug overlay; also seeds the player's cloned glass via
+ *  setPlayerEnvMap's intensity baseline. Returns the params for chaining. */
+export function applyGlassParams(p: Partial<GlassParams> = {}): GlassParams {
+  Object.assign(glassParams, p);
+  for (const m of glassMats()) {
+    m.color.setHex(glassParams.tint);
+    m.transmission = glassParams.transmission;
+    m.roughness = glassParams.roughness;
+    m.thickness = glassParams.thickness;
+    m.ior = glassParams.ior;
+    m.needsUpdate = true;
+  }
+  // reflection strength rides the env-map intensity baseline for glass, scaled
+  // by the day/night env scale already in effect
+  GLASS_ENV_BASE = glassParams.reflection;
+  refreshGlassEnvIntensity();
+  return glassParams;
+}
+
+/** Every glass material instance the tweaker should drive: the shared showroom
+ *  one (rivals/traffic) plus the player's live-reflection clone, if it exists. */
+function glassMats(): THREE.MeshPhysicalMaterial[] {
+  const out: THREE.MeshPhysicalMaterial[] = [glassMat];
+  const clone = playerSwap.get(glassMat) as THREE.MeshPhysicalMaterial | undefined;
+  if (clone) out.push(clone);
+  return out;
+}
+
+// glass reflection (clearcoat env) strength = base × the live day/night scale.
+// The player's live-cube clone runs a notch hotter (the live world is dimmer
+// than the showroom strip — same convention as registerPlayerSwappable below).
+const GLASS_PLAYER_BOOST = 1.2;
+let GLASS_ENV_BASE = glassParams.reflection;
+function refreshGlassEnvIntensity(): void {
+  // keep the day/night swap (setCarEnvMap / applyCarEnvScale) in sync: those
+  // read ENV_INTENSITY, so writing the base here means a later tod swap picks
+  // up the tweaked reflection strength too
+  ENV_INTENSITY.set(glassMat, GLASS_ENV_BASE);
+  glassMat.envMapIntensity = GLASS_ENV_BASE * envScale;
+  glassMat.needsUpdate = true;
+  const clone = playerSwap.get(glassMat) as THREE.MeshPhysicalMaterial | undefined;
+  if (clone) {
+    PLAYER_INTENSITY.set(clone, GLASS_PLAYER_BOOST * GLASS_ENV_BASE);
+    clone.envMapIntensity = GLASS_PLAYER_BOOST * GLASS_ENV_BASE;
+    clone.needsUpdate = true;
+  }
+}
 
 /** Headlights (and the bus light strip): clearcoated lenses that switch
  *  on at night via the daynight emissive sweep. */

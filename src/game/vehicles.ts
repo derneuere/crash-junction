@@ -4,7 +4,7 @@ import { CRUSH_MAX, CRUSH_VISUAL, GRAVITY, SUSP_MAX_COMP, SUSP_SAG, SUSP_ZETA } 
 import type { Actor, CollideEvent, DeformablePart, SuspensionCorner, VehicleSpawn, VehicleSpec, Variant } from './types';
 import { GROUP_DECOR, type PhysicsContext } from './physics';
 import { simRand } from './rng';
-import { GLASS, adoptPlayerMaterials, applyNormalSmoothing, buildNormalSmoothing, cabinMat, glassMat, headlightMat, hullMat, makeBoxHullGeometry, makeSedanGeometry, makeTankGeometry, metalMat, taillightMat, wheelGeometry, wheelMat } from './geometry';
+import { GLASS, adoptPlayerMaterials, applyNormalSmoothing, buildNormalSmoothing, cabinMat, glassMat, glassParams, headlightMat, hullMat, makeBoxHullGeometry, makeSedanGeometry, makeTankGeometry, metalMat, taillightMat, wheelGeometry, wheelMat } from './geometry';
 import { buildPanels } from './panels';
 import { makeBarrelTexture } from './textures';
 import { applyHullGroups, getVehicleModel, type VehicleModel } from './models';
@@ -47,9 +47,27 @@ function registerDeformable(
   });
 }
 
-/** Hull mesh from a baked Quaternius model: clone the template geometry and
- *  repaint its body panels in the spawn color. The glass index groups wear
- *  their own near-mirror material. */
+// Virgin (unbroken) window vertex tone. The baked GLBs paint glass near-black
+// (rgba ≈ 0.03) — fine for the old mirror material, but transmission multiplies
+// the TINT (glassMat.color) by this per-vertex colour, so a near-black pane
+// crushes all transmitted light to black no matter the tint knob. Lift virgin
+// glass to a neutral grey so glassMat.color is the sole tint filter and the
+// dark interior actually shows through; the frost/crack stage then paints
+// these verts pale-white (well above), reading as the pane going opaque.
+const VIRGIN_GLASS = 0.6;
+
+/** Neutralise a hull's window verts to VIRGIN_GLASS so the transmission tint
+ *  controls the look (clear ↔ privacy) rather than the near-black bake. */
+function whitenGlass(col: THREE.BufferAttribute, glass: [number, number][]): void {
+  for (const [s, e] of glass) {
+    for (let i = s; i < e; i++) col.setXYZ(i, VIRGIN_GLASS, VIRGIN_GLASS, VIRGIN_GLASS);
+  }
+}
+
+/** Hull mesh from a baked Quaternius model: clone the template geometry,
+ *  repaint its body panels in the spawn color, and neutralise the window
+ *  glass so the transmission material's tint reads (see VIRGIN_GLASS). The
+ *  glass index group wears the see-through tinted glassMat. */
 function makeModelHull(model: VehicleModel, color: number): THREE.Mesh {
   const geo = model.body.clone();
   const col = geo.attributes.color as THREE.BufferAttribute;
@@ -57,6 +75,7 @@ function makeModelHull(model: VehicleModel, color: number): THREE.Mesh {
   for (const [s, e] of model.paintRanges) {
     for (let i = s; i < e; i++) col.setXYZ(i, c.r, c.g, c.b);
   }
+  whitenGlass(col, model.glassRanges);
   const mesh = new THREE.Mesh(geo, geo.groups.length ? [hullMat, glassMat, headlightMat, taillightMat] : hullMat);
   mesh.castShadow = mesh.receiveShadow = true;
   return mesh;
@@ -458,6 +477,7 @@ export function repairVehicle(actor: Actor): void {
       geo.setIndex(new THREE.BufferAttribute(part.baseIndex.slice(), 1)); // reglaze
       if (part.glass) applyHullGroups(geo, part.glass, part.head ?? [], part.tail ?? []);
     }
+    part.glassStage?.fill(0); // panes are virgin again after a body-shop pass
     // never-deformed parts still carry pristine normals — derive the
     // smoothing clusters now or the recompute below would flatten them
     part.smooth ??= buildNormalSmoothing(pos, geo.attributes.normal as THREE.BufferAttribute);
@@ -486,16 +506,51 @@ export function repairVehicle(actor: Actor): void {
   actor.smokeT = 0;
 }
 
-/** Glass breaks in two stages, BP-style: a hit FROSTS virgin panes (the
- *  crack-web recolor), and a hit on already-frosted glass BLOWS THE PANE
- *  OUT — its triangles leave the hull index (same index-only surgery as
- *  the panel cuts), so the window becomes a hole onto the interior blocks.
- *  Any real wreck lands several impacts, so windshields naturally frost on
- *  the first hit and burst during the tumble. The crumple deformer skips
- *  glass entirely (it doesn't bend), so this owns all glass damage.
- *  Returns how many vertices frosted or blew — 0 means nothing to show,
- *  so the caller can skip the shard burst. */
-export function shatterGlass(actor: Actor, worldPoint: THREE.Vector3, radius: number): number {
+// ---------- glass shatter (three stages) ----------
+// BP-style progressive glass, now speed-aware so a gentle knock and a full
+// T-bone read differently:
+//   stage 0→1  CRACK   a spider-web of bright radial arms + a frosted halo
+//                      blooms from the impact; the pane STAYS in the hull
+//   stage 1→2  FROST   a second hit (or a hard first hit) whites the whole
+//                      struck region — the spalled, about-to-go look
+//   stage 2→3  BLOW    the frosted triangles leave the hull index (a hole
+//                      onto the interior), and the shard burst flies
+// `power` (impact speed proxy) lets one hard hit jump straight past CRACK to
+// FROST/BLOW, while a soft tap only spider-webs. Visual only (the verts that
+// leave the index are presentation; the chassis collider never changes), and
+// the crack-arm angles use Math.random like the rest of the FX — the sim and
+// replay hashes never read glass colour or the hull index.
+//
+// Spider-web painting: each struck vertex brightens by how close its angle
+// (around the impact, in the pane plane) lands to one of a few random radial
+// crack ARMS, plus a soft distance falloff — concentric darkening between the
+// arms. The technique mirrors the Voronoi/radial impact shaders surveyed
+// (godotshaders.com glass-shatter-impact-points, CJT-Jackton/SmashTheGlass)
+// but stays on the existing per-vertex-colour rail, so it costs nothing extra.
+
+const CRACK_ARMS = 5; // radial fracture lines from the impact
+const _glassN = new THREE.Vector3();
+const _glassT = new THREE.Vector3();
+const _glassB = new THREE.Vector3();
+const _glassRel = new THREE.Vector3();
+
+/** Spider-web crack tone for a glass vertex: distance falloff × proximity to
+ *  the nearest crack arm. `armPhase` seeds where the arms point so different
+ *  panes/hits don't all crack identically. Returns 0..1 brightness boost. */
+function crackBoost(angle: number, dist: number, radius: number, armPhase: number): number {
+  let nearest = Math.PI;
+  for (let a = 0; a < CRACK_ARMS; a++) {
+    const armAng = armPhase + (a / CRACK_ARMS) * Math.PI * 2;
+    let d = Math.abs(angle - armAng);
+    if (d > Math.PI) d = Math.PI * 2 - d;
+    nearest = Math.min(nearest, d);
+  }
+  const arm = Math.max(0, 1 - nearest / 0.62); // bright fracture lines (≈±36°)
+  const halo = Math.max(0, 1 - dist / radius); // frosted bloom toward centre
+  return Math.min(1, arm * arm * 1.15 + halo * halo * 0.6);
+}
+
+export function shatterGlass(actor: Actor, worldPoint: THREE.Vector3, radius: number, power = 1): number {
   let broken = 0;
   for (const part of actor.deformables) {
     if (!part.glass) continue;
@@ -504,21 +559,54 @@ export function shatterGlass(actor: Actor, worldPoint: THREE.Vector3, radius: nu
     const geo = part.mesh.geometry;
     const pos = geo.attributes.position as THREE.BufferAttribute;
     const col = geo.attributes.color as THREE.BufferAttribute;
+    part.glassStage ??= new Uint8Array(pos.count);
+    const stage = part.glassStage;
     let touched = false;
     let blow: Set<number> | null = null;
+
+    // a pane plane to project the crack web onto: use the local up/right of
+    // the mesh (windows are roughly vertical/curved — close enough for the
+    // angular web), with the impact's local normal-ish removed
+    const armPhase = Math.random() * Math.PI * 2;
+    _glassN.set(_lp.x, 0, _lp.z); // outward-ish from hull centreline
+    if (_glassN.lengthSq() < 1e-4) _glassN.set(0, 0, 1);
+    _glassN.normalize();
+    _glassT.set(0, 1, 0); // pane "up"
+    _glassB.crossVectors(_glassN, _glassT).normalize(); // pane "right"
+
+    // a hard hit pushes the starting stage up: soft tap cracks, big T-bone
+    // frosts or blows on first contact
+    const hardKick = power > 6 ? 2 : power > 3 ? 1 : 0;
+
     for (const [s, e] of part.glass) {
       for (let i = s; i < e; i++) {
         _v.set(pos.getX(i), pos.getY(i), pos.getZ(i));
-        if (_v.distanceTo(_lp) > radius) continue;
-        if (col.getX(i) > 0.5) {
-          (blow ??= new Set()).add(i); // frosted already — the pane lets go
-          broken++;
-          continue;
-        }
-        const tone = 0.72 + Math.random() * 0.18;
-        col.setXYZ(i, tone, tone + 0.04, tone + 0.07);
-        touched = true;
+        const dist = _v.distanceTo(_lp);
+        if (dist > radius) continue;
+        const cur = stage[i];
+        const next = cur === 3 ? 3 : Math.min(3, Math.max(cur + 1, hardKick + 1));
+        if (cur === next) continue; // already at/past this damage
+        stage[i] = next;
         broken++;
+        touched = true;
+
+        if (next === 1) {
+          // CRACK: spider-web recolour — bright cool-white fracture arms over
+          // the tinted pane (the glass goes milky where it has crazed)
+          _glassRel.set(_v.x - _lp.x, _v.y - _lp.y, _v.z - _lp.z);
+          const angle = Math.atan2(_glassRel.dot(_glassT), _glassRel.dot(_glassB));
+          const b = crackBoost(angle, dist, radius, armPhase);
+          const base = VIRGIN_GLASS;
+          const tone = base + (0.98 - base) * b;
+          col.setXYZ(i, tone, tone + 0.03 * b, tone + 0.05 * b);
+        } else if (next === 2) {
+          // FROST: spalled, about to let go — the tweakable FROST amount sets
+          // how white it goes (privacy glass can stay a touch darker)
+          const t = glassParams.frost + Math.random() * 0.12;
+          col.setXYZ(i, t, t + 0.03, t + 0.06);
+        } else if (next === 3) {
+          (blow ??= new Set()).add(i); // BLOW: the pane lets go
+        }
       }
     }
     if (touched) col.needsUpdate = true;

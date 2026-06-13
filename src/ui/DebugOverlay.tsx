@@ -22,6 +22,16 @@ import { synthKey } from './keys';
  *  fields are TS-private on the class, but this overlay deliberately works
  *  through the same runtime surface the console and tools/refshot.mjs use,
  *  so Game.ts needs no code for it. */
+interface GlassParams {
+  tint: number;
+  transmission: number;
+  roughness: number;
+  thickness: number;
+  ior: number;
+  reflection: number;
+  frost: number;
+}
+
 interface DebugGame {
   captureReport(note?: string): unknown;
   camera: {
@@ -32,7 +42,18 @@ interface DebugGame {
   audio?: { levels(): number; samplesLoaded(): number };
   simTime?: number;
   levelId?: string;
+  setGlassParams?(p: Partial<GlassParams>): GlassParams;
+  getGlassParams?(): GlassParams;
 }
+
+// Tint presets: a clear-ish day windscreen vs a dark "privacy" limo look, plus
+// classic automotive tints. Hex feeds glassMat.color, the transmission filter.
+const GLASS_TINTS: { label: string; hex: number }[] = [
+  { label: 'CLEAR', hex: 0xc6d6e2 },
+  { label: 'COOL', hex: 0xafc4d4 },
+  { label: 'BRONZE', hex: 0xc9b48c },
+  { label: 'PRIVACY', hex: 0x3a4654 },
+];
 
 const getGame = (): DebugGame | null =>
   (window as unknown as { __game?: DebugGame }).__game ?? null;
@@ -89,7 +110,21 @@ export function DebugOverlay({
   const [verify, setVerify] = useState(false);
   const [tele, setTele] = useState<Telemetry | null>(null);
   const [pose, setPose] = useState<string | null>(null); // active refshot pose
+  const [glass, setGlass] = useState<GlassParams | null>(null);
   const frozen = useRef(false); // director.update shadowed on the live Game
+
+  // pull the live glass params when the overlay opens (the Game owns the
+  // defaults) so the sliders start where the material actually is
+  useEffect(() => {
+    if (!open) return;
+    setGlass(getGame()?.getGlassParams?.() ?? null);
+  }, [open]);
+
+  /** Push one glass tweak to the live material and mirror it into the UI. */
+  const setGlassParam = (p: Partial<GlassParams>) => {
+    const next = getGame()?.setGlassParams?.(p);
+    if (next) setGlass(next);
+  };
 
   /** Un-freeze the camera director: refshot freezes by shadowing the
    *  instance's update with a no-op own property; deleting it restores the
@@ -279,6 +314,52 @@ export function DebugOverlay({
         <div>AUDIO&nbsp;&nbsp;RMS {tele ? tele.rms.toFixed(3) : '—'} &middot; {tele?.clips ?? 0} CLIPS</div>
         <div>REPLAY&nbsp;{tele?.replay ?? '—'}</div>
       </div>
+
+      <div className="dbgSection">CAR GLASS</div>
+      {glass ? (
+        <>
+          <div className="dbgRow">
+            {GLASS_TINTS.map(({ label, hex }) => (
+              <button
+                key={label}
+                className={glass.tint === hex ? 'active' : undefined}
+                onClick={() => setGlassParam({ tint: hex })}
+                title={`Tint #${hex.toString(16).padStart(6, '0')}`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+          {(
+            [
+              ['transmission', 'SEE-THRU', 0, 1, 0.01],
+              ['roughness', 'ROUGH', 0, 0.6, 0.01],
+              ['thickness', 'REFRACT', 0, 0.6, 0.01],
+              ['ior', 'IOR', 1, 2.0, 0.01],
+              ['reflection', 'REFLECT', 0, 2.0, 0.05],
+              ['frost', 'FROST', 0.5, 1, 0.01],
+            ] as const
+          ).map(([key, label, min, max, step]) => (
+            <label key={key} className="dbgSlider" title={`glassMat.${key}`}>
+              <span>{label}</span>
+              <input
+                type="range"
+                min={min}
+                max={max}
+                step={step}
+                value={glass[key]}
+                onChange={(e) => setGlassParam({ [key]: Number(e.target.value) })}
+              />
+              <span className="dbgNum">{glass[key].toFixed(2)}</span>
+            </label>
+          ))}
+          <div className="dbgNote">
+            Visuals only &middot; FROST = how white a cracked pane goes (next break)
+          </div>
+        </>
+      ) : (
+        <div className="dbgNote">launch once to wire the glass material</div>
+      )}
 
       <div className="dbgSection">CAMERA &middot; REFSHOT POSES</div>
       <div className="dbgNote">GANTRY POINT coords &middot; idle only (a frozen director stalls cam beats)</div>
