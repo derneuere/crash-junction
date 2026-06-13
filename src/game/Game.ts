@@ -511,11 +511,17 @@ export class Game {
       // night sky, not a stray sun. Moon key-light direction unchanged.
       this.skyRig.mesh.visible = true;
       this.skyRig.configure(SKY_PRESETS.night);
+      // re-bake the high-res cloud panorama for this tod's lighting (cheap moonlit
+      // silhouettes); the dome samples it each frame instead of raymarching.
+      this.skyRig.cloudBake(this.renderer);
       this.sunDirUnit.set(-30, 48, -24).normalize();
       this.scene.environment = this.envTex.night!;
     } else {
       this.skyRig.mesh.visible = true;
       this.skyRig.configure(SKY_PRESETS[t]);
+      // re-bake the high-res cloud panorama for this tod's lighting (warm rims at
+      // dusk, bright tops by day); the dome samples it each frame, no raymarch.
+      this.skyRig.cloudBake(this.renderer);
       this.sunDirUnit.copy(this.skyRig.sunDir);
       this.scene.environment = this.skyRig.bake(this.renderer);
     }
@@ -2193,16 +2199,13 @@ export class Game {
     // presentation pixels only from here down — the sim never reads back
     this.sea?.update(af.dt); // animate the waves off RENDER time (pin-safe)
     this.grass?.update(af.dt, this.camera.position); // sway + distance-cull off RENDER time (pin-safe)
-    this.skyClock += af.dt; // drift the dome clouds off RENDER time (pin-safe)
+    this.skyClock += af.dt; // scroll the baked cloud lookup off RENDER time (pin-safe)
     this.skyRig.setCloudTime(this.skyClock);
-    // Fill the HALF-RES cloud buffer for this frame's camera, then the dome
-    // samples it instead of marching clouds per-pixel at full res (skyenv.ts).
-    // Presentation-only (reads the render camera + render clock, writes an
-    // offscreen texture) — pin-safe, same contract as the sea/grass drift above.
-    // The camera world matrix is current here (the camera rig ran earlier this
-    // frame), so the reconstructed view rays match the dome's.
-    this.camera.updateMatrixWorld();
-    this.skyRig.renderClouds(this.renderer, this.camera);
+    // Clouds are PRERENDERED once per time-of-day into a high-res equirect
+    // panorama (skyRig.cloudBake, in setTimeOfDay) — the dome just samples it by
+    // view direction each frame (a texture fetch, no raymarch). setCloudTime above
+    // slowly scrolls that lookup for a cheap sense of motion. Presentation-only,
+    // RENDER-time driven — pin-safe, same contract as the sea/grass drift above.
     this.updateShadowRig();
     this.sunFlare.update(this.camera, this.sunSprite.position, af.dt, this.sunSprite.visible, () => this.flareOccluded());
     if (this.cineActive()) {
