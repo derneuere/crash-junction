@@ -48,6 +48,9 @@ interface DebugGame {
   levelId?: string;
   setGlassParams?(p: Partial<GlassParams>): GlassParams;
   getGlassParams?(): GlassParams;
+  // grass verge field (coast levels only) — cheap cached telemetry, no
+  // per-blade work. See grass.ts GrassField.stats().
+  grass?: { stats(): { allocated: number; tilesTotal: number; tilesDrawn: number } };
 }
 
 // Tint presets: a clear-ish day windscreen vs a dark "privacy" limo look, plus
@@ -104,6 +107,7 @@ interface Telemetry {
   clips: number;
   ai: string;
   replay: string;
+  grass: string;
 }
 
 export function DebugOverlay({
@@ -163,11 +167,13 @@ export function DebugOverlay({
       };
       const ai = w.__raceAI;
       const rr = w.__replayResult;
+      const gs = g?.grass?.stats();
       setTele({
         simTime: g?.simTime ?? 0,
         rms: g?.audio?.levels() ?? 0,
         clips: g?.audio?.samplesLoaded() ?? 0,
         ai: ai ? `${ai.shunts} SHUNTS · ${ai.slams} SLAMS` : '—',
+        grass: gs ? `${gs.allocated} BLADES · ${gs.tilesDrawn}/${gs.tilesTotal} TILES IN RANGE` : '—',
         replay: rr
           ? rr.ok
             ? `OK · ${rr.framesPlayed}/${rr.framesTotal} FRAMES`
@@ -316,6 +322,7 @@ export function DebugOverlay({
         <div>STATE&nbsp;&nbsp;{GameState[state]} &middot; {levelId} &middot; t={tele ? tele.simTime.toFixed(1) : '0.0'}s</div>
         <div>AI&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;{tele?.ai ?? '—'}</div>
         <div>AUDIO&nbsp;&nbsp;RMS {tele ? tele.rms.toFixed(3) : '—'} &middot; {tele?.clips ?? 0} CLIPS</div>
+        <div>GRASS&nbsp;&nbsp;{tele?.grass ?? '—'}</div>
         <div>REPLAY&nbsp;{tele?.replay ?? '—'}</div>
       </div>
 
