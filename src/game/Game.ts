@@ -45,7 +45,7 @@ import { resetModelPicker } from './models';
 import { accumulatePanelDamage, makePanelBody, updatePanelFlap } from './panels';
 import type { PanelState } from './types';
 import { applySuspension, type HeightSampler } from './suspension';
-import { PlayerControl } from './control';
+import { PlayerControl, type ControlInput } from './control';
 import { Pickups } from './pickups';
 import { Effects } from './effects';
 import { GameAudio, type AudioFrameState, type EngineFlavor } from './audio';
@@ -75,6 +75,7 @@ const _hood = new THREE.Vector3();
 const _pp = new THREE.Vector3();
 const UP = new THREE.Vector3(0, 1, 0);
 const _atF = new CANNON.Vec3();
+const _ctrlInput: ControlInput = { steer: 0, throttle: false, boost: false, brake: false }; // reused per fixed step
 const _contactIds = new Set<number>(); // bodies with solver contacts this step
 const NO_CMDS: Command[] = []; // shared empty — never mutated
 const _shadowOrigin = new THREE.Vector3();
@@ -1630,21 +1631,26 @@ export class Game {
     // then physics owns the car)
     const p = this.player;
     if (p && !p.crashed && p.destabilized <= 0 && this.state !== GameState.Idle && this.state !== GameState.Done) {
-      let input = {
-        steer:
-          (this.simKeys['ArrowRight'] || this.simKeys['KeyD'] ? 1 : 0) -
-          (this.simKeys['ArrowLeft'] || this.simKeys['KeyA'] ? 1 : 0),
-        throttle: !!(this.simKeys['ArrowUp'] || this.simKeys['KeyW']),
-        boost: !!(this.simKeys['Space'] || this.simKeys['ShiftLeft'] || this.simKeys['ShiftRight']),
-        brake: !!(this.simKeys['ArrowDown'] || this.simKeys['KeyS']),
-      };
+      // reuse a module-scope ControlInput — control.update() reads the fields
+      // synchronously and never retains the reference, so mutating one object
+      // each step is bit-identical to a fresh literal and saves the per-step alloc
+      const input = _ctrlInput;
+      input.steer =
+        (this.simKeys['ArrowRight'] || this.simKeys['KeyD'] ? 1 : 0) -
+        (this.simKeys['ArrowLeft'] || this.simKeys['KeyA'] ? 1 : 0);
+      input.throttle = !!(this.simKeys['ArrowUp'] || this.simKeys['KeyW']);
+      input.boost = !!(this.simKeys['Space'] || this.simKeys['ShiftLeft'] || this.simKeys['ShiftRight']);
+      input.brake = !!(this.simKeys['ArrowDown'] || this.simKeys['KeyS']);
       if (this.takedownCamT > 0) {
         // takedown cam: the autopilot holds the middle of the road while
         // the camera is busy admiring your handiwork
         const aim = this.mode.autopilotHeading();
         if (aim !== null) {
           const err = Math.atan2(Math.sin(aim - this.control.heading), Math.cos(aim - this.control.heading));
-          input = { steer: Math.max(-1, Math.min(1, -err * 2.5)), throttle: true, boost: false, brake: false };
+          input.steer = Math.max(-1, Math.min(1, -err * 2.5));
+          input.throttle = true;
+          input.boost = false;
+          input.brake = false;
         }
       }
       this.control.update(p, input, this.heightAt);
@@ -1710,7 +1716,22 @@ export class Game {
   }
 
   private updateFuses(dt: number): void {
-    for (const a of [...this.actors]) {
+    // Fuses fire only when a barrel/explosive's countdown lapses — vanishingly
+    // rare per step. The actors snapshot exists solely so removeActor() can
+    // splice mid-iteration; allocating it every step is pure GC churn. Scan
+    // first (no allocation) and bail when nothing is live, so the snapshot is
+    // taken only on steps that actually have a pending fuse. Iteration order
+    // and processing are bit-identical to the old [...this.actors] loop — the
+    // snapshot, when taken, is the same array in the same order.
+    let anyFuse = false;
+    for (const a of this.actors) {
+      if (a.fuse !== null && !a.exploded) {
+        anyFuse = true;
+        break;
+      }
+    }
+    if (!anyFuse) return;
+    for (const a of this.actors.slice()) {
       if (a.fuse === null || a.exploded) continue;
       a.fuse -= dt;
       if (a.fuse > 0) continue;
