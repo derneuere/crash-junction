@@ -63,10 +63,21 @@
 // silver lining is allowed to approach the cap.
 //
 // PERFORMANCE: this is a real volumetric raymarch (view march × per-step sun
-// light-march × procedural 3D noise). It is HEAVY — accepted for now per the
-// task ("performance will be improved later"); the step counts below are the
-// knobs to dial. The march is gated to the cloud band so most of the dome (open
-// sky, below-horizon, straight overhead seam) pays nothing.
+// light-march × procedural 3D noise). It is HEAVY by nature, so the cost is
+// decoupled from screen resolution: the raymarch runs in a SEPARATE HALF-RES
+// pass (skyenv.ts renders applyCloudsRGBA over a fullscreen triangle into a
+// quarter-area RGBA HDR target each frame) and the full-res sky dome simply
+// SAMPLES that buffer (bilinear upscale) and composites it. Clouds are
+// low-frequency, so half-res + upscale is visually indistinguishable but a ~4x
+// cloud-cost win. The march is still gated to the cloud band (so most of the
+// buffer — open sky, below-horizon, overhead seam — pays nothing), uses
+// per-pixel jitter to dither the reduced step count, and early-exits as
+// transmittance saturates. The full-res inline applyClouds() path is kept as a
+// fallback (used when no buffer is bound) so the dome shader still self-composes
+// correctly in isolation (e.g. the PMREM bake, which forces cloud density 0).
+//
+// The step counts below (NUM_STEPS_VIEW / NUM_STEPS_LIGHT) are the remaining
+// knobs; they are sized for the half-res pass + jitter.
 //
 // DETERMINISM: visual-only. uCloudTime is driven off RENDER time (Game's af.dt),
 // never sim time — same pin-safe contract as the sea/grass animation.
@@ -271,15 +282,22 @@ float cloudLightmarch(vec3 pos) {
 
 // =========================== main cloud raymarch =============================
 // Intersect the view ray with the horizontal slab, march it, and at every
-// density sample run the sun light-march + accumulate light energy. Returns
-// the composited sky+cloud colour. Mirrors Lague's frag() march loop.
-const int   NUM_STEPS_VIEW = 28;
+// density sample run the sun light-march + accumulate light energy.
+//
+// cloudMarchRGBA() is the heavy core: it returns the cloud's PREMULTIPLIED
+// colour in .rgb and its coverage alpha in .a, with NO background mixed in —
+// so it can be rendered once into the half-res buffer (skyenv.ts) and composited
+// later over the full-res sky. The compositing rule is the standard
+// premultiplied-over: out = sky*(1-a) + rgb. sunTrans is the sun's atmospheric
+// transmittance at the eye (constant over the dome), passed in so the buffer
+// pass and the inline path agree on cloud colour.
+const int   NUM_STEPS_VIEW = 20; // sized for the half-res pass + jitter dither
 const float LIGHT_ABSORPTION_CLOUD = 0.85;
 
-vec3 applyClouds(vec3 rd, vec3 skyCol, vec3 sunTrans) {
+vec4 cloudMarchRGBA(vec3 rd, vec3 sunTrans) {
   // only march rays that rise into the slab; below the haze line the ocean/dome
   // seam owns the frame and clouds would just smear the horizon.
-  if (rd.y < 0.03) return skyCol;
+  if (rd.y < 0.03) return vec4(0.0);
 
   // virtual eye just below the slab; intersect the two horizontal planes.
   vec3 ro = vec3(0.0, 0.0, 0.0);
@@ -288,7 +306,7 @@ vec3 applyClouds(vec3 rd, vec3 skyCol, vec3 sunTrans) {
   float dstToTop    = (CLOUD_TOP - ro.y) * invDirY;
   float dstToSlab   = min(dstToBottom, dstToTop);
   float dstThrough  = abs(dstToTop - dstToBottom);
-  if (dstThrough <= 0.0) return skyCol;
+  if (dstThrough <= 0.0) return vec4(0.0);
 
   // fade the band: thin clouds straight overhead (so the zenith stays open) and
   // toward the horizon (atmospheric haze swallows distant cloud). Keeps the
@@ -296,7 +314,7 @@ vec3 applyClouds(vec3 rd, vec3 skyCol, vec3 sunTrans) {
   float bandIn  = smoothstep(0.03, 0.16, rd.y);
   float bandOut = smoothstep(1.0, 0.5, rd.y);
   float band = bandIn * bandOut;
-  if (band < 0.001) return skyCol;
+  if (band < 0.001) return vec4(0.0);
 
   // phase toward the sun (silver lining) — constant along the ray.
   float cosAngle = dot(rd, uSunDir);
@@ -305,7 +323,8 @@ vec3 applyClouds(vec3 rd, vec3 skyCol, vec3 sunTrans) {
   // march the slab
   float stepSize = dstThrough / float(NUM_STEPS_VIEW);
   // per-pixel start jitter breaks up banding without a blue-noise texture
-  // (deterministic in view direction — render-time only, no sim state).
+  // (deterministic in view direction — render-time only, no sim state). With
+  // the reduced step count this dither is what keeps the reduced march smooth.
   float jitter = cloudHash1(rd * 73.1) * stepSize;
   float dstTravelled = jitter;
 
@@ -350,8 +369,76 @@ vec3 applyClouds(vec3 rd, vec3 skyCol, vec3 sunTrans) {
   const float CLOUD_LIGHT_MAX = 1.2;
   cloudCol = min(cloudCol, vec3(CLOUD_LIGHT_MAX));
 
-  // composite: Lague's col = background·transmittance + cloudCol. Our cloudCol
-  // already carries the layer alpha, so background is attenuated by (1-alpha).
-  return skyCol * (1.0 - cloudAlpha) + cloudCol;
+  // premultiplied: cloudCol already carries the layer alpha (it is the light
+  // energy that reaches the eye, not a surface colour to be alpha-blended).
+  return vec4(cloudCol, cloudAlpha);
+}
+
+// Inline full-res fallback: march + composite over skyCol in one call. Kept for
+// the PMREM bake (clouds forced to density 0 there) and any path that renders
+// the dome without first filling the half-res cloud buffer, so the dome shader
+// still self-composes correctly in isolation.
+vec3 applyClouds(vec3 rd, vec3 skyCol, vec3 sunTrans) {
+  vec4 c = cloudMarchRGBA(rd, sunTrans);
+  // premultiplied-over: background attenuated by (1-alpha), cloud added.
+  return skyCol * (1.0 - c.a) + c.rgb;
+}
+`;
+
+// ============================================================================
+// HALF-RES CLOUD PASS (the perf win)
+// ----------------------------------------------------------------------------
+// A standalone fullscreen-triangle pass that runs ONLY the cloud raymarch
+// (cloudMarchRGBA above) and writes premultiplied cloud RGBA into a half-res
+// HDR target. The full-res sky dome then samples that target and composites it
+// (see the SAMPLE path injected into SKY_FRAG). Clouds are low-frequency, so the
+// half-res buffer upscales invisibly while the heavy march pays for a QUARTER of
+// the pixels.
+//
+// The view ray is reconstructed from the camera's inverse view-projection (the
+// dome's vertex shader can't help us here — there is no dome, just a screen
+// triangle), matching normalize(worldPos - eye) exactly.
+//
+// sunTrans (the sun's atmospheric transmittance at the eye, constant over the
+// dome) is the ONE value the march needs from the scattering model; it is
+// passed in as uSunTrans (computed once per time-of-day in skyenv.ts), so this
+// pass needs no atmosphere code and stays cheap.
+
+export const CLOUD_PASS_VERT = /* glsl */ `
+// Fullscreen triangle (three feeds a unit quad; we expand to a triangle in
+// clip space). vUv spans 0..1 across the screen.
+varying vec2 vUv;
+void main() {
+  vUv = uv;
+  gl_Position = vec4(position.xy, 0.0, 1.0);
+}
+`;
+
+export const CLOUD_PASS_FRAG = /* glsl */ `
+precision highp float;
+varying vec2 vUv;
+
+// uniforms the cloud march needs from the sky/sun model (mirrors SKY_FRAG)
+uniform vec3  uSunDir;
+uniform vec3  uSunTint;
+uniform float uSunIntensity;
+uniform float uNight;
+uniform vec3  uSunTrans;        // precomputed sun transmittance at the eye
+
+// camera reconstruction
+uniform mat4  uInvViewProj;     // inverse(projection * view)
+uniform vec3  uCameraPos;       // world-space eye
+
+${SKY_CLOUDS}
+
+void main() {
+  // reconstruct the world-space view ray for this screen pixel
+  vec4 ndc = vec4(vUv * 2.0 - 1.0, 1.0, 1.0);
+  vec4 world = uInvViewProj * ndc;
+  world /= world.w;
+  vec3 rd = normalize(world.xyz - uCameraPos);
+
+  // premultiplied cloud RGBA — the dome compositor does sky*(1-a)+rgb
+  gl_FragColor = cloudMarchRGBA(rd, uSunTrans);
 }
 `;

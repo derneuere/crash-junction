@@ -55,6 +55,14 @@ uniform float uNight;        // 0 day .. 1 night — blends in stars + night tin
 uniform vec3 uNightTint;     // deep scattered-blue night sky colour
 uniform float uStarStrength; // star field brightness (night only)
 
+// HALF-RES CLOUD BUFFER (skyenv.ts): premultiplied cloud RGBA, filled by the
+// cloud pass each frame. When uUseCloudBuffer > 0.5 the dome SAMPLES this (cheap
+// bilinear upscale) instead of running the per-pixel raymarch inline. The bake
+// path (and any buffer-less render) leaves it 0 and falls back to applyClouds().
+uniform sampler2D uCloudBuffer;
+uniform float uUseCloudBuffer; // 1 = sample the half-res buffer, 0 = inline march
+uniform vec2 uResolution;      // full-res target size, for the screen-space lookup
+
 const float PI = 3.14159265359;
 
 // --- planet geometry (kilometres, Hillaire/Lague scale) ---
@@ -229,7 +237,18 @@ void main() {
   // light, go dark at night, and never bloom (capped). See skyclouds.glsl.ts.
   // Applied AFTER the sun disc so a cloud passing the sun dims its glow, and
   // BEFORE the horizon/night tint so the night blend darkens clouds too.
-  sky = applyClouds(rd, sky, sunTrans);
+  //
+  // PERF: the heavy raymarch runs in a HALF-RES pass (skyenv.ts); here the dome
+  // just samples that premultiplied RGBA buffer (bilinear upscale — invisible on
+  // low-frequency clouds) and composites sky*(1-a)+rgb. The inline applyClouds()
+  // fallback runs only when no buffer is bound (the PMREM bake, which zeroes
+  // cloud density anyway).
+  if (uUseCloudBuffer > 0.5) {
+    vec4 c = texture2D(uCloudBuffer, gl_FragCoord.xy / uResolution);
+    sky = sky * (1.0 - c.a) + c.rgb;
+  } else {
+    sky = applyClouds(rd, sky, sunTrans);
+  }
 
   // Looking below the horizon line: the ocean covers this in-game, but the
   // dome can peek through at the seam, so keep the bright horizon haze right

@@ -230,6 +230,11 @@ try {
     c.updateProjectionMatrix();
     c.position.set(cam[0], cam[1], cam[2]);
     c.lookAt(look[0], look[1], look[2]);
+    c.updateMatrixWorld();
+    // clouds now render in a separate half-res pass that the Game loop drives
+    // each frame; a direct render() here bypasses that loop, so fill the cloud
+    // buffer for THIS pose before rendering (it self-sizes to the render size).
+    if (g.skyRig) g.skyRig.renderClouds(r, c);
     // render + read back in the same task — the drawing buffer is only
     // guaranteed until control returns to the browser.
     // CINE tier: the composer owns tone mapping (the renderer runs
