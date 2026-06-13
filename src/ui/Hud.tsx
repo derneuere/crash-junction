@@ -1,9 +1,11 @@
+import { useState } from 'react';
 import { GameState, type ModeKind } from '../game/types';
 import type { TimeOfDay } from '../game/daynight';
 import type { BoostState, CashFloatData, RaceStanding, ReportData, TakedownBanner } from '../game/events';
 import type { LevelId } from '../game/levels';
 import type { PlayerCarId } from '../game/models';
 import { BoostBar, CrashbreakerBar, RaceChip, RaceTagline, ScoreChip } from './chips';
+import { ControlsPanel } from './ControlsPanel';
 import { EventPicker } from './EventPicker';
 import { ReportPanel } from './ReportPanel';
 import type { BestMap } from './storage';
@@ -52,6 +54,9 @@ export function Hud({
   const inRun = state !== GameState.Idle && state !== GameState.Done;
   const driving = state === GameState.Launch;
   const crashed = state === GameState.Crash || state === GameState.Settle;
+  // controls reference is opt-in via the idle "CONTROLS" toggle (was a
+  // persistent hint line) — local UI state, no sim coupling
+  const [controlsOpen, setControlsOpen] = useState(false);
   return (
     <div id="hud" className={cine ? 'cine' : undefined}>
       <div className="bar top" />
@@ -65,11 +70,6 @@ export function Hud({
       )}
 
       {mode === 'race' && race && inRun && <RaceChip standing={race} />}
-
-      <div className="tag">
-        <b>CRASH JUNCTION</b>
-        react + three.js + cannon-es
-      </div>
 
       {replaying && <div className="replay">&#9210; REPLAY &middot; ESC EXITS</div>}
 
@@ -92,6 +92,10 @@ export function Hud({
 
       {state === GameState.Idle && (
         <>
+          <div className="titleTag">
+            <b>CRASH JUNCTION</b>
+            <span>react + three.js + cannon-es</span>
+          </div>
           <EventPicker
             levelId={levelId}
             tod={timeOfDay}
@@ -102,13 +106,20 @@ export function Hud({
             onSelectCar={onSelectCar}
             onOpenDebug={onOpenDebug}
           />
-          <div className="hint">
-            &#8593; ACCELERATE &middot; &#8592;&#8594; STEER &middot; SPACE — BOOST &middot; &#8595; TAP TO DRIFT (STEER SETS THE
-            ANGLE, STRAIGHTEN TO EXIT)
-            {mode === 'crash' && <> &middot; E — CRASHBREAKER</>} &middot; ENTER — RESTART &middot; R — BUG REPORT
-          </div>
+          <button
+            className="controlsToggle"
+            onClick={(e) => {
+              setControlsOpen(true);
+              e.currentTarget.blur();
+            }}
+            title="View keyboard &amp; controller bindings"
+          >
+            &#9000; CONTROLS
+          </button>
         </>
       )}
+
+      {controlsOpen && <ControlsPanel mode={mode} onClose={() => setControlsOpen(false)} />}
 
       {driving && <BoostBar boost={boost} />}
 
