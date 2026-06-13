@@ -780,10 +780,26 @@ export class Game {
     this.fx.debris.spawn(p, 14 + Math.round(6 * power), 9 * power);
     this.fx.scorch.add(p.x, p.z, 1.4 + 0.8 * power);
     this.audio.explosion(power, p);
-    this.director.addShake(0.7 + 0.4 * power);
-    this.director.focusTarget.copy(p);
 
     const R = EXPLOSION_RADIUS_BASE + EXPLOSION_RADIUS_PER_POWER * power;
+    // shake + refocus are the player's attention: a blast grabs the camera
+    // only when it goes off ON TOP OF the player (their crashbreaker, or a
+    // barrel/tanker in their own pileup — both land inside the blast radius).
+    // A rival fireball across the junction stays audible-only and never yanks
+    // the crash orbit off the player's wreck. (Gating this also keeps the
+    // aftertouch axes stable: a distant blast no longer moves focusTarget,
+    // so it can't perturb the camera-relative wreck steering.)
+    const pp = this.player?.body.position;
+    if (pp) {
+      const dx = pp.x - p.x;
+      const dy = pp.y - p.y;
+      const dz = pp.z - p.z;
+      if (dx * dx + dy * dy + dz * dz <= R * R) {
+        this.director.addShake(0.7 + 0.4 * power);
+        this.director.focusTarget.copy(p);
+      }
+    }
+
     this.mode.score?.beginBlast(power);
 
     const kick = (body: CANNON.Body, massScale: number): number => {
@@ -1290,11 +1306,18 @@ export class Game {
     }
 
     this.audio.crash(impact, p, scenery);
-    // shake is the player's haptics — only their own contacts (or a takedown
-    // they earned via a chain) rattle the camera; rival-on-rival hits and
-    // rivals finding walls across the junction stay audible-only
-    if (self.isPlayer || oa?.isPlayer || takedown) this.director.addShake(impact * 0.045);
-    if (impact > 5) this.director.focusTarget.copy(p);
+    // shake AND focus are the player's attention — only their own contacts
+    // (or a takedown they earned via a chain) rattle the camera or pull the
+    // crash orbit's look target; rival-on-rival hits and rivals finding walls
+    // across the junction stay audible-only. Before this gate, ANY impact > 5
+    // anywhere on the map copied into focusTarget, so during the player's own
+    // crashtime the orbit would drift off their wreck toward a distant rival
+    // pileup. (focusTarget feeds the crash-orbit look, and the look feeds the
+    // camera-relative aftertouch axes — so this gate is also what keeps a far
+    // rival crash from perturbing the player's wreck steering.)
+    const playerInvolved = self.isPlayer || oa?.isPlayer || takedown;
+    if (playerInvolved) this.director.addShake(impact * 0.045);
+    if (impact > 5 && playerInvolved) this.director.focusTarget.copy(p);
 
     // crashtime extension (the trigger lives in the crash-marking block)
     if (this.state === GameState.Crash && impact > 7 && this.crashElapsed < 6) {
