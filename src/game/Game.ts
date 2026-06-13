@@ -51,6 +51,7 @@ import { Effects } from './effects';
 import { GameAudio, type AudioFrameState, type EngineFlavor } from './audio';
 import { CameraDirector } from './camera';
 import { classifyTakedown, TakedownTracker } from './takedowns';
+import { GamepadInput, type GamepadIntent } from './gamepad';
 
 interface DeformJob {
   actor: Actor;
@@ -291,6 +292,13 @@ export class Game {
   // freeze, a key dispatched mid-advance (record scripts drive input from
   // onStep) steers the live take a substep before the tape says it did.
   private simKeys: Record<string, boolean> = {};
+  // CONTROLLER (gamepad.ts): polled each LIVE frame; its synthetic held-key
+  // flags are OR'd into the keyboard mask at the recorder sample point, so pad
+  // input rides the existing recorded key path and is replay-deterministic. No
+  // pad connected => poll() writes nothing => keyboard path (and both pins)
+  // byte-exact. Never polled during a replay (the tape drives input).
+  private gamepad = new GamepadInput();
+  private detachGamepad: (() => void) | null = null;
 
   // bug-report capture: the tape is always rolling (see replay.ts)
   private levelId: LevelId;
@@ -475,6 +483,7 @@ export class Game {
 
     addEventListener('keydown', this.onKeyDown);
     addEventListener('keyup', this.onKeyUp);
+    this.detachGamepad = this.gamepad.attach(); // gamepadconnected/disconnected
     container.addEventListener('pointerdown', this.onPointerDown);
     this.resizeObserver = new ResizeObserver(() => this.onResize());
     this.resizeObserver.observe(container);
@@ -1000,6 +1009,7 @@ export class Game {
     else cancelAnimationFrame(this.raf);
     removeEventListener('keydown', this.onKeyDown);
     removeEventListener('keyup', this.onKeyUp);
+    this.detachGamepad?.();
     this.container.removeEventListener('pointerdown', this.onPointerDown);
     this.resizeObserver.disconnect();
     this.postfx.dispose();
@@ -1146,6 +1156,33 @@ export class Game {
         break;
       case 'explode':
         this.explode(new THREE.Vector3(c.x, c.y, c.z), c.power);
+        break;
+    }
+  }
+
+  /** Route a one-shot controller action through the SAME paths the keyboard's
+   *  keydown handler uses, so a pad press records identically to a key press:
+   *  queued commands land in pendingCmds (executed + recorded at frame start),
+   *  restart/mute mirror Enter/KeyM. Only ever called for the LIVE take — the
+   *  caller (frame()) skips the poll entirely during a replay. */
+  private dispatchGamepadIntent(intent: GamepadIntent): void {
+    switch (intent) {
+      case 'launch':
+        this.pendingCmds.push({ t: 'launch' }); // == Space keydown
+        break;
+      case 'restart':
+        this.reset(); // == Enter
+        break;
+      case 'crashbreaker':
+        this.pendingCmds.push({ t: 'cb' }); // == KeyE
+        break;
+      case 'explode':
+        // sandbox blast — position rolled here and recorded in the command, so
+        // replays reuse it verbatim (mirrors the KeyB keydown handler exactly)
+        this.pendingCmds.push({ t: 'explode', x: (Math.random() - 0.5) * 8, y: 0.6, z: (Math.random() - 0.5) * 8, power: 1.2 });
+        break;
+      case 'mute':
+        this.events.emit('flash', this.audio.toggleMute() ? 'MUTED' : 'SOUND ON'); // == KeyM
         break;
     }
   }
@@ -1772,7 +1809,10 @@ export class Game {
 
   private syncMeshes(dt: number): void {
     const night = this.timeOfDay !== 'day'; // golden hour runs lights too
-    const playerBrakes = !!(this.keys['ArrowDown'] || this.keys['KeyS']);
+    // brake LIGHT (presentation, not hashed): include the pad's held brake flag
+    // so LT/B lights the lamps too. During a replay heldKeys is empty, so the
+    // tape's brake lights still read off the recorded keys alone.
+    const playerBrakes = !!(this.keys['ArrowDown'] || this.keys['KeyS'] || this.gamepad.heldKeys['ArrowDown']);
     for (const a of this.actors) {
       a.group.position.set(a.body.position.x, a.body.position.y, a.body.position.z);
       a.group.quaternion.set(a.body.quaternion.x, a.body.quaternion.y, a.body.quaternion.z, a.body.quaternion.w);
@@ -1946,6 +1986,7 @@ export class Game {
     this.pendingCmds.length = 0;
     this.keys = {};
     this.simKeys = {};
+    this.gamepad.reset(); // drop any held pad flags so the tape drives input alone
     this.reset(); // beginTake() sees this.replay: recorded seed, recorder disarmed
     this.events.emit('replay', true);
     this.events.emit('flash', fast ? 'VERIFYING REPLAY' : 'REPLAY');
@@ -2198,8 +2239,25 @@ export class Game {
       // in one go there, so background time still passes at real speed
       const hidden = document.hidden;
       const dt = Math.min(elapsed, hidden ? 1.2 : 0.05);
+      // CONTROLLER: poll the pad for THIS live frame, BEFORE we drain pendingCmds
+      // and sample the mask. Discrete pad presses queue commands (launch/cb/
+      // explode) that join this frame's cmds; held flags (steer/accel/boost/
+      // brake) get OR'd into the keyboard mask below. With no pad connected this
+      // is a no-op (no intents, no held flags) so the keyboard mask — and both
+      // determinism pins — are byte-identical. Never polled during a replay.
+      const padIntents = this.gamepad.poll({ idle: this.state === GameState.Idle });
+      if (this.gamepad.isConnected()) {
+        // any pad input is a user gesture — unlock/resume audio (a pad-only
+        // player never produces the keydown/pointerdown that normally does this)
+        this.audio.init();
+        this.audio.resume();
+        for (const it of padIntents) this.dispatchGamepadIntent(it);
+      }
       const cmds = this.pendingCmds.length ? this.pendingCmds.splice(0) : NO_CMDS;
-      const mask = maskFromKeys(this.keys);
+      // OR the pad's synthetic held-key flags into the keyboard bitmask: pad
+      // steer/accel/boost/brake flow through the EXACT recorded key path, fully
+      // interchangeable with the keyboard and replay-deterministic by construction.
+      const mask = maskFromKeys(this.keys) | maskFromKeys(this.gamepad.heldKeys);
       this.recorder.frame(dt, mask, hidden, cmds);
       this.simKeys = keysFromMask(mask);
       this.advance(dt, hidden, cmds);
@@ -2215,14 +2273,18 @@ export class Game {
     af.timeScale = this.timeScale;
     af.driving = this.state === GameState.Launch && !!p && !p.crashed;
     af.speed = this.control.speed;
-    af.throttle = !!(this.keys['ArrowUp'] || this.keys['KeyW']);
+    // engine/skid audio reads the held controls (presentation only — never
+    // feeds back into the sim, so the pad OR here can't move a pin); the pad's
+    // held flags are all-false during a replay, so the tape's audio is unchanged
+    const hg = this.gamepad.heldKeys;
+    af.throttle = !!(this.keys['ArrowUp'] || this.keys['KeyW'] || hg['ArrowUp']);
     af.boosting = this.control.boosting;
     af.drifting = this.control.drifting;
     const slipA = this.control.heading - this.control.velAngle;
     const slip = Math.abs(Math.atan2(Math.sin(slipA), Math.cos(slipA))) / 0.7; // 0.7 rad ≈ the 40° drift cap
     af.slip = this.control.drifting
       ? Math.min(1, slip)
-      : (this.keys['ArrowDown'] || this.keys['KeyS']) && this.control.speed > 15
+      : (this.keys['ArrowDown'] || this.keys['KeyS'] || hg['ArrowDown']) && this.control.speed > 15
         ? 0.3 // hard braking at speed chirps the tyres
         : 0;
     af.grounded = !p || p.crashed || p.susp.some((s) => s.grounded);
