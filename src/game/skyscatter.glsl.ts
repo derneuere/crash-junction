@@ -1,3 +1,5 @@
+import { SKY_CLOUDS } from './skyclouds.glsl';
+
 // Atmospheric-scattering sky shader (GLSL, ported to three.js).
 //
 // TECHNIQUE + ATTRIBUTION
@@ -177,6 +179,8 @@ float sunDisc(vec3 rd) {
   return gauss + inv;
 }
 
+${SKY_CLOUDS}
+
 // cheap hash-based star field — only meaningful at night, gated by uStarStrength.
 // Deterministic in the *view direction* (render-time only, no sim state).
 float hash(vec3 p) {
@@ -219,6 +223,13 @@ void main() {
   vec3 sunTrans = sunTransmittance(ro + rd * 0.0);
   float disc = sunDisc(rd);
   sky += disc * sunTrans * uSunTint * uSunIntensity;
+
+  // CLOUD LAYER: composite drifting cumulus over the sky+sun, lit by the same
+  // sun colour/transmittance and an ambient sky fill. Clouds catch warm dusk
+  // light, go dark at night, and never bloom (capped). See skyclouds.glsl.ts.
+  // Applied AFTER the sun disc so a cloud passing the sun dims its glow, and
+  // BEFORE the horizon/night tint so the night blend darkens clouds too.
+  sky = applyClouds(rd, sky, sunTrans);
 
   // Looking below the horizon line: the ocean covers this in-game, but the
   // dome can peek through at the seam, so keep the bright horizon haze right
