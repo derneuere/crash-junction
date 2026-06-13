@@ -328,6 +328,27 @@ canvas {
   box-shadow: 0 0 12px rgba(255, 150, 40, 0.8);
   transition: width 0.1s linear;
 }
+/* segmented boost meter (B3 1x→4x): a grid of cells over the fill. Earned
+   cells (.on) get a bright divider; un-earned cells show as dim "room to
+   grow" that lights up one-per-takedown. */
+.boostSegs {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  pointer-events: none;
+}
+.boostSeg {
+  flex: 1 1 0;
+  border-right: 1px solid rgba(255, 160, 60, 0.22);
+  background: rgba(8, 10, 14, 0.32); /* dim un-earned room */
+}
+.boostSeg:last-child {
+  border-right: none;
+}
+.boostSeg.on {
+  border-right-color: rgba(255, 210, 120, 0.9);
+  background: transparent; /* earned cells let the fill show through */
+}
 .boostLbl {
   position: absolute;
   inset: 0;
@@ -335,7 +356,21 @@ canvas {
   font-size: 10px;
   line-height: 14px;
   letter-spacing: 4px;
-  color: rgba(255, 255, 255, 0.75);
+  color: rgba(255, 255, 255, 0.85);
+  text-shadow: 0 0 4px rgba(0, 0, 0, 0.7);
+}
+/* sustained Burnout: the whole bar runs hot and pulses */
+.boost.burnout {
+  border-color: rgba(255, 230, 120, 0.95);
+  animation: burnoutPulse 0.5s ease-in-out infinite alternate;
+}
+.boost.burnout .boostFill {
+  background: linear-gradient(90deg, #ffae2b, #fff1b0);
+  box-shadow: 0 0 18px rgba(255, 200, 80, 0.95);
+}
+@keyframes burnoutPulse {
+  from { box-shadow: 0 0 6px rgba(255, 180, 50, 0.5); }
+  to { box-shadow: 0 0 20px rgba(255, 220, 90, 0.95); }
 }
 .hint .cb {
   color: #ffd34d;

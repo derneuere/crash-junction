@@ -1,4 +1,4 @@
-import type { RaceStanding } from '../game/events';
+import type { BoostState, RaceStanding } from '../game/events';
 
 export const ordinal = (n: number) => `${n}${n === 1 ? 'ST' : n === 2 ? 'ND' : n === 3 ? 'RD' : 'TH'}`;
 
@@ -52,11 +52,28 @@ export function RaceChip({ standing }: { standing: RaceStanding }) {
   );
 }
 
-export function BoostBar({ boost }: { boost: number }) {
+/** Burnout-3 segmented boost meter. The bar is divided into `maxSegments`
+ *  cells; `segments` of them are EARNED (lit frame), the rest are empty room
+ *  to grow (one more per takedown). The orange fill flows left→right across
+ *  the earned cells. At a full bar it tips into a pulsing "Burnout" (the
+ *  sustained state), and chained Burnouts read out their count. */
+export function BoostBar({ boost }: { boost: BoostState }) {
+  const { fill, segments, maxSegments, burnout, chain } = boost;
+  // fill is across the whole EARNED bar; the earned region is segments/max of
+  // the container, so scale the orange fill into that region
+  const earnedFrac = segments / maxSegments;
+  const fillPct = Math.min(100, Math.round(fill * earnedFrac * 100));
+  const cells = [];
+  for (let i = 0; i < maxSegments; i++) {
+    cells.push(<div key={i} className={`boostSeg ${i < segments ? 'on' : ''}`} />);
+  }
   return (
-    <div className="boost">
-      <div className="boostFill" style={{ width: `${Math.round(boost * 100)}%` }} />
-      <div className="boostLbl">BOOST</div>
+    <div className={`boost ${burnout ? 'burnout' : ''}`}>
+      <div className="boostFill" style={{ width: `${fillPct}%` }} />
+      <div className="boostSegs">{cells}</div>
+      <div className="boostLbl">
+        {burnout ? `BURNOUT${chain > 0 ? ` ×${chain + 1}` : ''}` : `BOOST ${segments}×`}
+      </div>
     </div>
   );
 }

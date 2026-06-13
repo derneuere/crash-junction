@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import * as CANNON from 'cannon-es';
 import {
   AFTERTOUCH_F,
+  BOOST_MAX_SEGMENTS,
   CRASHBREAKER_POWER,
   EXPLOSION_KICK,
   EXPLOSION_MASS_REF,
@@ -44,7 +45,7 @@ import { resetModelPicker } from './models';
 import { accumulatePanelDamage, makePanelBody, updatePanelFlap } from './panels';
 import type { PanelState } from './types';
 import { applySuspension, type HeightSampler } from './suspension';
-import { PlayerControl, BOOST_CAP } from './control';
+import { PlayerControl } from './control';
 import { Pickups } from './pickups';
 import { Effects } from './effects';
 import { GameAudio, type AudioFrameState, type EngineFlavor } from './audio';
@@ -279,6 +280,9 @@ export class Game {
   private deformQueue: DeformJob[] = [];
   private pairCooldown = new Map<string, number>();
   private checked = new Map<number, number>(); // bodyId → simTime of the shunt
+  // near-miss boost credit (B3/BP "Driving Skills"): bodyId → simTime a close
+  // pass was last credited, so one fly-by earns once, not every step
+  private nearMissAt = new Map<number, number>();
   private playerWallGraceUntil = 0; // takedown wall-grace (TAKEDOWN_WALL_GRACE)
   private keys: Record<string, boolean> = {}; // live key state (events land here any time)
   // The key state the SIM reads — frozen at frame start to exactly the mask
@@ -923,6 +927,7 @@ export class Game {
     this.fx.reset();
     this.pairCooldown.clear();
     this.checked.clear();
+    this.nearMissAt.clear();
     this.deformQueue.length = 0;
 
     this.timeScale = 1;
@@ -938,6 +943,7 @@ export class Game {
     this.takedowns.reset(); // clear the revenge ledger for the fresh take
     this.playerWallGraceUntil = 0;
     this.pickups.reset();
+    this.lastEmittedBoost = -1; // force a fresh boost HUD emit next frame
     this.control.reset(Math.atan2(this.level.player.dir.x, this.level.player.dir.z));
     this.director.reset();
     this.camera.position.copy(this.cam0.pos);
@@ -1212,7 +1218,13 @@ export class Game {
           this.replay.stats.takedowns++;
           this.replay.lastTakedownAt = this.simTime;
         }
-        this.control.boostMeter = BOOST_CAP; // takedowns steal their boost
+        // B3 reward loop: the player's takedown EXTENDS the boost bar one
+        // segment (up to 4x) and instantly refills the whole, longer bar —
+        // chain takedowns to grow it. A takedown is the player's when they
+        // rammed, or when the wreck was a rival the player set sliding.
+        const playerTakedown =
+          self.isPlayer || (victim ? victim.destabilizedByPlayer : false) || (oa ? oa.destabilizedByPlayer : false);
+        if (playerTakedown) this.control.addBoostSegment();
         if (victim) {
           if (out.graceOther && oa) this.checked.set(oa.body.id, this.simTime);
           _impact.set(victim.body.position.x, victim.body.position.y + 1, victim.body.position.z);
@@ -1416,6 +1428,9 @@ export class Game {
     a.destabilizedByPlayer = false;
     a.destabilizedBy = 0;
     a.body.collisionFilterMask = -1;
+    // B3: a crash collapses the earned (extended) boost bar back to 1x — the
+    // chain reward you built up is the thing you lose when you wreck.
+    if (a.isPlayer) this.control.resetBoostBar();
     if (!a.isPlayer && a.kind === 'vehicle') this.mode.score?.chargeCrashbreaker();
   }
 
@@ -1624,6 +1639,7 @@ export class Game {
         }
       }
       this.control.update(p, input, this.heightAt);
+      this.creditNearMisses(p); // close passes at speed earn boost
     }
 
     this.mode.fixedStep(FIXED_DT, this.state, this.simTime);
@@ -1646,6 +1662,40 @@ export class Game {
         const fx = (_fwd.x * iz + _right.x * ix) * AFTERTOUCH_F;
         const fz = (_fwd.z * iz + _right.z * ix) * AFTERTOUCH_F;
         this.player.body.applyForce(_atF.set(fx, 0, fz)); // at COM = pure push
+      }
+    }
+  }
+
+  /** Burnout "Driving Skills" boost: passing other traffic CLOSE and FAST
+   *  without hitting it credits a pulse of boost. A pass earns once — a body
+   *  is eligible again only after the per-body cooldown lapses. Deterministic
+   *  (reads sim positions/velocities, writes control boost state). */
+  private creditNearMisses(p: Actor): void {
+    if (this.state !== GameState.Launch) return; // only while actually driving
+    const v = p.body.velocity;
+    const sp = Math.hypot(v.x, v.z);
+    if (sp < 18) return; // a near-miss only thrills at speed (the drift band)
+    const fwdX = v.x / sp;
+    const fwdZ = v.z / sp;
+    const px = p.body.position.x;
+    const pz = p.body.position.z;
+    for (const a of this.actors) {
+      if (a === p || a.kind !== 'vehicle' || a.crashed) continue;
+      const dx = a.body.position.x - px;
+      const dz = a.body.position.z - pz;
+      const along = dx * fwdX + dz * fwdZ; // +ahead / −behind along our line
+      const lat = Math.abs(dx * -fwdZ + dz * fwdX); // perpendicular gap
+      // a close shave: alongside (small |along|), a lane's width to the side,
+      // but not a scrape (lat>1.2 keeps actual contacts out)
+      const near = lat > 1.2 && lat < 3.2 && Math.abs(along) < 6;
+      const last = this.nearMissAt.get(a.body.id);
+      if (near && along <= 0.5 && (last === undefined || this.simTime - last > 1.0)) {
+        // a completed pass (now alongside/just behind): credit once. Closer +
+        // faster = a bigger thrill = more boost (capped).
+        this.nearMissAt.set(a.body.id, this.simTime);
+        const strength = Math.min(1.6, (sp / 30) * (1 + (3.2 - lat) * 0.25));
+        this.control.nearMiss(strength);
+        this.events.emit('flash', 'NEAR MISS');
       }
     }
   }
@@ -1761,10 +1811,22 @@ export class Game {
 
   private updateHud(dt: number): void {
     this.mode.score?.update(dt);
-    const boost = Math.round((this.control.boostMeter / BOOST_CAP) * 100);
-    if (boost !== this.lastEmittedBoost) {
-      this.lastEmittedBoost = boost;
-      this.events.emit('boost', boost / 100);
+    // segmented boost meter (B3 1x→4x): fill across the whole extended bar,
+    // plus the segment count and Burnout state for the HUD to draw.
+    const c = this.control;
+    const fillPct = Math.round((c.boostMeter / c.boostCap) * 100);
+    // dedup on a packed signature so we only emit when something visible
+    // changes (fill %, segment count, or Burnout flag)
+    const sig = fillPct + c.boostSegments * 1000 + (c.burnout ? 100000 : 0);
+    if (sig !== this.lastEmittedBoost) {
+      this.lastEmittedBoost = sig;
+      this.events.emit('boost', {
+        fill: fillPct / 100,
+        segments: c.boostSegments,
+        maxSegments: BOOST_MAX_SEGMENTS,
+        burnout: c.burnout,
+        chain: c.burnoutChain,
+      });
     }
   }
 

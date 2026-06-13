@@ -7,8 +7,31 @@ export const FIXED_DT = 1 / 120; // physics step (s)
 export const SLOWMO = 0.13; // crashtime timescale
 export const SLOWMO_HOLD = 2.6; // seconds of real time held slow
 
-export const LAUNCH_SPEED = 39; // player top speed (m/s)
+export const LAUNCH_SPEED = 44; // regular-boost top speed (m/s) — the familiar
+//                                 "fast"; the Burnout state goes faster still.
+//                                 Kept high so designed ramp jumps still launch.
 export const LAUNCH_ACCEL = 34;
+
+// ---- speed tiers + boost economy (control.ts owns the mechanics) ----
+// Burnout's core risk/reward: the engine alone only reaches a CRUISE ceiling;
+// the top speed band is GATED behind boost, which you EARN by dangerous
+// driving (drift/air/near-miss), B3-Revenge style — boost is the reward, not
+// the default. CRUISE sits a clear step under LAUNCH_SPEED so flooring it the
+// whole straight is visibly slower than a driver who earns and burns boost.
+export const CRUISE_SPEED = 32; // engine-only top speed (m/s) — no boost; a
+//                                 clear step under boosted speed (the gate)
+// Burnout-3 segmented bar: one segment = one "unit" of boost, drained in
+// BOOST_SEGMENT_SECS of burn. The bar starts at 1 segment and EXTENDS one
+// segment per takedown (chained reward loop) up to BOOST_MAX_SEGMENTS — each
+// takedown also instantly refills the whole, now-larger bar.
+export const BOOST_SEGMENT_SECS = 2.0; // seconds of full burn per segment
+export const BOOST_START_SEGMENTS = 1;
+export const BOOST_MAX_SEGMENTS = 4; // B3's 1x→4x meter
+// A full bar lets you tip into a sustained "Burnout": boost keeps burning at a
+// stronger rate AND reaches a higher top speed than regular boost. Refilling
+// the bar mid-Burnout (by keeping the dangerous driving up) chains another
+// Burnout — the B3 loop. This is the genuine top of the speed ladder.
+export const BURNOUT_SPEED = 48; // Burnout-state top speed (above LAUNCH_SPEED)
 
 export const CRUSH_MAX = 0.55; // max vertex crumple depth (m)
 // Panel-damage sensor scale (BP-style detach thresholds are tuned to it).
