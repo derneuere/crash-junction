@@ -1076,7 +1076,22 @@ function buildCoast(scene: THREE.Scene, coast: CoastDef): Sea {
         // waterline crossing: fraction along rim→toe where the slope hits sea
         const rimY = o[vi].y ?? 0;
         const runW = Math.max(0.01, vW[vi] * botF); // horizontal rim→toe run
-        const slope = (rimY - BOT) / runW; // metres of rise per metre seaward-in
+        // [fix-water] CLAMP the inland slope. On a real beach (vW≈18 m) the
+        // rim→toe run is wide, so (rimY−BOT)/runW is a gentle few-percent grade.
+        // But on a ZERO-WIDTH edge — a quay 'wall' (SKIRT_W.wall = 0) with an
+        // authored rim up to ~2.7 m — runW collapses to the 0.01 floor and the
+        // slope blows up to several-hundred-per-metre. The inland foam offset
+        // (inner, NEGATIVE) is then projected up that near-vertical pseudo-slope
+        // in yAt(), launching that foam vertex HUNDREDS of metres into the sky.
+        // Because the foam is an unlit full-bright MeshBasicMaterial, that
+        // runaway sheet read as a tall bright white vertical band rising from
+        // the shore (very visible at dusk/night, and it tripped the bloom pass).
+        // Foam belongs on the wet-sand wedge at the water's edge — at most a few
+        // decimetres of lift — so cap the grade at SLOPE_MAX. A vertical quay has
+        // no wet-sand wedge anyway, so flattening the foam onto the sea there is
+        // exactly right (it just hugs the waterline at the wall's foot).
+        const SLOPE_MAX = 0.35; // ~19° — gentler than any authored beach grade
+        const slope = Math.min(SLOPE_MAX, (rimY - BOT) / runW); // rise per m inland
         const tSea = Math.min(1, Math.max(0, (rimY - sea) / Math.max(0.01, rimY - BOT)));
         const wlx = o[vi].x + vOut[vi].x * vW[vi] * botF * tSea;
         const wlz = o[vi].z + vOut[vi].z * vW[vi] * botF * tSea;
