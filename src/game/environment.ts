@@ -278,14 +278,17 @@ function buildCoast(scene: THREE.Scene, coast: CoastDef): Sea {
   island.receiveShadow = true;
   scene.add(island);
 
-  // ── SEA SEAM (art-water) ───────────────────────────────────────────────
+  // ── SEA SEAM (art-ocean) ───────────────────────────────────────────────
   // The old static blue-green plane with baked whitecaps lived here. It is
-  // now an ANIMATED Gerstner sea built in sea.ts (rolling waves + fresnel
-  // depth colour + analytic sky reflection + moving sparkle/whitecaps), still
-  // a pure-visual backdrop with no collider. seaLevel is UNCHANGED at -2.2;
-  // max wave amplitude at the shoreline is SEA_MAX_AMPLITUDE (~0.21 m), so
-  // the foam strip below (riding sea + 0.04) still sits clear of the crests.
-  // The returned handle's update() is driven from the render loop (Game.ts).
+  // now an ANIMATED ocean built in sea.ts: a 12-wave Gerstner body with
+  // tanh-softened crests, a 5-layer domain-warped fragment NORMAL perturbation
+  // (the dense micro-ripple), Schlick fresnel, PMREM sky reflection from OUR
+  // scene.environment, subsurface scatter, triple-lobe sun specular and a
+  // multi-layer foam system — still a pure-visual backdrop with no collider.
+  // seaLevel is UNCHANGED at -2.2; max wave amplitude at the shoreline is
+  // SEA_MAX_AMPLITUDE (~0.29 m), so the foam strip below (riding sea + 0.04)
+  // still sits clear of the crests. The returned handle's update() is driven
+  // from the render loop (Game.ts), off RENDER time — pin-safe.
   const seaHandle = buildSea(scene, sea);
   // ───────────────────────────────────────────────────────────────────────
 
