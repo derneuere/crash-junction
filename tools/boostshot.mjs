@@ -167,10 +167,10 @@ try {
   });
   page.on('pageerror', (e) => console.log(`[page error] ${e.message}`));
 
-  await page.goto(`http://localhost:${PORT}/`, { waitUntil: 'domcontentloaded' });
-  await page.waitForFunction(() => window.__game !== undefined, { timeout: 30_000, polling: 100 });
-  await clickButton(page, /\bDAY\b/);
-  await clickButton(page, /^CRASH JUNCTION$/);
+  // FAST PATH (post menu-redesign): the front-end no longer mounts a level
+  // from buttons — deep-link straight into junction. The shots loop below
+  // sets each shot's time-of-day itself, so the launch tod is just to mount.
+  await page.goto(`http://localhost:${PORT}/?level=junction&tod=day&launch=1`, { waitUntil: 'domcontentloaded' });
   await page.waitForFunction(() => window.__game?.levelId === 'junction', { timeout: 30_000, polling: 100 });
   await new Promise((res) => setTimeout(res, 2500)); // settle the scene
 
