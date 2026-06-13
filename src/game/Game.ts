@@ -30,6 +30,7 @@ import { createMode, type GameMode, type ModeHost } from './modes/mode';
 import { GROUP_DECOR, createPhysics, type PhysicsContext } from './physics';
 import { buildEnvironment, makeHeightSampler } from './environment';
 import { setSeaCamera, type Sea } from './sea';
+import type { GrassField } from './grass';
 import { loadLevelProps } from './props';
 import { BRAKE_INTENSITY, HEADLIGHT_INTENSITY, charActor, createBarrel, createPole, createVehicle, deformActor, popWheel, repairVehicle, shatterGlass, type LoosePart } from './vehicles';
 import { applyCarEnvScale, applyGlassParams, glassParams, setCarEnvMap, setPlayerEnvMap, type GlassParams } from './geometry';
@@ -226,6 +227,8 @@ export class Game {
   private heightAt: HeightSampler;
   // the animated sea (coast levels); its waves run off RENDER time, never sim
   private sea: Sea | null = null;
+  // the instanced blade grass (coast levels); wind runs off RENDER time too
+  private grass: GrassField | null = null;
 
   private actors: Actor[] = [];
   private byBody = new Map<number, Actor>();
@@ -394,7 +397,10 @@ export class Game {
     this.levelId = ((Object.keys(LEVELS) as LevelId[]).find((id) => LEVELS[id] === level) ?? 'junction') as LevelId;
     this.heightAt = makeHeightSampler(level);
     this.phys = createPhysics();
-    this.sea = buildEnvironment(this.scene, this.phys, level);
+    const env = buildEnvironment(this.scene, this.phys, level);
+    this.sea = env.sea;
+    this.grass = env.grass;
+    this.grass?.setTier(this.gfx); // seed the blade count to the current tier
     setSeaCamera(this.camera); // the sea reads the camera for fresnel/sparkle
     // prop colliders are synchronous and must exist before the first
     // physics step (their GLB visuals stream in whenever — see props.ts)
@@ -497,6 +503,13 @@ export class Game {
       });
     }
 
+    // re-tint the blade grass to the same time of day (its lit base colour +
+    // ambient level track the sky like the sea's). Visual only, render-driven.
+    if (this.grass) {
+      const GRASS_AMBIENT: Record<TimeOfDay, number> = { day: 1.0, dusk: 0.82, night: 0.42 };
+      this.grass.setTimeOfDay({ ambient: GRASS_AMBIENT[t], tint: p.sunColor });
+    }
+
     this.sunSprite.position.copy(this.sunDirUnit).multiplyScalar(290);
     this.sunSprite.visible = !night;
     this.moonSprite.visible = night;
@@ -543,6 +556,9 @@ export class Game {
   setGfx(g: GfxMode): void {
     this.perf.tag(`gfx:${g}`);
     this.gfx = g;
+    // heavy blade density is gated to CINE; FAST drops to a sparse subset so
+    // the cheap tier leans on the textured-ground fallback (perf strategy)
+    this.grass?.setTier(g);
     const cine = this.cineActive();
     // with the composer, the renderer draws into an HDR buffer — ACES then
     // lives in the chain (postfx.ts); without it, back on the renderer
@@ -2009,6 +2025,7 @@ export class Game {
 
     // presentation pixels only from here down — the sim never reads back
     this.sea?.update(af.dt); // animate the waves off RENDER time (pin-safe)
+    this.grass?.update(af.dt); // sway the blades off RENDER time (pin-safe)
     this.updateShadowRig();
     this.sunFlare.update(this.camera, this.sunSprite.position, af.dt, this.sunSprite.visible, () => this.flareOccluded());
     if (this.cineActive()) {
