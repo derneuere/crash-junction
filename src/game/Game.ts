@@ -400,10 +400,20 @@ export class Game {
     sun.position.set(34, 44, 20);
     sun.castShadow = true;
     sun.shadow.mapSize.set(2048, 2048);
-    sun.shadow.camera.left = -38;
-    sun.shadow.camera.right = 38;
-    sun.shadow.camera.top = 38;
-    sun.shadow.camera.bottom = -38;
+    // Follow-rig frustum tightened from ±38 m to ±32 m. The chase cam sits
+    // ~7–9 m behind the car and low (~2.3 m), looking ~8 m ahead, so the
+    // shadows that actually READ on screen live within ~30 m of the player —
+    // the box is player-centred, so ±32 m still covers the full visible apron
+    // plus margin while culling the far cranes/sheds (whose shadows fell
+    // outside the frame anyway) out of the depth pass. Paired with the 3072²
+    // cine map (applyRenderPath) the texel pitch is 64 m / 3072 ≈ 20.8 mm,
+    // essentially the old 76 m / 4096 ≈ 18.6 mm — PCFSoft blurs the ~2 mm
+    // difference away, so shadow edges read identical for ~44% less shadow
+    // raster + fewer shadow draws.
+    sun.shadow.camera.left = -32;
+    sun.shadow.camera.right = 32;
+    sun.shadow.camera.top = 32;
+    sun.shadow.camera.bottom = -32;
     sun.shadow.camera.near = 1;
     sun.shadow.camera.far = 180;
     sun.shadow.bias = -0.0008;
@@ -620,7 +630,10 @@ export class Game {
     // with the composer, the renderer draws into an HDR buffer — ACES then
     // lives in the chain (postfx.ts); without it, back on the renderer
     this.renderer.toneMapping = cine ? THREE.NoToneMapping : THREE.ACESFilmicToneMapping;
-    const size = cine ? 4096 : 2048;
+    // Cine shadow map dropped 4096²→3072². With the ±32 m frustum the texel
+    // pitch matches the old 4096²/±38 m rig (~20 mm), so edges look identical
+    // while the depth pass rasterises 44% fewer texels (9.4M vs 16.8M).
+    const size = cine ? 3072 : 2048;
     if (this.sun.shadow.mapSize.x !== size) {
       this.sun.shadow.mapSize.set(size, size);
       this.sun.shadow.map?.dispose();
