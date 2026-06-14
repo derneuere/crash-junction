@@ -21,16 +21,3 @@ declare module 'n8ao' {
     setQualityMode(mode: 'Performance' | 'Low' | 'Medium' | 'High' | 'Ultra'): void;
   }
 }
-
-declare module 'realism-effects' {
-  import type { Camera, Scene } from 'three';
-  import { Effect, Pass } from 'postprocessing';
-
-  export class VelocityDepthNormalPass extends Pass {
-    constructor(scene: Scene, camera: Camera);
-  }
-
-  export class MotionBlurEffect extends Effect {
-    constructor(velocityPass: VelocityDepthNormalPass, options?: { intensity?: number; jitter?: number; samples?: number });
-  }
-}
