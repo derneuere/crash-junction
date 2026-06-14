@@ -1,5 +1,7 @@
 import * as THREE from 'three';
 import { getVehicleModel, type PlayerCarId, type VehicleModel, setPlayerCar } from './models';
+import { panelDefs } from './panels';
+import { SPECS } from './vehicles';
 
 // ────────────────────────────────────────────────────────────────────────────
 // GarageScene — a standalone, self-contained three.js showroom for the car
@@ -128,6 +130,16 @@ export class GarageScene {
     this.raf = 0;
   }
 
+  /** Render a single frame at a fixed orbit angle. Used by the headless
+   *  screenshot harness (tools/garageshot) for stable, comparable captures;
+   *  production uses start()'s rAF loop instead. */
+  renderPose(orbit: number): void {
+    if (this.disposed) return;
+    this.orbit = orbit;
+    this.updateCamera();
+    this.renderer.render(this.scene, this.camera);
+  }
+
   /** Re-fit the renderer + camera to the canvas's current box. */
   resize(): void {
     if (this.disposed) return;
@@ -204,19 +216,28 @@ export class GarageScene {
     this.carDisposables.length = 0;
   }
 
-  /** Build the showroom car from a baked template: a vertex-coloured hull (its
-   *  paint range overwritten with the spawn colour, glass left dark-tinted),
-   *  the stripped-chassis interior so wounds aren't this car's concern here,
-   *  and four wheels at the bake's arch positions. Mirrors vehicles.ts's
-   *  makeModelHull/buildWheels but with garage-local, glossier materials. */
+  /** Build a CLEAN, INTACT showroom car from a baked template.
+   *
+   *  The baked `model.body` is the crash rig's hull: its detachable panels
+   *  (doors/bonnet/boot/bumpers) have been CARVED OUT of the index at bake time
+   *  (models.ts cutPanelTemplates) and live separately in `model.panelCuts`, so
+   *  the hull alone is full of holes and reveals the stripped-chassis interior.
+   *  In-game that's correct — panels hang on hinges and tear off. The SHOWROOM
+   *  car must be whole, so we re-attach every panel cut at its REST position
+   *  (the spot it was carved from) to close the bodywork back up. No detach, no
+   *  flap, no debris/cones — those are gameplay-only. We still draw the interior
+   *  so the cabin reads through the glass, but no wound exposes it.
+   *
+   *  Mirrors vehicles.ts's makeModelHull + panels.ts's buildPanels rest pose,
+   *  with garage-local, glossier materials and a single set of wheels. */
   private buildCar(model: VehicleModel, color: number): THREE.Group {
     const group = new THREE.Group();
+    const c = new THREE.Color(color);
 
     // hull geometry — clone (the template is shared/read-only) and repaint
     const bodyGeo = model.body.clone();
     this.carDisposables.push(bodyGeo);
     const col = bodyGeo.attributes.color as THREE.BufferAttribute;
-    const c = new THREE.Color(color);
     for (const [s, e] of model.paintRanges) {
       for (let i = s; i < e; i++) col.setXYZ(i, c.r, c.g, c.b);
     }
@@ -226,9 +247,33 @@ export class GarageScene {
     }
     col.needsUpdate = true;
 
-    const hull = new THREE.Mesh(bodyGeo, this.carMats());
+    const carMats = this.carMats();
+    const hull = new THREE.Mesh(bodyGeo, carMats);
     hull.castShadow = false;
     group.add(hull);
+
+    // re-attach the carved bodywork (intact, at rest) so the hull's panel
+    // holes close up. panelDefs() is pure and gives the same defs the bake
+    // cut against; cut geometry is panel-local (origin at def.center), so a
+    // mesh placed at def.center sits exactly back in its wound. Paint the cut's
+    // paint verts in the body colour to match the hull; trim/handles keep their
+    // baked colour. Reuse the hull's paint material — its index has no glass/
+    // lens groups, so a single-material mesh is correct. */
+    const panelPaint = (carMats[0] as THREE.Material); // [paint, glass, head, tail]
+    for (const [i, def] of panelDefs(SPECS.sedan, model).entries()) {
+      const cut = model.panelCuts[i];
+      if (!cut) continue; // sliver region — nothing was carved, hull kept it
+      const geo = cut.geo.clone();
+      this.carDisposables.push(geo);
+      const pcol = geo.attributes.color as THREE.BufferAttribute;
+      for (let v = 0; v < cut.paint.length; v++) {
+        if (cut.paint[v]) pcol.setXYZ(v, c.r, c.g, c.b);
+      }
+      pcol.needsUpdate = true;
+      const panel = new THREE.Mesh(geo, panelPaint);
+      panel.position.set(def.center[0], def.center[1], def.center[2]);
+      group.add(panel);
+    }
 
     if (model.interior) {
       const inner = new THREE.Mesh(model.interior.clone(), this.interiorMat());
