@@ -52,6 +52,10 @@ export default function App() {
   // a replay whose level isn't loaded yet — startReplay() fires once it is
   const pendingReplay = useRef<{ file: ReplayFile; fast: boolean } | null>(null);
   const fast0 = useRef(readFastPath());
+  // whether the NEXT gameplay mount should auto-launch straight into the event
+  // (the menu→gameplay player flow) vs settle in idle (fast-path / replay). The
+  // mount effect reads + clears it.
+  const autoLaunchNext = useRef(false);
 
   // last selection (event + variant + per-event variant memory) — cj-sel
   const [sel0] = useState(readSel);
@@ -249,15 +253,26 @@ export default function App() {
       game.events.on('cine', setCineCam),
     ];
     const pending = pendingReplay.current;
-    if (pending && pending.file.levelId === levelId) {
+    const isReplay = !!(pending && pending.file.levelId === levelId);
+    if (isReplay) {
       pendingReplay.current = null;
-      game.startReplay(pending.file, pending.fast);
+      game.startReplay(pending!.file, pending!.fast);
     }
-    // the world is up the moment the constructor returns (actors are built
-    // synchronously); flip ready on the next frame so the first render lands
-    const readyRaf = requestAnimationFrame(() => setGameReady(true));
+    // AUTO-LAUNCH: the menu→gameplay player flow drops straight into the running
+    // event the moment warmup ends (no idle "READY / LAUNCH" map-preview beat).
+    // Replays drive their own launch via the tape, and the fast-path/deep-link
+    // (refshot) wants the idle orbit — both leave it OFF. autoLaunchNext is set
+    // by the entry point; default false so anything that mounts the Game
+    // directly stays in the safe idle state.
+    if (autoLaunchNext.current && !isReplay) game.setAutoLaunch(true);
+    autoLaunchNext.current = false;
+    // Keep the LOADING overlay up until the Game has WARMED its render pipelines
+    // (postfx chain + first cube capture) and is about to hand control over —
+    // that's what actually hides the first-frame hitch (worst on gantry). Game
+    // fires whenReady after its warmup burst; under ?verify=1 it fires
+    // immediately (headless, no warmup).
+    game.whenReady(() => setGameReady(true));
     return () => {
-      cancelAnimationFrame(readyRaf);
       offs.forEach((off) => off());
       gameRef.current = null;
       levelRef.current = null;
@@ -267,8 +282,11 @@ export default function App() {
 
   /** Commit the current event+variant+car → GAMEPLAY (mounts the Game behind
    *  the LOADING screen). The single entry point into gameplay from the menus
-   *  and the fast path. */
-  const startGameplay = useCallback(() => {
+   *  and the fast path. `autoLaunch` (the player flow from CAR SELECT) drops
+   *  straight into the running event once warmed; the fast-path/replay callers
+   *  leave it off so the game settles in idle. */
+  const startGameplay = useCallback((autoLaunch = false) => {
+    autoLaunchNext.current = autoLaunch;
     setReport(null);
     setPhase('gameplay');
   }, [setPhase]);
@@ -403,7 +421,7 @@ export default function App() {
       <CarSelect
         cars={PLAYER_CARS}
         initialCarId={carId}
-        onSelect={(id) => { selectCar(id); startGameplay(); }}
+        onSelect={(id) => { selectCar(id); startGameplay(true); }}
         onBack={() => setPhase('events')}
       />
     );
