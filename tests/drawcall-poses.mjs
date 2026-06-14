@@ -54,12 +54,11 @@ try {
   const page = await browser.newPage();
   await page.setViewport({ width: 640, height: 360 });
   await page.evaluateOnNewDocument((wall) => {
-    localStorage.setItem('cj-sel', JSON.stringify({ level: 'gantry', tod: 'day', perEvent: {} }));
-    localStorage.setItem('cj-tod', 'day');
-    localStorage.setItem('cj-gfx', 'cine');
     if (wall) window.__WALL_CHUNK = wall;
   }, WALL);
-  await page.goto(`http://localhost:${PORT}/`, { waitUntil: 'domcontentloaded' });
+  // FAST PATH (menu redesign): jump straight to GANTRY POINT day/cine gameplay;
+  // the old cj-sel localStorage auto-mount path no longer mounts a level.
+  await page.goto(`http://localhost:${PORT}/?level=gantry&tod=day&launch=1`, { waitUntil: 'domcontentloaded' });
   await page.waitForFunction(() => !!window.__game && window.__game.actors?.length > 0, { timeout: 30000, polling: 250 });
   await sleep(4500);
   const out = await page.evaluate((POSES) => {
