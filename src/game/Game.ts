@@ -582,7 +582,7 @@ export class Game {
     if (this.cineActive()) {
       // warm the live cube reflection (whole scene → 6 faces) and the composer
       this.reflections.update(this.renderer, this.scene, this.camera.position, [this.sunFlare.group]);
-      this.postfx.setSpeedBlur(0, false);
+      this.postfx.setMotionBlur(0, 0, 0, false);
       this.postfx.render(1 / 60);
     } else {
       this.renderer.render(this.scene, this.camera);
