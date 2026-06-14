@@ -77,7 +77,7 @@ export class Postfx {
     ao.configuration.intensity = 2.6;
     this.composer.addPass(ao);
 
-    const motionBlur = new MotionBlurEffect(velocity, { intensity: 0.6, jitter: 0.6 });
+    const motionBlur = new MotionBlurEffect(velocity, { intensity: 2.0, jitter: 0.6 });
     const bloom = new BloomEffect({
       mipmapBlur: true,
       intensity: 0.45,
