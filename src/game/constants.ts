@@ -108,3 +108,25 @@ export const TAKEDOWN_WALL_GRACE = 2.0;
 // back. After this long continuously off the track, the reset-pair
 // respawn brings the player home.
 export const OFF_TRACK_RESCUE_SECS = 5;
+
+// ---- T-BONE takedown (collision.ts resolveRaceContact) ----
+// The flank wreck the spec calls for: ram a rival in the SIDE, fast enough
+// that it's a broadside kill rather than a nudge, and the rival is wrecked
+// OUTRIGHT (no wall needed) — that's the piece that was missing. Gated on
+// BOTH a speed floor and an angle window so an ordinary catch-up shunt or a
+// door-to-door scrape never trips it.
+//
+// TBONE_MIN_CLOSING — how hard the rammer must be driving INTO the victim
+// along the line between them (their velocity projected onto rammer→victim).
+// Above the regular shunt floor (impact > 4) by a clear margin: below it the
+// contact stays a shunt (destabilize, no outright wreck). A boosted car at
+// 40+ m/s hitting square clears this easily; a 12 m/s catch-up tap does not,
+// so it stays a shunt.
+export const TBONE_MIN_CLOSING = 18; // m/s of closing along the contact line
+// TBONE_MAX_ALIGN — the angle gate. cos(angle) between the rammer's heading
+// and the victim's travel axis must be UNDER this for a broadside: |dot| ~1 is
+// nose-to-tail / head-on (longitudinal), |dot| ~0 is dead abeam. cos 45° ≈
+// 0.707, so |dot| < 0.707 ⇒ the impact angle is 45°…135° — the T-bone window.
+// A near-parallel door-to-door (dot ≈ 1) and a head-on (dot ≈ -1) both fall
+// outside it and stay shunts/scrapes, exactly as the fixtures require.
+export const TBONE_MAX_ALIGN = 0.7;
