@@ -52,7 +52,7 @@ void mainImage(const in vec4 inputColor, const in vec2 uv, out vec4 outputColor)
   // total streak length in UV: scaled by strength, the radial falloff, and how
   // far this pixel is from the focus (peripheral pixels travel further). Capped
   // so a focal point off-screen can't run the streak across the whole frame.
-  float reach = strength * radial * min(dist, 0.6) * 0.85;
+  float reach = strength * radial * min(dist, 0.6) * 1.7;
   if (reach <= 0.0) {
     outputColor = inputColor;
     return;

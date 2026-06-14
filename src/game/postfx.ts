@@ -45,8 +45,8 @@ import { SpeedBlurEffect } from './speedblur';
 // smear. The value is the [0..1] gain fed to SpeedBlurEffect.setStrength each
 // frame from the render tail of Game.frame() — so a parked car shows no blur
 // regardless of where the camera points.
-const SPEED_ONSET = 22; // m/s — calm below this (cruising stays mostly sharp)
-const SPEED_FULL = 46; // m/s — full smear at/above regular-boost top speed
+const SPEED_ONSET = 16; // m/s — calm below this (cruising stays mostly sharp)
+const SPEED_FULL = 38; // m/s — full smear at/above regular-boost top speed
 const BOOST_BONUS = 0.18; // extra strength while boosting (clamped to 1 below)
 
 /** Map player speed (m/s) + boost flag to a speed-blur strength gain [0..1].
