@@ -83,6 +83,11 @@ const _shadowOrigin = new THREE.Vector3();
 const _shadowRight = new THREE.Vector3();
 const _shadowUp = new THREE.Vector3();
 const _shadowTarget = new THREE.Vector3();
+// translational motion-blur scratch: the camera world-position delta and the
+// two clip-space points used to project it to a screen-space smear direction.
+const _camDelta = new THREE.Vector3();
+const _mbA = new THREE.Vector3();
+const _mbB = new THREE.Vector3();
 
 /** The reflection world the cars see: a bright sky ceiling with one hot
  *  sun strip, sky-blue upper walls over a dark lower band (the horizon
@@ -340,6 +345,14 @@ export class Game {
   // at CUBE_EVERY_DEFAULT.
   private renderFrame = 0;
   private cubeEvery = CUBE_EVERY_DEFAULT;
+  // Translational motion-blur (postfx.ts): the camera's world position at the
+  // END of the previous rendered frame, so the render path can take a position
+  // DELTA (translation only — rotation is excluded by construction, it's a
+  // position diff) and project it to a screen-space smear direction. Pure
+  // presentation: read/written only in the pixels-only tail of frame(), below
+  // the sim read-back line — no pin, worldHash or recorded key path sees it.
+  private prevCamPos = new THREE.Vector3();
+  private motionInit = false; // false until the first frame seeds prevCamPos
 
   constructor(
     private container: HTMLElement,
@@ -2382,14 +2395,65 @@ export class Game {
         this.reflections.update(this.renderer, this.scene, p.group.position, [p.group, this.sunFlare.group]);
         this.perf.cubeMs = performance.now() - tCube;
       }
-      // RADIAL EDGE SPEED BLUR (postfx.ts): feed THIS frame's player speed so
-      // the periphery smears with velocity (centre stays sharp). Driving only —
-      // menu/idle/crashed frames pass speed 0 and render pixel-exact. Render
-      // state only (control.speed/boosting); the sim never reads it back.
-      this.postfx.setSpeedBlur(
-        this.state === GameState.Launch && p && !p.crashed ? this.control.speed : 0,
-        this.control.boosting,
-      );
+      // TRANSLATIONAL MOTION BLUR (postfx.ts): smear the finished frame along
+      // the camera's SCREEN-PROJECTED travel direction, scaled by player speed.
+      // We isolate TRANSLATION from ROTATION by working ONLY from the camera's
+      // world-position DELTA since last render frame (a position diff carries no
+      // orientation — rotating the camera in place leaves the delta at zero),
+      // then resolving that travel onto the camera's own basis: the right/up
+      // strafe components plus the forward (toward-the-scene) component, which
+      // is what dominates for the chase cam and reads as the classic forward
+      // speed-blur streaking toward the lower frame. A pure pan or takedown
+      // orbit barely moves the eye, so the delta — and thus the smear —
+      // collapses to ~zero, and the strength is gated by player speed on top.
+      // Render state only (camera transform + control.speed/boosting); the sim
+      // never reads any of this back — it all lives below the read-back line.
+      {
+        const drivingMB = this.state === GameState.Launch && p && !p.crashed;
+        let dirX = 0;
+        let dirY = 0;
+        if (this.motionInit && drivingMB) {
+          // world delta = how far the eye translated this render frame
+          _camDelta.copy(this.camera.position).sub(this.prevCamPos);
+          if (_camDelta.lengthSq() > 1e-10) {
+            // resolve the travel delta onto the camera's own basis (its columns
+            // in matrixWorld): right (+x), up (+y), and the look axis. getWorld-
+            // Direction gives the FORWARD look (−z) so dotting the delta with it
+            // is the toward-the-scene component.
+            _mbA.setFromMatrixColumn(this.camera.matrixWorld, 0); // world right
+            _mbB.setFromMatrixColumn(this.camera.matrixWorld, 1); // world up
+            const dRight = _camDelta.dot(_mbA);
+            const dUp = _camDelta.dot(_mbB);
+            this.camera.getWorldDirection(_mbA); // unit forward (look) axis
+            const dFwd = _camDelta.dot(_mbA);
+            // Build the SCREEN smear direction (UV space, y runs DOWN):
+            //  • strafing/lifting: the world slides opposite the eye → −right
+            //    on screen-x, and +up-in-world maps to screen-DOWN → +dUp on
+            //    screen-y (so the world appears to drop as the eye rises).
+            //  • driving FORWARD (the chase-cam's dominant motion): the scene
+            //    rushes toward the lens and streaks toward the lower frame, the
+            //    canonical forward speed-blur — map +forward to screen-down.
+            const fx = -dRight;
+            const fy = dUp + dFwd; // forward + the world-up→screen-down term
+            const fl = Math.hypot(fx, fy);
+            if (fl > 1e-6) {
+              // normalise to a unit direction — the postfx strength curve owns
+              // the magnitude; this only sets which way the frame streaks.
+              dirX = fx / fl;
+              dirY = fy / fl;
+            }
+          }
+        }
+        this.postfx.setMotionBlur(
+          dirX,
+          dirY,
+          drivingMB ? this.control.speed : 0,
+          this.control.boosting,
+        );
+        // seed/refresh the previous eye position for next render frame's delta
+        this.prevCamPos.copy(this.camera.position);
+        this.motionInit = true;
+      }
       const tPost = performance.now();
       this.postfx.render(af.dt);
       this.perf.postMs = performance.now() - tPost;

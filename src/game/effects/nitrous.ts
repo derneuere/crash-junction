@@ -145,9 +145,12 @@ export class Nitrous {
     _rt.set(1, 0, 0).applyQuaternion(_q);
 
     // jet length: base + a touch from speed, longer/fiercer in Burnout, all
-    // scaled by the fade so it grows out of the pipe on tip-in
+    // scaled by the fade so it grows out of the pipe on tip-in. SIZE is halved
+    // (×0.5) vs the original tuning so the jet reads about half as large; the
+    // colour ramp, bloom, flicker, glow light and Burnout behaviour are
+    // untouched (only the geometric extent shrinks).
     const speedK = Math.min(1, speed / 44);
-    const len = (1.45 + speedK * 0.9 + (burnout ? 0.7 : 0)) * this.intensity;
+    const len = (1.45 + speedK * 0.9 + (burnout ? 0.7 : 0)) * this.intensity * 0.5;
     // a fast global flicker (two beats) + a slow pulse so it breathes, not
     // strobes. Visual-only Math.random hits per node below.
     const flick =
@@ -162,8 +165,9 @@ export class Nitrous {
       for (const n of jet.nodes) {
         const t = n.t; // 0 at the pipe, 1 at the tip
         // re-roll a little lateral wander each frame so the flame licks about
-        n.jx = (Math.random() - 0.5) * (0.05 + t * 0.16);
-        n.jy = (Math.random() - 0.5) * (0.05 + t * 0.16);
+        // (spread halved with the rest of the jet so the cone stays in proportion)
+        n.jx = (Math.random() - 0.5) * (0.025 + t * 0.08);
+        n.jy = (Math.random() - 0.5) * (0.025 + t * 0.08);
         // sit along the backward axis; the cone widens a hair toward the tip
         const along = t * len;
         n.sprite.position
@@ -171,9 +175,12 @@ export class Nitrous {
           .addScaledVector(_ax, along)
           .addScaledVector(_rt, n.jx)
           .addScaledVector(_up, n.jy - 0.02 * t); // droop a touch with heat
-        // size: fat near the pipe, tapering to the tip, jittered by the flicker
+        // size: fat near the pipe, tapering to the tip, jittered by the flicker.
+        // The trailing ×0.5 halves the per-sprite footprint so the jet reads
+        // ~50% smaller (paired with the halved length/spread above); the core
+        // colours stay well above the bloom threshold, so the jet still blooms.
         const taper = 0.42 + (1 - t) * 0.66;
-        const s = taper * (0.9 + flick * 0.3) * (0.55 + 0.45 * this.intensity) * (burnout ? 1.12 : 1);
+        const s = taper * (0.9 + flick * 0.3) * (0.55 + 0.45 * this.intensity) * (burnout ? 1.12 : 1) * 0.5;
         n.sprite.scale.set(s, s, 1);
         // colour ramp: core → mid → tip, brighter at the very root
         if (t < 0.45) _tmp.copy(C_CORE).lerp(C_MID, t / 0.45);

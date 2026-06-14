@@ -1,98 +1,100 @@
 import * as THREE from 'three';
 import { Effect, EffectAttribute } from 'postprocessing';
 
-// RADIAL EDGE SPEED BLUR (sense-of-speed, the Burnout-3 periphery streak).
+// SCREEN-SPACE TRANSLATIONAL MOTION BLUR (the chase-cam speed smear).
 //
-// A screen-space post effect that smears the FRAME EDGES radially outward from
-// screen-centre while leaving the centre sharp. At speed the periphery streaks
-// the way the eye reads fast forward motion — the optic-flow vectors all point
-// away from the focus of expansion (dead ahead), so a radial smear from the
-// centre IS that flow, sold as a blur.
+// A directional, velocity-style blur that streaks the whole finished frame
+// along the screen-projected direction the CAMERA IS TRAVELLING THROUGH THE
+// WORLD — i.e. driven by the camera's TRANSLATION, never its rotation. When
+// the car drives forward the world slides past the lens and the frame smears
+// along that flow; when the camera only ROTATES/pans (takedown orbit, idle
+// orbit) the translation is ~zero, so the smear vanishes. This is the WebGL2 /
+// pmndrs-postprocessing adaptation of the three.js webgpu motion-blur demo's
+// idea (camera-motion velocity → directional gather), minus the rotational
+// component, which we deliberately exclude on the CPU side (Game.ts feeds only
+// the translation-projected direction).
 //
 // TECHNIQUE — for each pixel:
-//   • work in ASPECT-CORRECTED screen space so the blur is circular, not
-//     elliptical (a 16:9 frame would otherwise smear harder horizontally).
-//   • r = distance from centre (0 at centre, ~1.0 at the frame edge mid-side,
-//     ~1.3 in the corners). A smoothstep gate keeps the inner ~45% UNTOUCHED
-//     and ramps the smear in toward the edges — the centre stays razor sharp.
-//   • sample TAPS times stepping from the pixel back toward the centre along
-//     the radius (so the streak points OUTWARD: each pixel pulls colour from
-//     nearer the centre, the classic zoom-blur trail). Triangular weights bias
-//     toward the pixel itself so the smear reads as a trail, not a wash.
-//   • the smear LENGTH scales with uStrength (speed) AND with the edge gate, so
-//     even at full strength the centre is clean and only the rim streaks.
+//   • uVelocity is a screen-space vector (in UV units, already aspect-baked by
+//     the caller's projection) pointing along the apparent travel direction,
+//     its LENGTH proportional to how fast the camera is translating. Game.ts
+//     projects the camera world-position delta into clip space each frame and
+//     hands us the resulting screen direction × a speed-scaled magnitude.
+//   • gather TAPS samples symmetrically along ±uVelocity (a true directional
+//     box/triangle blur centred on the pixel) so the streak reads as motion,
+//     not a one-sided ghost. Triangular weights bias toward the pixel itself.
+//   • when |uVelocity| ≈ 0 (stationary, or rotating-only) the offsets collapse
+//     to the pixel and we early-out pixel-exact — no blur on a pure pan.
 //
 // CONVOLUTION effect: it reads inputBuffer at several offsets, so it must own
 // its own EffectPass (postprocessing can't merge two convolution effects into
 // one pass — bloom + chromatic-aberration already force their own splits).
 //
-// PRESENTATION ONLY: uStrength is driven per render frame from the player's
-// speed via setStrength(); the shader reads inputBuffer + uniforms and writes
-// pixels. It touches no sim / RNG / camera transform — the determinism pins
-// never see it (and ?verify=1 bypasses the whole composer anyway).
+// PRESENTATION ONLY: uVelocity is driven per render frame from the camera's
+// world-position delta via setVelocity(); the shader reads inputBuffer +
+// uniforms and writes pixels. It touches no sim / RNG / camera transform — the
+// determinism pins never see it (and ?verify=1 bypasses the whole composer).
 
-const TAPS = 6; // handful of taps — it's a cheap edge effect
+const TAPS = 11; // odd: a centre tap + equal taps each side along the velocity
 
 const fragmentShader = /* glsl */ `
-uniform float uStrength; // 0 = off, 1 = full peripheral smear (speed-driven)
+// screen-space motion vector in UV units; its length = blur reach (speed). The
+// caller projects the camera TRANSLATION delta into screen space, so a pure
+// rotation/pan leaves this ~zero and the frame stays sharp.
+uniform vec2 uVelocity;
 
-// inner radius (aspect-corrected, ~0..1 mid-side) below which the frame is
-// left fully sharp; the smear ramps in from here out to the corners.
-#define INNER 0.45
-#define OUTER 1.15
 #define TAPS ${TAPS}
-#define MAX_SHIFT 0.16 // max fraction of the centre->pixel vector smeared at edge+full speed
 
 void mainImage(const in vec4 inputColor, const in vec2 uv, out vec4 outputColor) {
-  // centre->pixel vector, aspect-corrected so r is circular on screen.
-  vec2 d = uv - vec2(0.5);
-  vec2 dc = d * vec2(aspect, 1.0);
-  float r = length(dc);
-
-  // edge gate: 0 inside INNER (sharp centre), ramps to 1 by OUTER.
-  float edge = smoothstep(INNER, OUTER, r);
-
-  // nothing to do where the gate or speed is zero — keep the centre pixel-exact
-  // and skip the taps entirely (cheap on the dominant inner region).
-  float amount = edge * uStrength;
-  if (amount <= 0.0) {
+  // pure rotation / stationary → no translation → no smear (cheap early-out,
+  // keeps idle/takedown/menu frames pixel-exact).
+  float speed = length(uVelocity);
+  if (speed < 1e-4) {
     outputColor = inputColor;
     return;
   }
 
-  // smear back toward the centre along the radius: each tap pulls colour from
-  // nearer the focus of expansion, so the trail points OUTWARD. The total reach
-  // is a fraction of the full centre->pixel vector, scaled by speed * edge.
-  vec2 step = -d * (MAX_SHIFT * amount) / float(TAPS - 1);
+  // sample symmetrically along ±uVelocity. Half the taps each side of centre;
+  // the step is uVelocity spread over that half so the total reach is uVelocity.
+  const int HALF = (TAPS - 1) / 2;
+  vec2 step = uVelocity / float(HALF);
 
-  vec3 acc = inputColor.rgb;       // tap 0 = the pixel itself (full weight)
+  vec3 acc = inputColor.rgb;   // centre tap, full weight
   float wsum = 1.0;
-  vec2 p = uv;
-  for (int i = 1; i < TAPS; i++) {
-    p += step;
-    // triangular falloff: nearer taps weigh more -> reads as a trailing smear
-    float w = 1.0 - float(i) / float(TAPS);
-    acc += texture2D(inputBuffer, p).rgb * w;
-    wsum += w;
+  for (int i = 1; i <= HALF; i++) {
+    // triangular falloff: nearer taps weigh more → a soft directional streak
+    float w = 1.0 - float(i) / float(HALF + 1);
+    vec2 off = step * float(i);
+    acc += texture2D(inputBuffer, uv + off).rgb * w;
+    acc += texture2D(inputBuffer, uv - off).rgb * w;
+    wsum += 2.0 * w;
   }
   outputColor = vec4(acc / wsum, inputColor.a);
 }
 `;
 
-/** Radial/edge speed blur. Add as its own EffectPass after AO/bloom. Drive
- *  setStrength() per render frame from the (normalized) player speed. */
+/** Screen-space translational motion blur. Add as its own EffectPass after
+ *  AO/bloom/tonemap. Drive setVelocity() per render frame with the screen-space
+ *  camera-translation vector (Game.ts projects the world-position delta). */
 export class RadialBlurEffect extends Effect {
   constructor() {
-    super('RadialSpeedBlur', fragmentShader, {
+    super('TranslationMotionBlur', fragmentShader, {
       // samples inputBuffer at offsets -> convolution -> owns its own pass
       attributes: EffectAttribute.CONVOLUTION,
-      uniforms: new Map<string, THREE.Uniform>([['uStrength', new THREE.Uniform(0)]]),
+      uniforms: new Map<string, THREE.Uniform>([['uVelocity', new THREE.Uniform(new THREE.Vector2(0, 0))]]),
     });
   }
 
-  /** Per render frame: 0 keeps the frame pixel-exact, 1 is the full peripheral
-   *  smear. Presentation-only; safe to call every frame from the render path. */
-  setStrength(strength: number): void {
-    (this.uniforms.get('uStrength') as THREE.Uniform).value = THREE.MathUtils.clamp(strength, 0, 1);
+  /** Per render frame: the screen-space motion vector (UV units). Its length is
+   *  the blur reach — feed 0 (or a near-zero vector) to keep the frame
+   *  pixel-exact (stationary, idle orbit, or pure camera rotation). The vector
+   *  is clamped so a teleport/huge delta can't smear the whole screen.
+   *  Presentation-only; safe to call every frame from the render path. */
+  setVelocity(x: number, y: number): void {
+    const MAX = 0.06; // cap the reach: ≤6% of the frame per side even at top speed
+    const v = (this.uniforms.get('uVelocity') as THREE.Uniform).value as THREE.Vector2;
+    v.set(x, y);
+    const len = v.length();
+    if (len > MAX) v.multiplyScalar(MAX / len);
   }
 }
