@@ -1,5 +1,6 @@
 import type * as THREE from 'three';
 import type { Actor, CollideEvent } from './types';
+import { TBONE_MIN_CLOSING, TBONE_MAX_ALIGN } from './constants';
 
 /** What a player impact amounts to, before any consequences are applied. */
 export interface ImpactJudgment {
@@ -160,6 +161,41 @@ export function judgeAggressor(self: Actor, other: Actor): 'self' | 'other' {
   return selfPush >= otherPush ? 'self' : 'other';
 }
 
+/** T-BONE: is `self` ramming `other` in the FLANK, fast enough to wreck them
+ *  outright? The spec's two gates, read straight off the bodies:
+ *    (a) FAST — self's velocity projected onto the self→other line (how hard
+ *        it's driving into the victim) clears TBONE_MIN_CLOSING. Below it the
+ *        contact is a shunt/nudge, not a kill.
+ *    (b) FLANK — the angle between self's heading and the victim's travel axis
+ *        is in the T-bone window (~45°…135°): |cos| < TBONE_MAX_ALIGN. A
+ *        near-parallel door-to-door (|cos| ≈ 1) and a head-on (cos ≈ -1) are
+ *        both outside it, so they stay shunts.
+ *  Pure read: velocities + positions in, a boolean out. No mutation, no RNG. */
+export function isTboneTakedown(self: Actor, other: Actor): boolean {
+  const sv = self.body.velocity;
+  const sSpeed = Math.hypot(sv.x, sv.z);
+  if (sSpeed < 1e-3) return false;
+  // self→other unit line (the contact direction the ram drives along)
+  const dx = other.body.position.x - self.body.position.x;
+  const dz = other.body.position.z - self.body.position.z;
+  const d = Math.hypot(dx, dz) || 1;
+  const nx = dx / d;
+  const nz = dz / d;
+  // (a) closing: self's velocity component INTO the victim. Must be driving
+  // toward them (positive) and hard enough to be a kill, not a tap.
+  const closing = sv.x * nx + sv.z * nz;
+  if (closing < TBONE_MIN_CLOSING) return false;
+  // (b) flank angle: rammer heading vs victim travel axis (facing if stopped).
+  const ov = other.body.velocity;
+  const oSpeed = Math.hypot(ov.x, ov.z);
+  const ox = oSpeed > 2 ? ov.x / oSpeed : (other.scripted?.dir.x ?? nx);
+  const oz = oSpeed > 2 ? ov.z / oSpeed : (other.scripted?.dir.z ?? nz);
+  const hx = sv.x / sSpeed;
+  const hz = sv.z / sSpeed;
+  const align = Math.abs(hx * ox + hz * oz);
+  return align < TBONE_MAX_ALIGN;
+}
+
 /** The racing rules — car contact never wrecks anyone outright. Winning a
  *  ram puts the LOSER into shunt mode (a couple of seconds with no
  *  steering); a wall touch while destabilized is the wreck — and the
@@ -178,7 +214,18 @@ export function resolveRaceContact(ctx: ContactContext): ContactOutcome {
       if (other.crashed) {
         if (impact > 5.5 && !graced) out.destabilizeSelf = 1.2; // clipping a wreck unsettles you
       } else if (impact > 4) {
-        if (judgeAggressor(self, other) === 'self') {
+        const playerAggressor = judgeAggressor(self, other) === 'self';
+        if (playerAggressor && isTboneTakedown(self, other)) {
+          // T-BONE TAKEDOWN — a fast broadside into the rival's flank wrecks
+          // them OUTRIGHT, no wall needed (the missing mechanic). Gated on
+          // closing speed + impact angle so a catch-up shunt or a door-to-door
+          // never trips it; classifyTakedown labels it T-BONE off the same
+          // geometry. takedownCam + graceOther mirror the wall-takedown payoff.
+          out.wreckOther = true;
+          out.takedown = true;
+          out.takedownCam = true;
+          out.graceOther = true;
+        } else if (playerAggressor) {
           out.destabilizeOther = 2.2; // shunt mode — they fight the slide
           out.shoveOther = Math.min(12, 5 + impact * 0.6); // the ram's kick (#1: stronger)
         } else {
