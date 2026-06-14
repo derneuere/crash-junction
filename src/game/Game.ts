@@ -341,6 +341,28 @@ export class Game {
   private renderFrame = 0;
   private cubeEvery = CUBE_EVERY_DEFAULT;
 
+  // ---- first-frame warmup gate (mount-timing only, NOT sim) ----
+  // The LOADING overlay must stay up until the heavy GPU pipelines the FIRST
+  // real gameplay frame needs are warm — otherwise the level-construction +
+  // first-composed-frame hitch lands AFTER the overlay dismisses (worst on
+  // gantry). renderer.compile() pre-LINKS programs in setTimeOfDay, but the
+  // first postfx.render() (the whole composer chain) and the first cube
+  // reflection capture still pay a one-time cost. So before the sim loop
+  // starts we render a few throwaway COMPOSED frames (render-only — they never
+  // call advance()/director.update(), so the deterministic camera and the
+  // recorder are untouched), then fire whenReady(). Skipped under forceFast
+  // (?verify=1 / refshot --gfx fast): headless runs hash pixels nobody sees and
+  // must stay byte-exact, so they take the old start-immediately path.
+  private warmupFrames = 4; // composed frames to render before handing over
+  private warmupDone = false;
+  private readyCbs: Array<() => void> = [];
+  // when true, the game auto-launches (Idle→Launch) the instant warmup ends, so
+  // the player drops straight into the running event with no idle "READY /
+  // LAUNCH" map-preview beat. The menu→gameplay flow sets it; replays, the
+  // verify path and the refshot fast-path harness leave it false (they need the
+  // idle orbit / drive their own launch via the tape).
+  private autoLaunch = false;
+
   constructor(
     private container: HTMLElement,
     private level: LevelDef,
@@ -489,12 +511,98 @@ export class Game {
     this.resizeObserver.observe(container);
 
     this.applyRenderPath(); // tone-map handoff + player env before first frame
-    this.setTimeOfDay(this.timeOfDay); // sweep the freshly built scene
-
-    this.schedule();
+    this.setTimeOfDay(this.timeOfDay); // sweep the freshly built scene (compiles)
 
     // dev console handle: window.__game.explode(...), inspect state, etc.
+    // Published BEFORE the loop starts so harnesses that poll window.__game can
+    // see it the instant the constructor returns, then await whenReady().
     (window as unknown as { __game: Game }).__game = this;
+
+    this.startLoop();
+  }
+
+  /** Start the render/sim loop. Under the headless/verify bypass we start the
+   *  loop immediately (no warmup — those runs render pixels nobody sees and
+   *  must stay byte-exact). Otherwise we render a short burst of throwaway
+   *  COMPOSED frames first so the postfx chain + cube reflection are GPU-warm
+   *  before the player ever sees a frame, THEN start the loop and fire ready —
+   *  this is what keeps the first real gameplay frame smooth under the overlay. */
+  private startLoop(): void {
+    if (this.forceFast || this.warmupFrames <= 0) {
+      this.markReady();
+      this.schedule();
+      return;
+    }
+    this.warmupBurst();
+  }
+
+  /** Render-only warmup: draw a few full composed frames (no sim advance, no
+   *  director — the deterministic camera + recorder never move), spread across
+   *  rAF ticks so the browser can upload buffers / compile the composer between
+   *  them. When the burst is done we mark ready (which auto-launches if asked)
+   *  and hand control to the normal loop. */
+  private warmupBurst = (): void => {
+    if (this.disposed) return;
+    this.warmupRenderFrame();
+    if (--this.warmupFrames > 0) {
+      // keep stepping warmup on rAF (setTimeout when hidden, like schedule());
+      // track the handle in this.raf so dispose() cancels a burst in flight
+      if (document.hidden) {
+        this.rafIsTimeout = true;
+        this.raf = window.setTimeout(this.warmupBurst, 16);
+      } else {
+        this.rafIsTimeout = false;
+        this.raf = requestAnimationFrame(this.warmupBurst);
+      }
+      return;
+    }
+    this.markReady();
+    this.last = performance.now(); // don't bill warmup wall-time to the first real dt
+    this.schedule();
+  };
+
+  /** One throwaway composed frame for pipeline warmup. Mirrors the render tail
+   *  of frame() (cube capture + postfx) but advances NOTHING — pure pixels, so
+   *  it can never touch a determinism pin. */
+  private warmupRenderFrame(): void {
+    this.updateShadowRig();
+    if (this.cineActive()) {
+      // warm the live cube reflection (whole scene → 6 faces) and the composer
+      this.reflections.update(this.renderer, this.scene, this.camera.position, [this.sunFlare.group]);
+      this.postfx.setSpeedBlur(0, false);
+      this.postfx.render(1 / 60);
+    } else {
+      this.renderer.render(this.scene, this.camera);
+    }
+  }
+
+  /** Flip the ready gate: drain the whenReady queue and, if the caller asked,
+   *  drop straight into the running event (no idle map-preview beat). */
+  private markReady(): void {
+    if (this.warmupDone) return;
+    this.warmupDone = true;
+    if (this.autoLaunch) this.launch(); // Idle→Launch — start the event directly
+    const cbs = this.readyCbs;
+    this.readyCbs = [];
+    for (const cb of cbs) cb();
+  }
+
+  /** Resolve once the game has warmed its render pipelines and is about to hand
+   *  control to the player (called immediately if already ready). The LOADING
+   *  overlay waits on this so the first-frame hitch stays hidden behind it. */
+  whenReady(cb: () => void): void {
+    if (this.warmupDone) cb();
+    else this.readyCbs.push(cb);
+  }
+
+  /** Opt into dropping straight into the running event the moment warmup ends,
+   *  skipping the idle "READY / LAUNCH" preview. Must be set before warmup
+   *  finishes (the App sets it right after construction). No-op once launched.
+   *  Never used by replays / verify / the refshot fast-path (they want idle). */
+  setAutoLaunch(on: boolean): void {
+    this.autoLaunch = on;
+    // if warmup already finished (e.g. a cached fast remount) honor it now
+    if (on && this.warmupDone && this.state === GameState.Idle) this.launch();
   }
 
   /** Engine sound flavor (stock onboard recording / sampled V10 / V8).

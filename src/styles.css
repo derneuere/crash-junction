@@ -992,16 +992,22 @@ canvas {
   font-size: 13px;
   letter-spacing: 9px;
   color: #ffb46b;
-  transform: skewX(-8deg);
+  transform: skewX(-6deg);
   text-shadow: 0 2px 0 rgba(0, 0, 0, 0.6);
 }
 .menuWordmark,
 .region {
+  /* chunky B3 chrome lean — NOT cursive: Impact is already bold/oblique-
+     reading, so a tasteful skew (no synthesized font-style: italic on top)
+     keeps it legible. Generous line-height + padding so the tall caps and the
+     drop-shadow never clip the line box. */
+  display: inline-block;
   margin-top: 8px;
+  padding: 0.12em 0.1em 0.18em;
   font-size: 30px;
+  line-height: 1.12;
   letter-spacing: 7px;
-  font-style: italic;
-  transform: skewX(-8deg);
+  transform: skewX(-6deg);
   background: linear-gradient(180deg, #eaf3ff 0%, #9fb8dd 42%, #5a7398 60%, #c7d8f0 100%);
   -webkit-background-clip: text;
   background-clip: text;
@@ -1028,7 +1034,7 @@ canvas {
   font-size: 22px;
   letter-spacing: 12px;
   color: rgba(200, 220, 255, 0.8);
-  transform: skewX(-8deg);
+  transform: skewX(-6deg);
 }
 @keyframes bumperIn {
   0% { opacity: 0; }
@@ -1053,9 +1059,20 @@ canvas {
   display: flex;
   flex-direction: column;
   align-items: center;
-  line-height: 0.86;
-  font-style: italic;
-  transform: skewX(-9deg);
+  /* B3-style chunky chrome lean. The old line-height:0.86 + font-style:italic
+     + skewX(-9deg) on tall Impact caps clipped the glyph tops/bottoms AND read
+     as over-cursive. Drop the synthesized italic, ease the skew, and give each
+     line real vertical room (line-height ~1.04 + per-line padding) so the caps
+     and their drop-shadows sit fully inside the box. */
+  line-height: 1.04;
+  transform: skewX(-6deg);
+}
+.gameWordmark .wm1,
+.gameWordmark .wm2 {
+  /* padding (in em, so it scales with the vw font sizes) is the anti-clip
+     margin for the gradient text + drop-shadows; overflow stays visible */
+  display: block;
+  padding: 0.06em 0.12em 0.1em;
 }
 .gameWordmark .wm1 {
   font-size: 8vw;
@@ -1080,14 +1097,14 @@ canvas {
   font-size: 15px;
   letter-spacing: 10px;
   color: rgba(220, 232, 255, 0.7);
-  transform: skewX(-8deg);
+  transform: skewX(-6deg);
 }
 .pressStart {
   margin-top: 7vh;
   font-size: 26px;
   letter-spacing: 8px;
   color: #ffd34d;
-  transform: skewX(-8deg);
+  transform: skewX(-6deg);
   text-shadow: 0 0 22px rgba(255, 140, 40, 0.55), 0 2px 0 rgba(0, 0, 0, 0.6);
   animation: pulse 1.2s ease-in-out infinite;
 }
@@ -1096,7 +1113,7 @@ canvas {
   font-size: 11px;
   letter-spacing: 4px;
   color: rgba(255, 255, 255, 0.4);
-  transform: skewX(-8deg);
+  transform: skewX(-6deg);
 }
 
 /* ---------- Main menu ---------- */
@@ -1356,10 +1373,15 @@ canvas {
   color: #ffb46b;
 }
 .loadName {
+  /* match the menu chrome treatment: chunky lean, no synthesized italic, and
+     enough line-height + padding that the 38px caps + shadow never clip */
+  display: inline-block;
   margin-top: 6px;
+  padding: 0.06em 0.08em 0.12em;
   font-size: 38px;
+  line-height: 1.12;
   letter-spacing: 4px;
-  font-style: italic;
+  transform: skewX(-6deg);
   background: linear-gradient(180deg, #ffd34d, #ff7a18 55%, #ff3b1f);
   -webkit-background-clip: text;
   background-clip: text;
@@ -1470,15 +1492,18 @@ canvas {
   letter-spacing: 9px;
   color: #ffb46b;
   text-shadow: 0 2px 0 rgba(0, 0, 0, 0.6);
-  transform: skewX(-8deg);
+  transform: skewX(-6deg);
 }
 .garageTitle {
-  display: block;
+  /* same chunky-chrome lean + anti-clip room as the title/menu wordmarks:
+     line-height:1 on 58px Impact + the drop-shadow clipped the caps */
+  display: inline-block;
   margin-top: 4px;
+  padding: 0.08em 0.1em 0.14em;
   font-size: 58px;
-  line-height: 1;
+  line-height: 1.12;
   letter-spacing: 8px;
-  transform: skewX(-8deg);
+  transform: skewX(-6deg);
   background: linear-gradient(180deg, #fff3c0, #ffd34d 42%, #ff7a18);
   -webkit-background-clip: text;
   background-clip: text;
