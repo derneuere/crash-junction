@@ -582,7 +582,6 @@ export class Game {
     if (this.cineActive()) {
       // warm the live cube reflection (whole scene → 6 faces) and the composer
       this.reflections.update(this.renderer, this.scene, this.camera.position, [this.sunFlare.group]);
-      this.postfx.setMotionBlur(0, 0, 0, false);
       this.postfx.render(1 / 60);
     } else {
       this.renderer.render(this.scene, this.camera);
@@ -2552,13 +2551,11 @@ export class Game {
             }
           }
         }
-        this.postfx.setMotionBlur(
-          dirX,
-          dirY,
-          drivingMB ? this.control.speed : 0,
-          this.control.boosting,
-        );
-        // seed/refresh the previous eye position for next render frame's delta
+        // Motion blur is now fully automatic: the velocity G-buffer in postfx.ts
+        // (VelocityDepthNormalPass -> MotionBlurEffect) blurs each pixel by its
+        // own screen-space motion, so there is nothing to drive per-frame here.
+        // (The dRight/dUp/dFwd direction math above is vestigial — it fed the
+        // removed full-screen smear — and is flagged for a follow-up cleanup.)
         this.prevCamPos.copy(this.camera.position);
         this.motionInit = true;
       }

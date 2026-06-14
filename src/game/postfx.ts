@@ -13,7 +13,6 @@ import {
 } from 'postprocessing';
 import { N8AOPostPass } from 'n8ao';
 import { MotionBlurEffect, VelocityDepthNormalPass } from 'realism-effects';
-import { RadialBlurEffect } from './effects/radialBlur';
 
 // The film-look chain — the game's ONLY render path now: HDR scene render →
 // ambient occlusion → per-pixel motion blur → bloom → ACES tonemap → vignette
@@ -57,7 +56,6 @@ export function speedBlurStrength(speed: number, boosting: boolean): number {
 
 export class Postfx {
   private composer: EffectComposer;
-  private motionBlur: RadialBlurEffect;
 
   constructor(renderer: THREE.WebGLRenderer, scene: THREE.Scene, camera: THREE.PerspectiveCamera, width: number, height: number) {
     this.composer = new EffectComposer(renderer, {
@@ -90,17 +88,12 @@ export class Postfx {
     const tone = new ToneMappingEffect({ mode: ToneMappingMode.ACES_FILMIC });
     this.composer.addPass(new EffectPass(camera, motionBlur, bloom, tone));
 
-    // TRANSLATIONAL MOTION BLUR (its own pass): the scene + AO + per-pixel
-    // motion blur + bloom + tonemap are baked into the frame by now, so this
-    // directional streak smears the finished, graded image along the camera's
-    // SCREEN-PROJECTED travel direction — exactly what a Burnout-3 boost run
-    // looks like when the world rips past the chase cam. It's a CONVOLUTION
-    // effect (samples the input at offsets) so it can't share a pass with
-    // bloom/aberration anyway; its own EffectPass keeps the chain clean.
-    // setMotionBlur() drives it from the camera world-position delta — a pure
-    // pan/rotation has no translation, so it leaves the frame sharp.
-    this.motionBlur = new RadialBlurEffect();
-    this.composer.addPass(new EffectPass(camera, this.motionBlur));
+    // Motion blur lives entirely in the velocity-buffer pass above
+    // (VelocityDepthNormalPass -> MotionBlurEffect) — the three.js
+    // webgpu_postprocessing_motion_blur approach: each pixel blurs by its OWN
+    // screen-space motion, so only things actually moving smear. An earlier
+    // extra full-screen directional streak pass was removed because it blurred
+    // the WHOLE frame at once regardless of what was moving.
 
     const vignette = new VignetteEffect({ offset: 0.28, darkness: 0.42 });
     const aberration = new ChromaticAberrationEffect({
@@ -115,19 +108,6 @@ export class Postfx {
 
   render(dt: number): void {
     this.composer.render(dt);
-  }
-
-  /** Per render frame: feed the screen-space camera-translation direction
-   *  (dirX,dirY — a unit-ish vector pointing where the camera is travelling on
-   *  screen) plus the player's speed (m/s) + boost flag. The direction sets
-   *  WHICH WAY the frame smears; the speed→strength curve sets HOW FAR. When
-   *  the camera isn't translating (idle/takedown orbit, pure pan) the caller
-   *  passes a zero direction and there is no blur. The reach is the direction
-   *  scaled by the strength gain and a screen-fraction constant.
-   *  Presentation-only — reads render state, writes a uniform, never the sim. */
-  setMotionBlur(dirX: number, dirY: number, speed: number, boosting: boolean): void {
-    const reach = speedBlurStrength(speed, boosting) * MOTION_BLUR_REACH;
-    this.motionBlur.setVelocity(dirX * reach, dirY * reach);
   }
 
   setSize(w: number, h: number): void {
