@@ -347,10 +347,23 @@ export interface Actor {
   curSpeed: number;
   isPlayer: boolean;
   crashed: boolean;
-  /** Shunt mode: seconds of lost control left — the car is physics-owned
-   *  (no steering) until it recovers. A wall touch while destabilized is a
-   *  wreck; if the player caused it, that wreck is a TAKEDOWN. */
+  /** Shunt mode: seconds of lost control left — the car slides physics-owned
+   *  until it recovers, but control RAMPS BACK over the window (steering
+   *  authority climbs from ~0 to full as this counts down), Burnout's
+   *  recoverable out-of-control slide rather than a hard on/off. A wall touch while
+   *  destabilized is a wreck; if the player caused it, that wreck is a TAKEDOWN. */
   destabilized: number;
+  /** The value `destabilized` was last (re)set to — the length of the current
+   *  shunt window. Keys the control-authority ramp (1 − destabilized/window
+   *  = how far recovery has come) so authority returns smoothly regardless of
+   *  whether the slide was a 1.2 s nudge or a 2.2 s slam. */
+  destabilizeWindow: number;
+  /** How close to wrecked, 0..1 (Road Rage style): a continuous fragility a
+   *  shunt RAISES and recovery bleeds off. A further hard contact (or a wall)
+   *  while this is high tips a sliding car into a WRECK — so stacked shunts
+   *  wreck while a single one recovers. Modest by design (see SHUNT_FRAGILITY_*
+   *  constants); never set on the rammer, so winning a shunt can't self-wreck. */
+  howCloseToWrecked: number;
   destabilizedByPlayer: boolean;
   /** Body id of the car whose ram caused the current destabilization (0 =
    *  none). Stops the same contact pair from echoing: collide events fire on

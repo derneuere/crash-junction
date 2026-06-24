@@ -154,6 +154,38 @@ const FIXTURES = [
     `,
   },
   {
+    file: 'corner-pileup-planted.json',
+    note: 'fixture: a corner pileup the player wins as a shunt — planted contact keeps everyone on the track (re-recorded after the shunt rework)',
+    // mirror the original hand-built tape: a boost tap, throttle on, then two
+    // right-steer pulses leaning into the rival on the corner. Succeed once
+    // the player has destabilized a rival (rivalShunts) and 2.5 s later the
+    // player is still upright and on the track — the planted-contact rule must
+    // keep the win from launching anyone over the barrier (maxAltitude/Up/
+    // finalOffTrack are held in the verify block on the replayed tape).
+    keys: [
+      { t: 0.97, type: 'keydown', code: 'Space' },
+      { t: 1.1, type: 'keyup', code: 'Space' },
+      { t: 1.28, type: 'keydown', code: 'ArrowUp' },
+      { t: 2.18, type: 'keydown', code: 'ArrowRight' },
+      { t: 2.38, type: 'keyup', code: 'ArrowRight' },
+      { t: 3.87, type: 'keydown', code: 'ArrowRight' },
+      { t: 3.98, type: 'keyup', code: 'ArrowUp' },
+      { t: 4.08, type: 'keyup', code: 'ArrowRight' },
+      { t: 4.55, type: 'keydown', code: 'ArrowRight' },
+      { t: 5.02, type: 'keyup', code: 'ArrowRight' },
+    ],
+    watch: `
+      const shunted = g.mode.director.racers.some((r) => r.a.destabilized > 0 && r.a.destabilizedByPlayer && !r.a.isPlayer);
+      if (shunted) W.shuntAt = W.shuntAt ?? t;
+      if (W.playerCrashed) return { done: true, ok: false, why: 'player wrecked' };
+      if (W.shuntAt !== undefined && t - W.shuntAt >= 2.5) return { done: true, ok: true };
+      if (t > 9) return { done: true, ok: false, why: 'no rival shunt won' };
+    `,
+    // maxAltitude/maxUpwardSpeed/finalOffTrack assert the planted-contact
+    // envelope on PLAYBACK; hold them here before the tape is accepted.
+    verify: { maxAltitude: 2, maxUpwardSpeed: 3, finalOffTrack: 5 },
+  },
+  {
     file: 'gantry-grid-uturn.json',
     level: { button: '^GANTRY POINT$', id: 'gantry' },
     note: 'fixture: gantry five-deep grid launch — every slot pulls away clean (re-recorded 2026-06-12 on the flow-pass + elevation geometry)',

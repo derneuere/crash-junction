@@ -131,6 +131,75 @@ export const TBONE_MIN_CLOSING = 18; // m/s of closing along the contact line
 // outside it and stay shunts/scrapes, exactly as the fixtures require.
 export const TBONE_MAX_ALIGN = 0.7;
 
+// ---- car-on-car shunt (Game.ts onCollide; Burnout-style ram impulse) ----
+// The ram's kick is no longer a flat velocity blend — it's a contact-normal
+// impulse fired through body.applyImpulse(J, r), so it couples linear AND
+// angular: a square rear-end punts the victim straight, a flank/off-centre hit
+// puts a torque through the tail and the car SPINS OUT. The launch direction is
+// purely the contact normal (no heuristic rammer→victim blend); collision.ts's
+// shoveOther/shoveSelf become the impulse-magnitude scalar (in m/s of intended
+// closing-speed transfer), fed into the formula below rather than added raw.
+//
+// SHUNT_KICK_GAIN — how much of the (scaled) shove scalar becomes impulse, as a
+// multiple of the victim's momentum-equivalent (J = gain · shove · m_victim,
+// then mass-ratio-trimmed). 1.0 ≈ "shove scalar is the Δv a same-mass victim
+// gets head-on"; the mass-ratio term then launches a light car harder and a bus
+// barely at all.
+export const SHUNT_KICK_GAIN = 1.0;
+// SHUNT_MASS_RATIO_CLAMP — the lighter-victim-launches-more term is
+// m_rammer/(m_rammer+m_victim) (a momentum split), clamped to this ceiling so a
+// 15 t tanker shunting a 1.45 t sedan can't fling it at ~10× the closing speed.
+export const SHUNT_MASS_RATIO_CLAMP = 1.8;
+// SHUNT_YAW_MAX — ceiling on the imparted spin (|angularVelocity.y|, rad/s)
+// after the impulse so an off-centre boost-ram spins the victim out without
+// turning it into a helicopter. angularDamping (0.3) bleeds it off naturally.
+export const SHUNT_YAW_MAX = 6;
+// SHUNT_KICK_SPEED_GATE — closing speed (m/s along the normal) below which the
+// kick fades toward zero, like Burnout's speed-gated shunt: a slow
+// love-tap barely nudges, a boost-ram launches. Linear ramp from 0 at no
+// closing to full at this speed and above.
+export const SHUNT_KICK_SPEED_GATE = 10;
+// SHUNT_BOUNCE_BOOST — Burnout's "bounce-boost": when the player/aggressor WINS
+// a shunt they keep barging through instead of bleeding speed off the (now much
+// less bouncy) contact. A small forward impulse along the rammer's heading,
+// scaled by the same shove scalar, so repeats power through rather than stall.
+export const SHUNT_BOUNCE_BOOST = 0.35;
+// SHUNT_GOOD_IMPACT_VAR — seeded ± variation on the kick magnitude (Burnout's
+// "good impact" wobble) so back-to-back shunts never feel identical.
+// Drawn from the sim RNG (deterministic; fixtures re-record).
+export const SHUNT_GOOD_IMPACT_VAR = 0.12;
+
+// ---- recoverable destabilize gradient (Phase 4) ----
+// Burnout doesn't snap a car out of shunt mode; control comes back gradually
+// and the car carries a continuous "how close to wrecked" fragility (Road
+// Rage style), so a car can RECOVER, or a second contact while it's already
+// sliding can tip it into a WRECK. Modelled here as a 0..1 `howCloseToWrecked`
+// accumulator on the Actor.
+//
+// SHUNT_FRAGILITY_GAIN — how much one shunt raises `howCloseToWrecked`, scaled
+// by closing impact over the gate speed (so a tap barely registers, a boost-ram
+// loads it up). Kept modest: a single clean shunt lands well under WRECK so the
+// victim mostly recovers — the accumulator only matters when contacts STACK.
+export const SHUNT_FRAGILITY_GAIN = 0.4;
+// SHUNT_FRAGILITY_DECAY — per-second bleed-off of `howCloseToWrecked` while the
+// car is recovering (in shunt mode but not taking fresh hits). Tuned so a lone
+// shunt's load (GAIN ≈ 0.4) is fully shed in ~0.9 s — well inside even the
+// longest 2.2 s slide, so recovery is the default — while still leaving a brief
+// (~0.5 s) window where a second hard hit STACKS over SHUNT_WRECK_THRESHOLD and
+// tips the car over. Tipping is the exception, not the rule.
+export const SHUNT_FRAGILITY_DECAY = 0.45;
+// SHUNT_WRECK_THRESHOLD — `howCloseToWrecked` at or above which a FURTHER hard
+// contact while already destabilized tips the car over into a wreck instead of
+// just re-sliding it. A first shunt loads less than this (see GAIN), so it takes
+// a second hard hit landing before recovery to cross it — "shunted, then
+// shunted again before you caught it" is the wreck, a single shunt is not.
+export const SHUNT_WRECK_THRESHOLD = 0.55;
+// SHUNT_FRAGILE_WALL_RELIEF — how much a full `howCloseToWrecked` lowers the
+// wall-wreck closing-speed bar for an already-destabilized car (collision.ts
+// wall path). Smoothly extends the existing wall-while-sliding wreck: the more
+// loaded up the slide is, the gentler the barrier touch that finishes it.
+export const SHUNT_FRAGILE_WALL_RELIEF = 1.5; // m/s off the closing bar at load 1
+
 // ---- airborne / jump attitude (BP AttribSys medians → CJ per-frame model) ----
 // All derived from steward's sweep of 48 retail VEH_*_AT.BIN attribute vaults.
 // BP runs a full rigid-body solver; CJ writes the body quaternion directly in
