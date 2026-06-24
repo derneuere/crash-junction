@@ -1,12 +1,25 @@
 import * as CANNON from 'cannon-es';
 import {
+  AIR_DAMP,
+  AIR_MIN_ROLL_TO_CORRECT,
+  AIR_PITCH_FOLLOW_RATE,
+  AIR_ROLL_CORRECTION,
+  AIR_STEER_TORQUE,
   BOOST_MAX_SEGMENTS,
   BOOST_SEGMENT_SECS,
   BOOST_START_SEGMENTS,
   BURNOUT_SPEED,
   CRUISE_SPEED,
   FIXED_DT,
+  LAND_SETTLE_SECS,
+  LAND_STEER_SOFTEN_SECS,
+  LAND_VY_ABSORB,
   LAUNCH_SPEED,
+  MAX_WHEELIE_ANGLE,
+  TAKEOFF_PITCH_DAMP,
+  TAKEOFF_ROLL_DAMP,
+  TAKEOFF_ROLL_LIMIT,
+  TAKEOFF_YAW_DAMP,
 } from './constants';
 import type { Actor } from './types';
 import type { HeightSampler } from './suspension';
@@ -16,6 +29,13 @@ const X_AXIS = new CANNON.Vec3(1, 0, 0);
 const Z_AXIS = new CANNON.Vec3(0, 0, 1);
 const _up = new CANNON.Vec3();
 const _qTilt = new CANNON.Quaternion();
+// Scratch target for the landing settle: the road-plane pose case 1 would snap
+// to, blended into over LAND_SETTLE_SECS instead of an instant re-pin.
+const _qLand = new CANNON.Quaternion();
+// Scratch target for the airborne attitude (case 3): yaw=heading, pitch chases
+// the trajectory, roll auto-levels. Written straight onto the body each air
+// frame, the same kinematic-orientation idiom the on-ground pin (case 1) uses.
+const _qAir = new CANNON.Quaternion();
 
 // Arcade driving grounded in Burnout Paradise's AttribSys handling data
 // (steward's attribsys-ranges sweep of 48 retail vehicle vaults):
@@ -172,6 +192,16 @@ export class PlayerControl {
   private brakeWasDown = false; // edge detector for mid-drift tighten taps
   private tighten = 0; // 1 right after a mid-drift tap, decays over ~0.6 s
   private nearMissFill = 0; // pending boost credit from near-misses (Game feeds it)
+  // ---- airborne / jump attitude bookkeeping (consumed by the air & landing
+  // model). Every field is re-seeded in reset() — a missed seed silently
+  // breaks replay reproducibility. ----
+  private hadAirLastFrame = false; // edge detector for takeoff/landing
+  private timeInAir = 0; // seconds since takeoff (0 on ground)
+  private takeoffHeading = 0; // launch attitude snapshot
+  private landingSettleT = 0; // s remaining of the road-plane settle blend
+  private steerSoftenT = 0; // s remaining of post-landing steer softening
+  private airPitch = 0; // eased airborne pitch — chases the trajectory tangent
+  private airRoll = 0; // eased airborne roll — player lean that auto-levels
 
   /** Max meter the bar can hold right now (segments × segment length). */
   get boostCap(): number {
@@ -228,6 +258,13 @@ export class PlayerControl {
     this.recentBrake = 0;
     this.brakeWasDown = false;
     this.tighten = 0;
+    this.hadAirLastFrame = false;
+    this.timeInAir = 0;
+    this.takeoffHeading = 0;
+    this.landingSettleT = 0;
+    this.steerSoftenT = 0;
+    this.airPitch = 0;
+    this.airRoll = 0;
   }
 
   update(player: Actor, input: ControlInput, heightAt: HeightSampler): void {
@@ -356,6 +393,32 @@ export class PlayerControl {
     // ---- yaw. The minus sign: with y up and headings mapped to
     // (sin h, 0, cos h), turning right (screen-right of travel) is -h ----
     const airborne = !player.susp.some((s) => s.grounded);
+    // ---- takeoff/landing edges + air timers (bookkeeping; consumed by the
+    // airborne attitude + landing-settle model). Timers tick on FIXED_DT. ----
+    const takeoffEdge = airborne && !this.hadAirLastFrame;
+    const landingEdge = !airborne && this.hadAirLastFrame;
+    this.hadAirLastFrame = airborne;
+    this.timeInAir = airborne ? this.timeInAir + dt : 0;
+    if (takeoffEdge) {
+      this.takeoffHeading = this.heading;
+      // one-shot per-axis spin damp (BP *DampingOnTakeOff): bleed the rotation
+      // the ramp lip imparted so the car leaves COMPOSED — roll and yaw are
+      // near-killed, a little pitch kick is kept. The kinematic air attitude
+      // (case 3a) takes over from here, so seed its eased pitch from the launch
+      // trajectory and start roll flat (rubber-down intent).
+      b.angularVelocity.x *= TAKEOFF_PITCH_DAMP;
+      b.angularVelocity.y *= TAKEOFF_YAW_DAMP;
+      b.angularVelocity.z *= TAKEOFF_ROLL_DAMP;
+      const horiz = Math.hypot(b.velocity.x, b.velocity.z);
+      this.airPitch = clamp(Math.atan2(b.velocity.y, Math.max(2, horiz)), -MAX_WHEELIE_ANGLE, MAX_WHEELIE_ANGLE);
+      this.airRoll = 0;
+    }
+    if (landingEdge) {
+      this.landingSettleT = LAND_SETTLE_SECS;
+      this.steerSoftenT = LAND_STEER_SOFTEN_SECS;
+    }
+    this.landingSettleT = Math.max(0, this.landingSettleT - dt);
+    this.steerSoftenT = Math.max(0, this.steerSoftenT - dt);
     if (this.drifting) {
       // ---- slip-angle drift, the corner tool: your steering sets the
       // ANGLE of the slide — hold it deep, feather it shallow — and the
@@ -388,7 +451,14 @@ export class PlayerControl {
       // "weight" ----
       const lockT = clamp((this.speed - STEER_FULL_BELOW) / (STEER_MIN_AT - STEER_FULL_BELOW), 0, 1);
       const lock = STEER_LOCK_LOW + (STEER_LOCK_HIGH - STEER_LOCK_LOW) * lockT;
-      let yawTarget = -(this.speed * Math.tan(lock * this.steer)) / WHEELBASE;
+      // Briefly soften the steer fed to the yaw model right after a hard
+      // landing so the player can't snap-turn out of the squash. Only on the
+      // ground (in the air control is already faint); decays to 1.0 over
+      // LAND_STEER_SOFTEN_SECS, and is exactly 1.0 once the timer elapses, so
+      // it is a no-op in steady state.
+      const steerSoften =
+        !airborne && this.steerSoftenT > 0 ? 0.5 + 0.5 * (1 - this.steerSoftenT / LAND_STEER_SOFTEN_SECS) : 1;
+      let yawTarget = -(this.speed * Math.tan(lock * this.steer * steerSoften)) / WHEELBASE;
       if (airborne) yawTarget *= 0.3; // faint air control, Burnout style
       this.yawVel += (yawTarget - this.yawVel) * Math.min(1, dt / YAW_RESPONSE);
       this.heading = wrapAngle(this.heading + this.yawVel * dt);
@@ -440,13 +510,16 @@ export class PlayerControl {
       heightAt(b.position.x + fx, b.position.z + fz) - baseF -
         (heightAt(b.position.x - fx, b.position.z - fz) - baseA),
     );
-    if (!airborne && slope < 0.02) {
+    if (!airborne && this.landingSettleT <= 0 && slope < 0.02) {
+      // CASE 1 — steady-state on-ground pin (instant). This is the END state
+      // the landing settle (case 2) blends toward; the `landingSettleT <= 0`
+      // guard routes a fresh landing to case 2 first. Preserved verbatim: on
+      // flat ground both base differentials are exactly 0, so this is the
+      // bit-identical no-op the determinism pins require.
       b.angularVelocity.set(0, 0, 0);
       b.quaternion.setFromAxisAngle(UP_AXIS, this.heading + Math.PI); // hull forward is -z
       // pin to the sampled local ROAD plane, not world-flat: pitch from the
-      // fore/aft base differential, roll from the lateral one. On flat
-      // ground both differentials are exactly 0 and this branch is the
-      // bit-identical no-op the determinism pins require.
+      // fore/aft base differential, roll from the lateral one.
       const cxs = Math.cos(this.heading) * 1.6;
       const czs = Math.sin(this.heading) * 1.6;
       const baseR = heightAt.base(b.position.x - cxs, b.position.z + czs); // car's right
@@ -457,8 +530,78 @@ export class PlayerControl {
         _qTilt.setFromAxisAngle(Z_AXIS, Math.atan2(baseR - baseL, 3.2)); // bank with the camber
         b.quaternion.mult(_qTilt, b.quaternion);
       }
+    } else if (!airborne && this.landingSettleT > 0) {
+      // CASE 2 — landing settle: just touched down. Instead of snapping to the
+      // road plane, BLEND the current (airborne) attitude toward the exact pose
+      // case 1 computes, over LAND_SETTLE_SECS. Build that pose into _qLand the
+      // same way case 1 builds the body quaternion, then slerp into it. On flat
+      // ground the differentials are 0 so _qLand is the pure-yaw quaternion and
+      // the slerp endpoint equals the old no-op — once the timer elapses the
+      // next frame routes to case 1 and the determinism pin holds.
+      _qLand.setFromAxisAngle(UP_AXIS, this.heading + Math.PI);
+      const cxs = Math.cos(this.heading) * 1.6;
+      const czs = Math.sin(this.heading) * 1.6;
+      const baseR = heightAt.base(b.position.x - cxs, b.position.z + czs); // car's right
+      const baseL = heightAt.base(b.position.x + cxs, b.position.z - czs);
+      if (baseF !== baseA || baseR !== baseL) {
+        _qTilt.setFromAxisAngle(X_AXIS, Math.atan2(baseF - baseA, 3.2)); // nose up the grade
+        _qLand.mult(_qTilt, _qLand);
+        _qTilt.setFromAxisAngle(Z_AXIS, Math.atan2(baseR - baseL, 3.2)); // bank with the camber
+        _qLand.mult(_qTilt, _qLand);
+      }
+      // blend factor walks 0→1 as the settle window elapses (the decremented
+      // timer means t advances every frame; t = 1 when landingSettleT hits 0)
+      const t = clamp(1 - this.landingSettleT / LAND_SETTLE_SECS, 0, 1);
+      b.quaternion.slerp(_qLand, t, b.quaternion);
+      // bleed the airborne spin out over the same window rather than zeroing it
+      // instantly — the chassis settles, it doesn't snap
+      const decay = 1 - Math.min(1, t);
+      b.angularVelocity.x *= decay;
+      b.angularVelocity.y *= decay;
+      b.angularVelocity.z *= decay;
+    } else if (airborne) {
+      // CASE 3a — genuinely airborne: BP-style attitude control. The body
+      // quaternion is driven DIRECTLY (the same kinematic idiom as the
+      // on-ground pin) so the nose chases the trajectory and roll auto-levels —
+      // the car leaves a ramp composed and lands on its wheels. No linear
+      // velocity is touched here: gravity and the suspension launch cap own the
+      // arc; this only sets ORIENTATION, so it can never add upward velocity.
+      const horiz = Math.hypot(b.velocity.x, b.velocity.z);
+      // pitch eases toward the trajectory tangent, clamped to a believable
+      // wheelie angle so a steep launch (or dive) never points past it.
+      const pitchTarget = clamp(
+        Math.atan2(b.velocity.y, Math.max(2, horiz)),
+        -MAX_WHEELIE_ANGLE,
+        MAX_WHEELIE_ANGLE,
+      );
+      this.airPitch += (pitchTarget - this.airPitch) * Math.min(1, AIR_PITCH_FOLLOW_RATE * dt);
+      // roll: the player leans the car as a RATE (a nudge, not a teleport), and
+      // past a small dead-band it eases back toward level so a released stick
+      // lands the car rubber-down. Clamped to the takeoff roll limit.
+      this.airRoll += this.steer * AIR_STEER_TORQUE * dt;
+      if (Math.abs(this.airRoll) > AIR_MIN_ROLL_TO_CORRECT) {
+        this.airRoll -= this.airRoll * Math.min(1, AIR_ROLL_CORRECTION * dt);
+      }
+      this.airRoll = clamp(this.airRoll, -TAKEOFF_ROLL_LIMIT, TAKEOFF_ROLL_LIMIT);
+      // build yaw→pitch→roll exactly the way case 1 builds the on-ground pose
+      _qAir.setFromAxisAngle(UP_AXIS, this.heading + Math.PI);
+      _qTilt.setFromAxisAngle(X_AXIS, this.airPitch);
+      _qAir.mult(_qTilt, _qAir);
+      _qTilt.setFromAxisAngle(Z_AXIS, this.airRoll);
+      _qAir.mult(_qTilt, _qAir);
+      b.quaternion.copy(_qAir);
+      // bleed residual ramp spin so the solver doesn't fight the kinematic pose
+      // (InAirDamping intent). The per-frame set above is authoritative; this
+      // just decays the leftover angular velocity toward zero.
+      const ad = Math.max(0, 1 - AIR_DAMP * dt);
+      b.angularVelocity.x *= ad;
+      b.angularVelocity.y *= ad;
+      b.angularVelocity.z *= ad;
     } else {
-      // ramps and air: keep the suspension/ballistic pitch, only pin yaw
+      // CASE 3b — grounded on a steep feature (a ramp surface) with no active
+      // settle: keep the suspension/ballistic pitch, only pin yaw. Unchanged
+      // from the pre-airborne-model behaviour — driving up a ramp must keep its
+      // surface-following pitch, not snap to the (near-flat) trajectory.
       b.angularVelocity.y = 0;
       b.angularVelocity.x *= 0.99;
       b.angularVelocity.z *= 0.99;
