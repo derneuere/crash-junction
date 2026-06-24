@@ -258,3 +258,17 @@ export const LAND_VY_ABSORB = 0.1;
 // Briefly soften steering after a hard landing so the player can't snap-turn
 // out of the squash. Invented; BP softens steering post-landing.
 export const LAND_STEER_SOFTEN_SECS = 0.25; // s
+
+// ---- wheel render visuals (presentation only; the fixed-step sim never reads
+// these). BP advances each wheel by its OWN angular velocity (Wheel::UpdateRotation),
+// so the rendered roll diverges from ground speed under traction loss: rear-drive
+// launch wheelspin and brake lockup. ----
+// Forward speed by which launch wheelspin has faded back to plain rolling.
+export const WHEELSPIN_FADE_SPEED = 16; // m/s
+// Extra rear-ω multiplier at a standstill launch: ω = roll·(1 + this·launch).
+export const WHEELSPIN_OVERSPIN = 2.6;
+// Visual spin floor (rad/s) so the rears still scream from a DEAD stop, where
+// ground speed — and thus the multiplicative overspin term — is ~0.
+export const WHEELSPIN_FLOOR = 40; // rad/s
+// Roll multiplier under braking — wheels near-lock (not a hard 0; a touch creeps).
+export const BRAKE_LOCKUP_FACTOR = 0.06;
