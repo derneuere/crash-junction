@@ -201,6 +201,16 @@ const ATTACK_LAT = 5.5;
 const SHUNT_LAT = 2.0; // inside this beam width the victim is "dead ahead"
 const SHUNT_TIME = 1.7; // s an attack run is pressed before giving up
 const SLAM_TIME = 1.3;
+// Burnout-style slam lineup. A committed slam isn't a dive at the door from
+// behind — the rival pulls ALONGSIDE the victim on the side it's already on
+// (draws even), then once it's beside them (the commit gate) cuts THROUGH
+// their line into the door. A +offset aim point off the victim's RIGHT vector
+// lines up alongside; a −offset cuts through; the commit gate is an
+// along/lateral-separation window.
+const SLAM_ALONGSIDE = 2.0; // m abeam of the victim to draw even before barging
+const SLAM_CUT = 1.4; // m past the victim's centre the cut aims (through the door)
+const SLAM_ALONG_BAND = 3.0; // |alongSep| under this (m): level enough to commit
+const SLAM_BESIDE = 3.2; // |latSep| under this (m): alongside, not still closing in
 const ATTACK_COOLDOWN = 4; // base s between runs, scaled by aggression
 const LANE_RATE = 3.5; // m/s of lateral line adjustment
 const WANDER = 2.2; // m of line wander around the preferred lane
@@ -221,6 +231,7 @@ interface RacerState {
   phase: number; // per-rival wander phase, fixed at spawn
   attackT: number; // s left pressing the current attack (0 = not attacking)
   attackKind: 'shunt' | 'slam';
+  slamCut: boolean; // slam has lined up and is now cutting through (barge speed)
   victim: number; // racers index, or PLAYER, valid while attackT > 0
   cooldown: number; // s until the next attack roll
   decideT: number; // s until the next decision tick (staggered per rival)
@@ -306,7 +317,7 @@ export class RaceDirector {
       this.racers.push({
         a: actor, heading, speed: 0, target, lap: 1, respawnT: 0, skill,
         aggression, lane, laneNow: lane, phase: i * 2.4,
-        attackT: 0, attackKind: 'shunt', victim: PLAYER, cooldown: 2.5, decideT: 0.3 + i * 0.17,
+        attackT: 0, attackKind: 'shunt', slamCut: false, victim: PLAYER, cooldown: 2.5, decideT: 0.3 + i * 0.17,
         rubber: 1, heat: 1, offT: 0, progress: 0, loose: false,
       });
     });
@@ -457,10 +468,18 @@ export class RaceDirector {
     let aimX: number;
     let aimZ: number;
     if (victim) {
-      // shunts chase a lead point on the bumper; slams steer through the door
-      const lead = r.attackKind === 'shunt' ? 0.28 : 0.1;
-      aimX = victim.body.position.x + victim.body.velocity.x * lead;
-      aimZ = victim.body.position.z + victim.body.velocity.z * lead;
+      // shunts chase a lead point on the bumper; slams line up alongside the
+      // victim then cut through the door (Burnout-style, see slamTarget)
+      if (r.attackKind === 'slam') {
+        const s = this.slamTarget(r, victim);
+        aimX = s.x;
+        aimZ = s.z;
+        r.slamCut = s.cut;
+      } else {
+        aimX = victim.body.position.x + victim.body.velocity.x * 0.28;
+        aimZ = victim.body.position.z + victim.body.velocity.z * 0.28;
+        r.slamCut = false;
+      }
     } else {
       // steer at a look-ahead section, BP AI-PID style (P only — arcade),
       // displaced sideways onto this rival's own line
@@ -498,9 +517,12 @@ export class RaceDirector {
       holdGap(this.player, Math.hypot(pv.x, pv.z));
     }
     if (victim) {
-      // the surge: shunts run the victim down, slams keep station on the door
+      // the surge: shunts run the victim down; a slam keeps station while it
+      // lines up alongside, then leans on the throttle to barge through once
+      // it's beside them (slamCut)
       const vv = victim.body.velocity;
-      target = Math.max(target, Math.hypot(vv.x, vv.z) + (r.attackKind === 'shunt' ? 8 : 1.5));
+      const surge = r.attackKind === 'shunt' ? 8 : r.slamCut ? 3.5 : 1.5;
+      target = Math.max(target, Math.hypot(vv.x, vv.z) + surge);
     }
     target = Math.min(target, AI_TOP);
     r.speed += clamp(target - r.speed, -AI_BRAKE * dt, AI_ACC * Math.max(1, r.rubber) * dt);
@@ -602,6 +624,34 @@ export class RaceDirector {
     // a downed or sliding victim is a finished job, not a target
     if (!a || a.crashed || a.destabilized > 0) return null;
     return a;
+  }
+
+  /** Burnout-style slam lineup. Reads the victim's travel axis and its
+   *  RIGHT vector, finds which side the rival sits, and returns a world aim
+   *  point: while still closing it aims ALONGSIDE on the rival's own side
+   *  (+offset) so the car draws even; once it's level and close abeam — the
+   *  commit gate (|alongSep| < band, |latSep| < beside) — it aims THROUGH the
+   *  victim to the far side (−offset) so the steering drives across into the
+   *  door. `cut` reports the barge phase so the surge can lean in. */
+  private slamTarget(r: RacerState, victim: Actor): { x: number; z: number; cut: boolean } {
+    const vp = victim.body.position;
+    const vv = victim.body.velocity;
+    const vsp = Math.hypot(vv.x, vv.z);
+    // victim travel axis (heading-forward if it's crawling) and a perpendicular
+    // — the side sign derived from latSep is self-consistent with this choice
+    const fx = vsp > 2 ? vv.x / vsp : Math.sin(r.heading);
+    const fz = vsp > 2 ? vv.z / vsp : Math.cos(r.heading);
+    const rx = fz;
+    const rz = -fx;
+    const dx = r.a.body.position.x - vp.x;
+    const dz = r.a.body.position.z - vp.z;
+    const alongSep = dx * fx + dz * fz; // + = rival ahead of the victim
+    const latSep = dx * rx + dz * rz; // signed side the rival sits on
+    const side = latSep >= 0 ? 1 : -1;
+    const cut = Math.abs(alongSep) < SLAM_ALONG_BAND && Math.abs(latSep) < SLAM_BESIDE;
+    const off = cut ? -side * SLAM_CUT : side * SLAM_ALONGSIDE;
+    // a touch of the victim's own motion so we creep up to the door, not behind
+    return { x: vp.x + rx * off + vv.x * 0.06, z: vp.z + rz * off + vv.z * 0.06, cut };
   }
 
   /** The attack state machine: keep pressing a live run (with abort rules

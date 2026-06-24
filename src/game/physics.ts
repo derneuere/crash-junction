@@ -35,7 +35,15 @@ export function createPhysics(): PhysicsContext {
   const matGround = new CANNON.Material('ground');
   const matCar = new CANNON.Material('car');
   world.addContactMaterial(new CANNON.ContactMaterial(matGround, matCar, { friction: 0.65, restitution: 0.03 }));
-  world.addContactMaterial(new CANNON.ContactMaterial(matCar, matCar, { friction: 0.25, restitution: 0.45 }));
+  // Car-on-car barely bounces. The OLD 0.45 had the solver pop the pair apart
+  // on its own, on TOP of the manual shove — a love-tap and a boost-ram both
+  // ended with the cars springing off each other, the opposite of Burnout's
+  // shunt. Burnout speed-gates restitution to ~0 below a threshold so
+  // low-speed shunts STICK and the rammer powers through; we approximate that
+  // with a single low coeff and let the contact-normal kick (Game.applyShuntKick,
+  // itself speed-gated) own the launch. Low enough that the cars don't visibly
+  // separate on their own; the kick decides how far the victim goes.
+  world.addContactMaterial(new CANNON.ContactMaterial(matCar, matCar, { friction: 0.25, restitution: 0.12 }));
 
   const groundBody = new CANNON.Body({ mass: 0, material: matGround });
   groundBody.addShape(new CANNON.Plane());

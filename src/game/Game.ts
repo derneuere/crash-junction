@@ -12,6 +12,14 @@ import {
   LIVE_CAR_CONTACT_VY,
   LIVE_VY_GAIN_PER_STEP,
   RAMP_LAUNCH_VY_MAX,
+  SHUNT_BOUNCE_BOOST,
+  SHUNT_FRAGILITY_DECAY,
+  SHUNT_FRAGILITY_GAIN,
+  SHUNT_GOOD_IMPACT_VAR,
+  SHUNT_KICK_GAIN,
+  SHUNT_KICK_SPEED_GATE,
+  SHUNT_MASS_RATIO_CLAMP,
+  SHUNT_YAW_MAX,
   SLOWMO,
   SLOWMO_HOLD,
   SUSP_MAX_COMP,
@@ -76,6 +84,8 @@ const _hood = new THREE.Vector3();
 const _pp = new THREE.Vector3();
 const UP = new THREE.Vector3(0, 1, 0);
 const _atF = new CANNON.Vec3();
+const _kickJ = new CANNON.Vec3(); // shunt impulse vector (J = j·n), reused per contact
+const _kickR = new CANNON.Vec3(); // shunt contact point relative to victim COM
 const _ctrlInput: ControlInput = { steer: 0, throttle: false, boost: false, brake: false }; // reused per fixed step
 const _contactIds = new Set<number>(); // bodies with solver contacts this step
 const NO_CMDS: Command[] = []; // shared empty — never mutated
@@ -1469,28 +1479,14 @@ export class Game {
         // sliding is still the player's takedown when it finds the wall
         if (self.isPlayer || self.destabilizedByPlayer) oa.destabilizedByPlayer = true;
         oa.destabilized = Math.max(oa.destabilized, out.destabilizeOther);
+        oa.destabilizeWindow = Math.max(oa.destabilizeWindow, out.destabilizeOther);
+        this.loadFragility(oa, impact); // raise the how-close-to-wrecked fragility
         oa.destabilizedBy = self.body.id;
         if (out.shoveOther > 0) {
-          // the ram's kick — strictly horizontal, nobody gets lofted off a
-          // bumper. Direction blends the rammer's line with rammer→victim,
-          // so a flank hit sends the victim sideways into the wall instead
-          // of just punting it down the road (#1: more lateral)
-          const v = self.body.velocity;
-          const sp = Math.hypot(v.x, v.z) || 1;
-          const ob = oa.body;
-          const ox = ob.position.x - self.body.position.x;
-          const oz = ob.position.z - self.body.position.z;
-          const ol = Math.hypot(ox, oz) || 1;
-          let dx = v.x / sp + (ox / ol) * 0.8;
-          let dz = v.z / sp + (oz / ol) * 0.8;
-          const dl = Math.hypot(dx, dz) || 1;
-          dx /= dl;
-          dz /= dl;
-          ob.velocity.x += dx * out.shoveOther;
-          ob.velocity.z += dz * out.shoveOther;
-          if (ob.velocity.y > 1.2) ob.velocity.y = 1.2;
-          ob.wakeUp();
-          if (v.y > 1.2) v.y = 1.2; // the rammer stays planted too
+          // the ram's kick — a contact-normal impulse through the victim's
+          // contact point, so it spins them out on a flank hit (see
+          // applyShuntKick). self is the aggressor and powers through.
+          this.applyShuntKick(oa, e, out.shoveOther, impact, self, true);
         }
       }
       if (out.destabilizeSelf > 0 && !self.crashed) {
@@ -1500,26 +1496,14 @@ export class Game {
         }
         if (oa?.isPlayer) self.destabilizedByPlayer = true;
         self.destabilized = Math.max(self.destabilized, out.destabilizeSelf);
+        self.destabilizeWindow = Math.max(self.destabilizeWindow, out.destabilizeSelf);
+        this.loadFragility(self, impact); // raise the how-close-to-wrecked fragility
         if (oa) self.destabilizedBy = oa.body.id;
         if (out.shoveSelf > 0 && oa) {
           // the slam's kick, shoveOther mirrored: oa is the shover, self the
-          // victim — blended toward shover→victim so it reads as a sideways
-          // barge, still strictly horizontal
-          const v = oa.body.velocity;
-          const sp = Math.hypot(v.x, v.z) || 1;
-          const sb = self.body;
-          const ox = sb.position.x - oa.body.position.x;
-          const oz = sb.position.z - oa.body.position.z;
-          const ol = Math.hypot(ox, oz) || 1;
-          let dx = v.x / sp + (ox / ol) * 0.8;
-          let dz = v.z / sp + (oz / ol) * 0.8;
-          const dl = Math.hypot(dx, dz) || 1;
-          dx /= dl;
-          dz /= dl;
-          sb.velocity.x += dx * out.shoveSelf;
-          sb.velocity.z += dz * out.shoveSelf;
-          if (sb.velocity.y > 1.2) sb.velocity.y = 1.2;
-          sb.wakeUp();
+          // victim. Same contact-normal impulse, so a flank slam spins the
+          // player out. oa is the aggressor here and powers through.
+          this.applyShuntKick(self, e, out.shoveSelf, impact, oa, true);
         }
       }
       if (out.wreckOther && oa) this.markCrashed(oa);
@@ -1617,6 +1601,93 @@ export class Game {
     }
   }
 
+  /** Raise the victim's how-close-to-wrecked fragility (Road Rage style) by a
+   *  shunt — scaled by closing impact over the kick gate, so a tap barely
+   *  registers and a boost-ram loads it up. Stays modest (SHUNT_FRAGILITY_GAIN):
+   *  a lone shunt lands under SHUNT_WRECK_THRESHOLD and the slide recovers;
+   *  it's a SECOND hard hit landing before recovery that tips into a wreck
+   *  (resolveRaceContact reads this back). Never called on the rammer. */
+  private loadFragility(victim: Actor, impact: number): void {
+    const load = SHUNT_FRAGILITY_GAIN * Math.min(1, impact / SHUNT_KICK_SPEED_GATE);
+    victim.howCloseToWrecked = Math.min(1, victim.howCloseToWrecked + load);
+  }
+
+  /** The ram's kick, Burnout's car-on-car shunt impulse in miniature. Instead
+   *  of the old flat velocity blend (linear-only, no spin, magnitude saturating
+   *  at ~12), this fires a contact-normal impulse through the victim's contact
+   *  point — so applyImpulse couples it into BOTH linear and angular: a square
+   *  rear-end punts the victim straight, an off-centre flank hit puts a torque
+   *  through the tail and it SPINS OUT (the angular impulse from the contact's
+   *  moment arm, the way a real broadside does).
+   *
+   *  `shove` is collision.ts's magnitude scalar (now a closing-speed transfer,
+   *  not a saturating add). `rammer`/`boostRammer` is the aggressor — when set,
+   *  it keeps its momentum (Burnout bounce-boost) with a small forward impulse
+   *  along its heading so it barges through the reduced-restitution contact.
+   *  Determinism: the "good impact" variation draws from the seeded sim RNG. */
+  private applyShuntKick(victim: Actor, e: CollideEvent, shove: number, impact: number, rammer: Actor | null, boostRammer: boolean): void {
+    const c = e.contact;
+    const vb = victim.body;
+    // The engine normal `ni` points from bi toward bj (cannon narrowphase:
+    // ni = xj − xi). Orient it to push the victim AWAY from the rammer:
+    // −ni if the victim is bi (away from bj), +ni if the victim is bj.
+    const victimIsBi = c.bi === vb;
+    const sign = victimIsBi ? -1 : 1;
+    let nx = c.ni.x * sign;
+    let ny = c.ni.y * sign;
+    let nz = c.ni.z * sign;
+    const nl = Math.hypot(nx, ny, nz) || 1;
+    nx /= nl;
+    ny /= nl;
+    nz /= nl;
+    // Speed gate (Burnout's speed-gated shunt): a slow love-tap barely
+    // nudges, a boost-ram launches. `impact` is the closing speed along the
+    // normal the rest of onCollide already judged on — reuse it so the gate
+    // agrees with the destabilize/wreck thresholds. Linear ramp to full at
+    // the gate speed.
+    const gate = Math.min(1, impact / SHUNT_KICK_SPEED_GATE);
+    // Lighter victim launches more — a momentum split m_r/(m_r+m_v), clamped so
+    // a tanker can't fling a sedan at 10× the closing speed. No rammer (debris
+    // or a chained blocker) ⇒ treat the masses as equal (ratio 1).
+    const mv = vb.mass;
+    const mr = rammer ? rammer.body.mass : mv;
+    const massRatio = Math.min(SHUNT_MASS_RATIO_CLAMP, (mr + mv) > 0 ? mr / (mr + mv) * 2 : 1);
+    // "good impact" ± variation so repeats never feel identical (seeded).
+    const variation = 1 + (simRand() * 2 - 1) * SHUNT_GOOD_IMPACT_VAR;
+    // J = j·n. j is the intended Δv (shove · gain · gate · massRatio · var)
+    // times the victim mass, since applyImpulse divides by mass to get Δv.
+    const j = shove * SHUNT_KICK_GAIN * gate * massRatio * variation * mv;
+    if (j <= 0) return;
+    _kickJ.set(nx * j, ny * j, nz * j);
+    // r = contact point relative to the victim's COM (ri if victim is bi).
+    const r = victimIsBi ? c.ri : c.rj;
+    _kickR.set(r.x, r.y, r.z);
+    vb.applyImpulse(_kickJ, _kickR);
+    // Re-clamp vertical — a shunt is a road-plane event, nobody gets lofted off
+    // a bumper (same ceiling the destabilized-slide rule uses).
+    if (vb.velocity.y > LIVE_CAR_CONTACT_VY) vb.velocity.y = LIVE_CAR_CONTACT_VY;
+    // The yaw is the whole point, but cap it so an off-centre boost-ram spins
+    // the victim out without becoming a helicopter; angularDamping bleeds it.
+    if (vb.angularVelocity.y > SHUNT_YAW_MAX) vb.angularVelocity.y = SHUNT_YAW_MAX;
+    else if (vb.angularVelocity.y < -SHUNT_YAW_MAX) vb.angularVelocity.y = -SHUNT_YAW_MAX;
+    vb.wakeUp();
+
+    // Bounce-boost: the winner powers through the now-tamer contact instead of
+    // bleeding speed off it. A small forward impulse along the rammer's heading
+    // (horizontal only), scaled by the same shove, so back-to-back rams barge
+    // through rather than stall. Keep the rammer planted too.
+    if (boostRammer && rammer) {
+      const rb = rammer.body;
+      const rv = rb.velocity;
+      const sp = Math.hypot(rv.x, rv.z) || 1;
+      const push = shove * SHUNT_BOUNCE_BOOST * gate * rb.mass;
+      _kickJ.set((rv.x / sp) * push, 0, (rv.z / sp) * push);
+      rb.applyImpulse(_kickJ, _atF.set(0, 0, 0)); // central — no spin on the rammer
+      if (rv.y > LIVE_CAR_CONTACT_VY) rv.y = LIVE_CAR_CONTACT_VY;
+      rb.wakeUp();
+    }
+  }
+
   /** The named signature theatre the victim wrecked inside, or null. Zones are
    *  circles in the race def with no colliders — the red/white wall stays the
    *  actual wrecking surface; the classifier turns a non-null name into a
@@ -1650,6 +1721,8 @@ export class Game {
     if (a.isPlayer) this.takedowns.rememberAggressor(this.byBody.get(a.destabilizedBy) ?? null);
     a.crashed = true;
     a.destabilized = 0; // a wreck is past losing control
+    a.destabilizeWindow = 0;
+    a.howCloseToWrecked = 0;
     a.destabilizedByPlayer = false;
     a.destabilizedBy = 0;
     a.body.collisionFilterMask = -1;
@@ -1802,13 +1875,33 @@ export class Game {
     }
 
     // shunt-mode timers: a destabilized car is physics-owned until it
-    // recovers — or wrecks on whatever it slides into
+    // recovers — or wrecks on whatever it slides into. Recovery is a RAMP,
+    // not a snap (Burnout-style: out of control, but you can drive out of it):
+    // steering authority
+    // climbs from ~0 back to full over the window, and the fragility loaded
+    // by the shunt (howCloseToWrecked) bleeds off the whole time.
     for (const a of this.actors) {
-      if (a.destabilized <= 0) continue;
+      if (a.destabilized <= 0) {
+        // recovered cars keep shedding fragility so a long-ago shunt doesn't
+        // linger as a hair-trigger; a fresh shunt reloads it (loadFragility).
+        if (a.howCloseToWrecked > 0) {
+          a.howCloseToWrecked = Math.max(0, a.howCloseToWrecked - SHUNT_FRAGILITY_DECAY * FIXED_DT);
+        }
+        continue;
+      }
       // a shunt slide skids, it doesn't fly — keep the car planted
       if (a.body.velocity.y > 1.5) a.body.velocity.y = 1.5;
+      // how far recovery has come: 0 at the instant of the shunt, → 1 as the
+      // window runs out. Keys the steering-authority ramp below.
+      const recovered = a.destabilizeWindow > 0 ? 1 - a.destabilized / a.destabilizeWindow : 1;
+      // fragility bleeds off the whole slide — a clean shunt's load is mostly
+      // gone by the time the wheel comes back, so single shunts recover (it's
+      // a fresh hit reloading it mid-slide that crosses SHUNT_WRECK_THRESHOLD).
+      a.howCloseToWrecked = Math.max(0, a.howCloseToWrecked - SHUNT_FRAGILITY_DECAY * FIXED_DT);
       // SLAMMED is degraded steering, not a dead wheel (#1): the slide is
-      // physics-owned but the player can lean on it a little
+      // physics-owned, but the driver gets the wheel back GRADUALLY — ~0
+      // authority at the instant of the slam, ramping to full (the old fixed
+      // ~20°/s of fight is now the ceiling reached only as recovery completes).
       if (a.isPlayer && !a.crashed) {
         const steer =
           (this.simKeys['ArrowRight'] || this.simKeys['KeyD'] ? 1 : 0) -
@@ -1817,7 +1910,8 @@ export class Game {
           const v = a.body.velocity;
           const sp = Math.hypot(v.x, v.z);
           if (sp > 2) {
-            const ang = Math.atan2(v.x, v.z) - steer * 0.35 * FIXED_DT; // ~20°/s of fight
+            const authority = 0.35 * recovered; // rad/s of fight, 0 → ~20°/s
+            const ang = Math.atan2(v.x, v.z) - steer * authority * FIXED_DT;
             v.x = Math.sin(ang) * sp;
             v.z = Math.cos(ang) * sp;
           }
@@ -1826,6 +1920,7 @@ export class Game {
       a.destabilized -= FIXED_DT;
       if (a.destabilized > 0) continue;
       a.destabilized = 0;
+      a.destabilizeWindow = 0;
       a.destabilizedByPlayer = false;
       a.destabilizedBy = 0;
       if (a.isPlayer && !a.crashed) {

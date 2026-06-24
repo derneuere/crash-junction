@@ -1,6 +1,11 @@
 import type * as THREE from 'three';
 import type { Actor, CollideEvent } from './types';
-import { TBONE_MIN_CLOSING, TBONE_MAX_ALIGN } from './constants';
+import {
+  TBONE_MIN_CLOSING,
+  TBONE_MAX_ALIGN,
+  SHUNT_WRECK_THRESHOLD,
+  SHUNT_FRAGILE_WALL_RELIEF,
+} from './constants';
 
 /** What a player impact amounts to, before any consequences are applied. */
 export interface ImpactJudgment {
@@ -226,13 +231,36 @@ export function resolveRaceContact(ctx: ContactContext): ContactOutcome {
           out.takedownCam = true;
           out.graceOther = true;
         } else if (playerAggressor) {
-          out.destabilizeOther = 2.2; // shunt mode — they fight the slide
-          out.shoveOther = Math.min(12, 5 + impact * 0.6); // the ram's kick (#1: stronger)
+          if (other.destabilized > 0 && other.howCloseToWrecked >= SHUNT_WRECK_THRESHOLD) {
+            // a SECOND hard shunt landing while they're already sliding and
+            // loaded up (howCloseToWrecked high) tips them over — no wall
+            // needed. Burnout's recoverable out-of-control slide: one shunt and they
+            // catch it, shunt them again before they do and they wreck. Pays
+            // out as a TAKEDOWN like the wall finish.
+            out.wreckOther = true;
+            out.takedown = true;
+            out.takedownCam = true;
+            out.graceOther = true;
+          } else {
+            out.destabilizeOther = 2.2; // shunt mode — they fight the slide
+            // the ram's kick — now the Δv (m/s) the impulse aims to transfer
+            // (Game.applyShuntKick scales it by closing-speed gate + mass ratio).
+            // No longer saturating at ~impact 12: a 40 m/s boost-ram transfers
+            // clearly more than a catch-up tap, the way Burnout's does.
+            out.shoveOther = Math.min(28, 4 + impact * 0.8);
+          }
         } else {
           // slammed: a sideways kick + a fragile beat — never a scripted
-          // wreck. Whether it becomes a crash is up to what you hit next.
-          out.destabilizeSelf = 1.5;
-          out.shoveSelf = Math.min(9, 4 + impact * 0.4);
+          // wreck on the FIRST slam. But a hard slam landing while we're
+          // already sliding and loaded up finishes us — the same recoverable
+          // gradient, now against the player (whether it's our takedown to
+          // give is up to the rival's credit, judged in Game).
+          if (self.destabilized > 0 && self.howCloseToWrecked >= SHUNT_WRECK_THRESHOLD && !graced) {
+            out.wreckSelf = true;
+          } else {
+            out.destabilizeSelf = 1.5;
+            out.shoveSelf = Math.min(22, 3 + impact * 0.6);
+          }
         }
       }
     } else if (isWall) {
@@ -240,8 +268,11 @@ export function resolveRaceContact(ctx: ContactContext): ContactOutcome {
       if (self.destabilized > 0) {
         // fragile, not doomed: the old any-angle 3.5 turned every wall kiss
         // during a slide into a wreck + respawn beat. It still takes a
-        // reasonably square hit — just much less than a clean one.
-        if (closing > 4.5 && steep > 0.3 && !graced) out.wreckSelf = true;
+        // reasonably square hit — just much less than a clean one. A slide
+        // that's loaded up (howCloseToWrecked) wrecks on a gentler touch —
+        // the recoverable gradient smoothly extended onto the barrier.
+        const bar = 4.5 - SHUNT_FRAGILE_WALL_RELIEF * self.howCloseToWrecked;
+        if (closing > bar && steep > 0.3 && !graced) out.wreckSelf = true;
         else out.wallGlance = true;
       } else if (closing > 7 && steep > 0.45 && !graced) {
         out.wreckSelf = true; // hard and frontal
@@ -250,8 +281,10 @@ export function resolveRaceContact(ctx: ContactContext): ContactOutcome {
       }
     }
   } else if (!self.isPlayer && self.kind === 'vehicle' && !self.crashed && isWall) {
-    // a destabilized rival meeting the barrier — the payoff
-    if (self.destabilized > 0 && wallApproach(self, ctx.wallDir, impact).closing > 3.5) {
+    // a destabilized rival meeting the barrier — the payoff. A loaded-up
+    // slide (howCloseToWrecked) wrecks on a gentler touch, same gradient.
+    const bar = 3.5 - SHUNT_FRAGILE_WALL_RELIEF * self.howCloseToWrecked;
+    if (self.destabilized > 0 && wallApproach(self, ctx.wallDir, impact).closing > bar) {
       out.wreckSelf = true;
       out.takedown = self.destabilizedByPlayer;
       out.takedownCam = self.destabilizedByPlayer;
@@ -269,7 +302,16 @@ export function resolveRaceContact(ctx: ContactContext): ContactOutcome {
     impact > 3
   ) {
     out.destabilizeOther = 1.4;
-    out.shoveOther = Math.min(8, 3 + impact * 0.4);
+    out.shoveOther = Math.min(18, 2 + impact * 0.6);
+    // a sliding rival that's loaded up (howCloseToWrecked) and piles into
+    // another car wrecks itself too — the recoverable gradient, off the wall:
+    // shunted, never caught it, then hit traffic. Player credit still rides
+    // destabilizedByPlayer (Game pays the chained wreck out as a TAKEDOWN).
+    if (self.howCloseToWrecked >= SHUNT_WRECK_THRESHOLD) {
+      out.wreckSelf = true;
+      out.takedown = self.destabilizedByPlayer;
+      out.takedownCam = self.destabilizedByPlayer;
+    }
   } else if (
     // rival-on-rival combat: two clean AI cars trading paint get the same
     // aggressor judgment as the player — the loser picks up shunt mode and
@@ -282,7 +324,7 @@ export function resolveRaceContact(ctx: ContactContext): ContactOutcome {
   ) {
     if (judgeAggressor(self, other) === 'self') {
       out.destabilizeOther = 1.5;
-      out.shoveOther = Math.min(9, 3.5 + impact * 0.45);
+      out.shoveOther = Math.min(20, 2.5 + impact * 0.65);
     }
   }
   return out;
