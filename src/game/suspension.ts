@@ -4,6 +4,7 @@ import {
   DOWNFORCE_CAP,
   FIXED_DT,
   GRAVITY,
+  LAND_VY_ABSORB,
   RAMP_LAUNCH_VY_MAX,
   SUSP_DROOP,
   SUSP_MAX_COMP,
@@ -107,6 +108,15 @@ export function applySuspension(actors: Actor[], state: GameState, heightAt: Hei
       if (b.position.y < minY) {
         b.position.y = minY;
         const v = b.velocity;
+        // landing absorb (squash): whenever the kinematic floor catches a
+        // descending chassis (v.y < 0) — which is exactly the post-air landing
+        // frame, and also any other moment the chassis is pushed down into the
+        // floor — damp the DOWNWARD velocity so a slam is absorbed instead of
+        // bouncing. This only REDUCES the magnitude of a negative vy; it can
+        // never produce upward velocity, so the vy clamps in Game.ts and the
+        // per-surface launch cap below are unaffected. The v.y < 0 guard is the
+        // whole gate — no separate landing flag is needed.
+        if (v.y < 0) v.y *= 1 - LAND_VY_ABSORB;
         const ax = b.position.x + v.x * FIXED_DT;
         const az = b.position.z + v.z * FIXED_DT;
         const ahead = heightAt(ax, az);

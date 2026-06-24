@@ -130,3 +130,62 @@ export const TBONE_MIN_CLOSING = 18; // m/s of closing along the contact line
 // A near-parallel door-to-door (dot ≈ 1) and a head-on (dot ≈ -1) both fall
 // outside it and stay shunts/scrapes, exactly as the fixtures require.
 export const TBONE_MAX_ALIGN = 0.7;
+
+// ---- airborne / jump attitude (BP AttribSys medians → CJ per-frame model) ----
+// All derived from steward's sweep of 48 retail VEH_*_AT.BIN attribute vaults.
+// BP runs a full rigid-body solver; CJ writes the body quaternion directly in
+// control.ts, so these map BP's intent into CJ's `x += (target-x)*min(1,rate*dt)`
+// easing. See docs/research/jump-physics.md.
+
+// Sustained chase of the velocity vector (nose follows the trajectory in air).
+// Invented rate — BP gets this from rigid-body dynamics, no single scalar to
+// copy; ~0.3 s to take up the arc. PitchDampingOnTakeOff (median 0.9) sets the
+// takeoff pose, this governs the in-flight follow.
+export const AIR_PITCH_FOLLOW_RATE = 3.0; // 1/s
+
+// In-air auto-level: roll eases back toward 0 so the car lands on its wheels.
+// From BP's intent (RollDampingOnTakeOff median ~0.00125 kills launch roll, then
+// active in-air correction holds level). ~0.45 s to level.
+export const AIR_ROLL_CORRECTION = 2.2; // 1/s
+// Dead-band before auto-level engages, so ramp-lip bank + float noise don't
+// fight it. ~3.4°. Invented small threshold.
+export const AIR_MIN_ROLL_TO_CORRECT = 0.06; // rad
+
+// One-shot multipliers applied to angular velocity on the TAKEOFF frame (used
+// verbatim — BP's *DampingOnTakeOff are dimensionless one-shot multipliers, no
+// factor^dt conversion needed). Roll near-zero is what leaves the car COMPOSED.
+export const TAKEOFF_PITCH_DAMP = 0.9; // from BP PitchDampingOnTakeOff median 0.9
+export const TAKEOFF_YAW_DAMP = 0.04; // from BP YawDampingOnTakeOff median 0.04
+export const TAKEOFF_ROLL_DAMP = 0.00125; // from BP RollDampingOnTakeOff median 0.00125
+
+// Cap on the snapshot roll magnitude at takeoff (~46°). Read as a radian angle
+// limit. from BP RollLimitOnTakeOff median 0.8
+export const TAKEOFF_ROLL_LIMIT = 0.8; // rad
+
+// General in-air spin bleed. BP InAirDamping is a CONSTANT 30 across all 48 cars
+// on BP's internal angular scale — fed raw into min(1,rate*dt) it clamps every
+// frame (30/120=0.25/frame, all spin gone in ~4 frames). Remapped to a sane CJ
+// rate (~0.5 s decay). from BP InAirDamping (const 30, intent only)
+export const AIR_DAMP = 2.0; // 1/s
+
+// Clamp on nose-up "wheelie" pitch in air (~22°). BP clamps wheelie pitch; no
+// single field, chosen for a believable air pose.
+export const MAX_WHEELIE_ANGLE = 0.38; // rad
+
+// Player steer maps to a small attitude TORQUE in air (a nudge, never a
+// teleport). Invented — BP air control is faint and torque-based.
+export const AIR_STEER_TORQUE = 0.9; // rad/s at full steer
+
+// Landing settle: over this window the chassis blends to the road plane
+// (replaces the old instant slope<0.02 re-pin). from BP TimeToDampAfterLanding
+// median 0.1
+export const LAND_SETTLE_SECS = 0.1; // s
+
+// Fraction of incoming DOWNWARD vy absorbed across the settle (squash). Only
+// while descending into contact; never adds upward velocity. from BP
+// MaxVertVelocityDampingOnLanding median 0.1
+export const LAND_VY_ABSORB = 0.1;
+
+// Briefly soften steering after a hard landing so the player can't snap-turn
+// out of the squash. Invented; BP softens steering post-landing.
+export const LAND_STEER_SOFTEN_SECS = 0.25; // s
