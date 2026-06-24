@@ -16,6 +16,10 @@ import {
   SLOWMO_HOLD,
   SUSP_MAX_COMP,
   TAKEDOWN_WALL_GRACE,
+  WHEELSPIN_FADE_SPEED,
+  WHEELSPIN_OVERSPIN,
+  WHEELSPIN_FLOOR,
+  BRAKE_LOCKUP_FACTOR,
 } from './constants';
 import { GameState, type Actor, type CollideEvent, type LevelDef } from './types';
 import type { GameEvents, ReportData } from './events';
@@ -2022,20 +2026,54 @@ export class Game {
     }
   }
 
-  // wheel meshes ride the suspension and spin with road speed
+  // wheel meshes ride the suspension and spin with the wheel's OWN angular
+  // velocity (BP Wheel::UpdateRotation: rotation += ω·dt), not raw ground speed:
+  // the player's rears overspin under launch power (wheelspin) and all four
+  // near-lock under braking. Front wheels also yaw to the BP GetSteeringAngle.
+  // Everything here is visual; the fixed-step sim never reads any of it.
   private updateWheels(simDt: number): void {
     for (const a of this.actors) {
       if (a.kind !== 'vehicle' || !a.spec) continue;
       _wFwd.set(0, 0, -1).applyQuaternion(a.group.quaternion); // hull forward
       const v = a.body.velocity;
-      const spin = ((v.x * _wFwd.x + v.z * _wFwd.z) / a.spec.wheelRadius) * simDt;
+      const fwd = v.x * _wFwd.x + v.z * _wFwd.z; // signed forward ground speed
+      const baseSpin = (fwd / a.spec.wheelRadius) * simDt; // free-roll ω·dt
+      // player-only traction signals: launch wheelspin grows toward standstill,
+      // lockup near-freezes the roll under braking (cheap to read once per actor).
+      // Gated to forward motion (fwd > -0.5 keeps standstill jitter in, excludes
+      // reverse) — wheelspin is a forward-launch effect, not a reversing one.
+      const launch = a.isPlayer && fwd > -0.5 ? Math.min(1, Math.max(0, 1 - fwd / WHEELSPIN_FADE_SPEED)) : 0; // ~1 at rest → 0 by fade speed
+      const wheelspin = a.isPlayer && (this.control.boosting || this.control.throttling);
+      const braking = a.isPlayer && this.control.braking;
+      const steerY = a.isPlayer ? this.control.steerAngle : 0; // front-wheel visual steer
       const ride = a.spec.rideHeight;
       for (let i = 0; i < a.wheels.length; i++) {
         const wh = a.wheels[i];
         const s = a.susp[i];
         const d = Math.min(Math.max(s.dist, ride - SUSP_MAX_COMP), ride + 0.14);
         wh.position.y += (-(d - a.spec.wheelRadius) - wh.position.y) * Math.min(1, simDt * 16);
-        wh.rotation.x -= spin;
+
+        // per-wheel angular velocity diverges from the ground under wheelspin /
+        // lockup, mirroring BP's wheel-owned ω. corner order is FL,FR,RL,RR.
+        let omega = baseSpin;
+        if (braking) omega *= BRAKE_LOCKUP_FACTOR; // wheels near-lock under braking
+        else if (wheelspin && i >= 2) {
+          // rear-drive launch overspin, plus a standstill floor so the rears
+          // still spin from a DEAD stop (where baseSpin — and thus the
+          // multiplicative term — is ~0, which is exactly when wheelspin reads strongest)
+          omega = omega * (1 + WHEELSPIN_OVERSPIN * launch) + WHEELSPIN_FLOOR * launch * simDt;
+        }
+        wh.rotation.x -= omega;
+
+        // front wheels (i<2) steer: yaw OUTSIDE the roll so the tyre rolls about
+        // its STEERED axle. order 'YXZ' applies Y (steer) then X (roll). The hull
+        // faces local -z with +x = right; a +Y rotation swings -z toward -x (left),
+        // so NEGATE steerY for a right input (steer>0) to point the wheels right —
+        // matching the chassis turn (right input yaws the car toward its own right).
+        if (a.isPlayer && i < 2) {
+          wh.rotation.order = 'YXZ';
+          wh.rotation.y = -steerY;
+        }
       }
     }
   }

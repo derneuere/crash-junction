@@ -182,6 +182,13 @@ export class PlayerControl {
   rpm = 0.25; // 0..1 within the current gear band — drives the engine pitch
   visualPitch = 0; // squat/dive, applied to the visual hull only
   visualRoll = 0; // body lean, ditto
+  // PRESENTATION-ONLY (read by Game.updateWheels, never by the sim): the BP
+  // GetSteeringAngle the front wheels visually turn to, and the throttle/brake
+  // input flags that drive wheelspin/lockup. All three are pure derived values —
+  // nothing in the fixed step reads them, so replay checksums stay identical.
+  steerAngle = 0; // front-wheel visual steer lock (radians), speed-sensitive
+  throttling = false; // raw throttle input — rear wheelspin under launch power
+  braking = false; // raw brake input — near-lockup of all wheels
   private shiftT = 0; // torque-gap timer after an upshift
   private yawVel = 0; // the chassis takes time to start (and stop) rotating
   private grip = 1; // 1 = full grip, 0 = drift slip
@@ -250,6 +257,9 @@ export class PlayerControl {
     this.shiftT = 0;
     this.visualPitch = 0;
     this.visualRoll = 0;
+    this.steerAngle = 0; // presentation-only, but must be seeded for replay parity
+    this.throttling = false;
+    this.braking = false;
     this.yawVel = 0;
     this.grip = 1;
     this.kickLeft = 0;
@@ -494,6 +504,19 @@ export class PlayerControl {
     const accel = (this.speed - speedBefore) / dt;
     const pitchTarget = airborne ? 0 : clamp(accel * PITCH_PER_ACCEL, PITCH_MIN, PITCH_MAX);
     this.visualPitch += (pitchTarget - this.visualPitch) * Math.min(1, dt * 5);
+
+    // ---- front-wheel visual steer (BP GetSteeringAngle), presentation-only ----
+    // Same speed-sensitive lock the gripped yaw model uses above (line ~452):
+    // MaxAngle at low speed lerps down to MinAngle by SpeedForMinAngle. this.steer
+    // is already eased toward input, so steerAngle is smooth with no extra easing.
+    // Game.updateWheels yaws the front wheel meshes by this; the sim never reads it.
+    const lockVis =
+      STEER_LOCK_LOW +
+      (STEER_LOCK_HIGH - STEER_LOCK_LOW) * clamp((this.speed - STEER_FULL_BELOW) / (STEER_MIN_AT - STEER_FULL_BELOW), 0, 1);
+    this.steerAngle = lockVis * this.steer;
+    // raw input flags for the wheelspin/lockup spin model (presentation-only)
+    this.throttling = input.throttle;
+    this.braking = input.brake;
 
     // ---- write to the body ----
     b.velocity.set(Math.sin(this.velAngle) * this.speed, b.velocity.y, Math.cos(this.velAngle) * this.speed);
