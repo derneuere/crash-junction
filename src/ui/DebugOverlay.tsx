@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { EngineFlavor } from '../game/audio';
-import type { TimeOfDay } from '../game/daynight';
 import { LEVEL_LABELS, type LevelId } from '../game/levels';
-import { parseReplayFile, type ReplayFile } from '../game/replay';
+import { parseReplayFile } from '../game/replay';
 import { GameState } from '../game/types';
 import { synthKey } from './keys';
+import { GLASS_SLIDERS, GLASS_TINTS, REFSHOT_POSES, getGame } from './DebugOverlay/constants';
+import type { DebugOverlayProps, GlassParams, ReplayVerdict, Telemetry } from './DebugOverlay/types';
 
 // The Backquote debug overlay (research doc §4). Reachable mid-run — that's
 // when you want telemetry and replay capture — so it lives beside the Hud,
@@ -16,96 +16,6 @@ import { synthKey } from './keys';
 // command queue and get recorded; presentation buttons (tod/engine/mute) are
 // legal mid-take by design; level switches go through App's remount, which
 // is already the take boundary.
-
-/** Structural view of window.__game — the dev handle Game.ts publishes. The
- *  fields are TS-private on the class, but this overlay deliberately works
- *  through the same runtime surface the console and tools/refshot.mjs use,
- *  so Game.ts needs no code for it. */
-interface GlassParams {
-  tint: number;
-  transmission: number;
-  roughness: number;
-  thickness: number;
-  ior: number;
-  dispersion: number;
-  attenuation: number;
-  reflection: number;
-  rim: number;
-  warp: number;
-  frost: number;
-}
-
-interface DebugGame {
-  captureReport(note?: string): unknown;
-  camera: {
-    position: { set(x: number, y: number, z: number): void };
-    lookAt(x: number, y: number, z: number): void;
-  };
-  director: { update?: (...args: never[]) => void };
-  audio?: { levels(): number; samplesLoaded(): number };
-  simTime?: number;
-  levelId?: string;
-  setGlassParams?(p: Partial<GlassParams>): GlassParams;
-  getGlassParams?(): GlassParams;
-  // grass verge field (coast levels only) — cheap cached telemetry, no
-  // per-blade work. See grass.ts GrassField.stats().
-  grass?: { stats(): { allocated: number; tilesTotal: number; tilesDrawn: number } };
-}
-
-// Tint presets: a clear-ish day windscreen vs a dark "privacy" limo look, plus
-// classic automotive tints. Hex feeds glassMat.color, the transmission filter.
-const GLASS_TINTS: { label: string; hex: number }[] = [
-  { label: 'CLEAR', hex: 0xc6d6e2 },
-  { label: 'COOL', hex: 0xafc4d4 },
-  { label: 'BRONZE', hex: 0xc9b48c },
-  { label: 'PRIVACY', hex: 0x3a4654 },
-];
-
-const getGame = (): DebugGame | null =>
-  (window as unknown as { __game?: DebugGame }).__game ?? null;
-
-interface ReplayVerdict {
-  ok: boolean;
-  aborted: boolean;
-  framesPlayed: number;
-  framesTotal: number;
-  diverged: unknown;
-}
-
-/** MIRROR of tools/refshot.mjs POSES (the frozen contract). The harness is a
- *  plain .mjs the UI can't import without dragging tools/ into the bundle —
- *  if a pose ever moves there (it shouldn't: they're frozen), move it here
- *  too. All GANTRY POINT world coordinates. */
-const REFSHOT_POSES: Record<string, { cam: [number, number, number]; look: [number, number, number] }> = {
-  dockyard: { cam: [110, 38, -35], look: [190, 0, 35] },
-  harbor: { cam: [205, 32, 95], look: [290, 0, 150] },
-  cliff: { cam: [212, 26, 150], look: [275, 2, 212] },
-  beach: { cam: [-158, 30, -108], look: [-235, 0, -185] },
-  'seam-1': { cam: [243, 14, 178], look: [288, 6, 214] },
-  'seam-2': { cam: [-218, 22, 40], look: [-285, 0, -10] },
-};
-
-interface DebugOverlayProps {
-  open: boolean;
-  onClose: () => void;
-  state: GameState;
-  levelId: LevelId;
-  timeOfDay: TimeOfDay;
-  engineSound: EngineFlavor;
-  onSetTimeOfDay: (t: TimeOfDay) => void;
-  onSetEngineSound: (f: EngineFlavor) => void;
-  onSelectLevel: (id: LevelId) => void;
-  onLoadReplay: (file: ReplayFile, fast: boolean) => void;
-}
-
-interface Telemetry {
-  simTime: number;
-  rms: number;
-  clips: number;
-  ai: string;
-  replay: string;
-  grass: string;
-}
 
 export function DebugOverlay({
   open, onClose, state, levelId, timeOfDay, engineSound,
@@ -321,20 +231,7 @@ export function DebugOverlay({
               </button>
             ))}
           </div>
-          {(
-            [
-              ['transmission', 'SEE-THRU', 0, 1, 0.01],
-              ['roughness', 'ROUGH', 0, 0.6, 0.01],
-              ['thickness', 'REFRACT', 0, 0.8, 0.01],
-              ['ior', 'IOR', 1, 2.0, 0.01],
-              ['dispersion', 'PRISM', 0, 4, 0.05],
-              ['attenuation', 'DEPTH-TINT', 0.2, 2, 0.02],
-              ['warp', 'WARP', 0, 1.5, 0.02],
-              ['reflection', 'REFLECT', 0, 2.0, 0.05],
-              ['rim', 'RIM', 0, 2.0, 0.05],
-              ['frost', 'FROST', 0.5, 1, 0.01],
-            ] as const
-          ).map(([key, label, min, max, step]) => (
+          {GLASS_SLIDERS.map(([key, label, min, max, step]) => (
             <label key={key} className="dbgSlider" title={`glassMat.${key}`}>
               <span>{label}</span>
               <input
