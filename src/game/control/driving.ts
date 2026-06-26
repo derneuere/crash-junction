@@ -9,24 +9,31 @@ import {
 } from '../constants';
 import type { Actor } from '../types';
 import type { HeightSampler } from '../suspension';
+import type { HandlingAttribs } from '../handling';
 import type { ControlInput } from './input';
+import { grip, latGripCurve, driftLatGripCurve } from '../grip';
 import { applyChassisOrientation } from './orientation';
 import { updateSpeed } from './speed';
 import {
   BURNOUT_TOP,
   CENTER_BIAS,
   COUNTERSTEER,
-  DRIFT_CARVE,
+  DRIFT_ANGDAMP_STRENGTH,
   DRIFT_CHASE,
-  DRIFT_DEEPEN,
   DRIFT_ENTRY_TIME,
   DRIFT_EXIT_SLIP,
-  DRIFT_MAX_SLIP,
+  DRIFT_LAT_FORCE_REF,
+  DRIFT_LAT_STRENGTH,
+  DRIFT_MAINTAIN_STRENGTH,
   DRIFT_MIN_SPEED,
   DRIFT_RECOVER_TIME,
-  DRIFT_RELAX,
   DRIFT_TIGHTEN,
+  DRIFT_YAW_STRENGTH,
+  DRIFT_YAW_TORQUE_REF,
   GRIP_CHASE,
+  GRIP_CURVE_BLEND,
+  GRIP_MOD_FLOOR,
+  GRIP_REF_COEFF,
   PITCH_MAX,
   PITCH_MIN,
   PITCH_PER_ACCEL,
@@ -39,12 +46,30 @@ import {
   STEER_LOCK_LOW,
   STEER_MIN_AT,
   STEER_RAMP,
+  STEER_SHAPE_BLEND,
   VISUAL_STEER_GAIN,
   WHEELBASE,
   YAW_RESPONSE,
   clamp,
+  shapeSteer,
   wrapAngle,
 } from './constants';
+
+/** Drift finite-state machine (Feature D). The boolean drift is hardened to a
+ *  tri-state: NONE, or a LEFT/RIGHT slide whose direction is LATCHED from the
+ *  sign of the steering input at entry (BP `mu8DriftState`, findings §8). The
+ *  latched sign then signs every scripted drift force, so the slide can't flip
+ *  direction mid-corner without re-entering. */
+export enum DriftState {
+  None = 0,
+  Left = 1, // steering left at entry (steer > 0 in CJ's sign convention)
+  Right = 2, // steering right at entry (steer < 0)
+}
+
+/** Signed direction (+1 left / −1 right / 0 none) for a DriftState — the sign
+ *  every drift force is multiplied by. CJ's steer is +left/−right (the yaw model
+ *  uses `-steer`), so Left → +1, Right → −1. */
+const driftSign = (d: DriftState): number => (d === DriftState.Left ? 1 : d === DriftState.Right ? -1 : 0);
 
 /**
  * The full per-frame driving state — every PlayerControl field the driving step
@@ -57,7 +82,8 @@ export interface DriveState {
   velAngle: number;
   steer: number;
   speed: number;
-  drifting: boolean;
+  drifting: boolean; // FSM active view: driftState !== None (kept for callers)
+  driftState: DriftState; // tri-state FSM (Feature D) — NONE/LEFT/RIGHT
   boosting: boolean;
   boostMeter: number;
   boostHeld: boolean;
@@ -102,12 +128,18 @@ export function stepDrive(
   player: Actor,
   input: ControlInput,
   heightAt: HeightSampler,
+  attribs: HandlingAttribs,
 ): void {
   const b = player.body;
   const dt = FIXED_DT;
 
   // ---- steering ramp (return-to-center is faster than steering in) ----
-  const target = clamp(input.steer, -1, 1);
+  // BP ModifyControlsForSteeringWheelInput: a quartic stiffening shapes the raw
+  // input (soft centre, sharp extreme) before the ramp. STEER_SHAPE_BLEND
+  // defaults small so the sedan stays close to linear (= today's feel); the
+  // shaped value is what the steer chases. On a binary keyboard input (±1) this
+  // is a no-op since |±1|^4 = ±1; it only bites for analog/AI continuous input.
+  const target = clamp(shapeSteer(input.steer, STEER_SHAPE_BLEND), -1, 1);
   const centering = Math.abs(target) < Math.abs(s.steer) || target * s.steer < 0;
   const rate = STEER_RAMP * (centering ? CENTER_BIAS : 1);
   s.steer += clamp(target - s.steer, -rate * dt, rate * dt);
@@ -119,12 +151,24 @@ export function stepDrive(
   const freshTap = input.brake && !s.brakeWasDown;
   s.brakeWasDown = input.brake;
   s.recentBrake = input.brake ? 0.25 : Math.max(0, s.recentBrake - dt);
-  if (!s.drifting && s.recentBrake > 0 && Math.abs(s.steer) > 0.3 && s.speed > DRIFT_MIN_SPEED) {
-    s.drifting = true; // a tap is enough — the slide persists while sideways
+  // Reconcile an EXTERNAL drift clear (Game/core.ts forces `control.drifting =
+  // false` on crashes/resets). The FSM is otherwise authoritative, but if the
+  // boolean was cleared from outside while the FSM still held a direction, honour
+  // it as an ExitDrift so the two never disagree.
+  if (!s.drifting && s.driftState !== DriftState.None) s.driftState = DriftState.None;
+  // ---- drift FSM entry (Feature D). The same tap-buffer entry condition as
+  // before, but EnterDrift now LATCHES the direction from the sign of the
+  // steering input (BP: steer ≤ 0 → FacingRight, else FacingLeft). CJ steer is
+  // +left/−right, so steer > 0 → Left, steer < 0 → Right. That latched enum
+  // then signs every scripted drift force below. ExitDrift runs in the slip
+  // model (straightened-out / low-speed guards), which clears driftState. ----
+  if (s.driftState === DriftState.None && s.recentBrake > 0 && Math.abs(s.steer) > 0.3 && s.speed > DRIFT_MIN_SPEED) {
+    s.driftState = s.steer > 0 ? DriftState.Left : DriftState.Right;
     s.tighten = 0;
-  } else if (s.drifting && freshTap) {
+  } else if (s.driftState !== DriftState.None && freshTap) {
     s.tighten = 1;
   }
+  s.drifting = s.driftState !== DriftState.None; // derived view for the rest of the step
   s.tighten = Math.max(0, s.tighten - dt / 0.6);
   const gripGoal = s.drifting ? 0 : 1;
   s.grip += (gripGoal - s.grip) * Math.min(1, dt / (s.drifting ? DRIFT_ENTRY_TIME : DRIFT_RECOVER_TIME));
@@ -171,22 +215,65 @@ export function stepDrive(
     // Straighten the wheel and the slip unwinds until the tyres hook
     // up; countersteer unwinds it faster, and held past centre it
     // swings the tail out the other way (chaining, no new tap) ----
+    const dir = driftSign(s.driftState); // latched at entry — signs every drift force
+    const dh = attribs.drift;
     let slip = wrapAngle(s.heading - s.velAngle);
-    let want = -s.steer * DRIFT_MAX_SLIP * clamp(s.speed / 30, 0.7, 1);
+    // DriftScale: grow the slide toward the per-variant cap (BP DriftMaxAngle →
+    // dh.maxSlip; tanker barely drifts, sedan/bus more). Steering still sets the
+    // angle within the cap, kept by tap-tighten and countersteer as before.
+    let want = -s.steer * dh.maxSlip * clamp(s.speed / 30, 0.7, 1);
     if (want !== 0) {
-      want = clamp(want + Math.sign(want) * DRIFT_TIGHTEN * s.tighten, -DRIFT_MAX_SLIP, DRIFT_MAX_SLIP);
+      want = clamp(want + Math.sign(want) * DRIFT_TIGHTEN * s.tighten, -dh.maxSlip, dh.maxSlip);
     }
     const deepening = want * slip >= 0 && Math.abs(want) > Math.abs(slip);
-    let chaseRate = deepening ? DRIFT_DEEPEN : DRIFT_RELAX;
+    let chaseRate = deepening ? dh.deepen : dh.relax;
     if (s.steer * slip > 0) chaseRate *= COUNTERSTEER; // steering against the slide
     if (airborne) chaseRate *= 0.3; // attitude mostly holds in the air
     slip += (want - slip) * Math.min(1, chaseRate * dt);
-    if (!airborne) s.velAngle = wrapAngle(s.velAngle + slip * DRIFT_CARVE * dt);
+
+    // ---- scripted drift forces (Feature D), each GATED to zero-able and
+    // signed by the latched drift direction. They are ground-relative slip /
+    // speed nudges on the kinematic state, the CJ analogue of BP's ground-
+    // tangent-projected impulses (findings §8). All no-ops when their strength
+    // scalar is 0 (= the old pure slip-chase). ----
+    if (!airborne) {
+      // DriftLatForce: scripted sideways step-out, shaped by the dedicated,
+      // flatter DRIFT lateral grip curve (Feature C). The curve sampled at the
+      // current slip gives how readily the rear keeps stepping out; lower
+      // (flatter) drift coeff = looser = the rear walks out further. Added as an
+      // extra slip rate in the latched direction, capped to maxSlip.
+      const driftCoeff = Math.abs(grip(slip, driftLatGripCurve(attribs)));
+      const latAdd = dir * (dh.sideForce / DRIFT_LAT_FORCE_REF) * driftCoeff * DRIFT_LAT_STRENGTH * dt;
+      slip = clamp(slip + latAdd, -dh.maxSlip, dh.maxSlip);
+      // drift.angularDamping: bleed excess slide that overshoots the target —
+      // heavier variants (higher angularDamping) settle their spin harder.
+      const overslip = slip - want;
+      slip -= overslip * Math.min(1, dh.angularDamping * DRIFT_ANGDAMP_STRENGTH * dt * 12);
+    }
+    if (!airborne) s.velAngle = wrapAngle(s.velAngle + slip * dh.carve * dt);
     const heading = wrapAngle(s.velAngle + slip);
-    s.yawVel = wrapAngle(heading - s.heading) / dt; // keep roll & exit handoff continuous
-    s.heading = heading;
+    // DriftScale/Yaw self-align: nudge the nose toward the slide direction via
+    // the per-variant naturalYawTorque (BP NaturalYawTorque, remapped to a CJ
+    // yaw-rate add). Folded into the heading delta so yawVel stays continuous
+    // for the roll/exit handoff.
+    const yawAlign = dir * (dh.naturalYawTorque / DRIFT_YAW_TORQUE_REF) * DRIFT_YAW_STRENGTH * dt;
+    const headingAligned = wrapAngle(heading + (airborne ? 0 : yawAlign));
+    s.yawVel = wrapAngle(headingAligned - s.heading) / dt; // keep roll & exit handoff continuous
+    s.heading = headingAligned;
+
+    // MaintainDriftSpeed: anti-scrub — a slide shouldn't bleed all its speed.
+    // Top the speed back up toward the speed it entered the slide with, at a
+    // fraction of the deficit per second (BP MaintainDriftSpeed impulse along
+    // the velocity blend), gated on throttle. Speed itself is owned by
+    // updateSpeed/scrub above; this only ADDS back, never removes.
+    if (!airborne && input.throttle && s.speed < speedBefore) {
+      const refill = (speedBefore - s.speed) * Math.min(1, DRIFT_MAINTAIN_STRENGTH * dt * 6);
+      s.speed = Math.min(BURNOUT_TOP, s.speed + refill);
+    }
+
     if ((Math.abs(slip) < DRIFT_EXIT_SLIP && Math.abs(want) < DRIFT_EXIT_SLIP * 2) || s.speed < 12) {
-      s.drifting = false; // straightened out — grip recovers over the next beat
+      s.driftState = DriftState.None; // ExitDrift: straightened out — grip recovers
+      s.drifting = false;
       s.speed = Math.min(BURNOUT_TOP, s.speed + 1.2); // BP's little exit kick
     }
   } else {
@@ -211,12 +298,26 @@ export function stepDrive(
     // velocity direction chases the nose — leftover slide from a drift
     // exit bleeds away as grip recovers; a few degrees of working slip
     // in every corner reads as mass
-    const chase = GRIP_CHASE * s.grip + DRIFT_CHASE * (1 - s.grip);
+    let chase = GRIP_CHASE * s.grip + DRIFT_CHASE * (1 - s.grip);
     let slip = wrapAngle(s.heading - s.velAngle);
+    // ---- Feature C: tire grip curve MODULATES the chase rate (kinematic-
+    // compatible — no force replacement). The lateral slip estimate is the
+    // working slip; sample the per-variant lateral grip curve at it. Near the
+    // curve's peak (small slip) grip is high → the velocity vector hooks the
+    // nose at full rate (today's behaviour). Past the peak grip FALLS, so the
+    // car keeps less of its chase — it runs wide / the rear walks out, the
+    // break-loose feel. Blended behind GRIP_CURVE_BLEND (0 = stock); the sedan
+    // default is small so its corner feel is preserved. ----
+    if (GRIP_CURVE_BLEND > 0 && !airborne) {
+      const coeff = Math.abs(grip(slip, latGripCurve(attribs)));
+      const gripMod = clamp(1 + GRIP_CURVE_BLEND * (coeff - GRIP_REF_COEFF), GRIP_MOD_FLOOR, 1.5);
+      chase *= gripMod;
+    }
     s.velAngle = wrapAngle(s.velAngle + slip * Math.min(1, chase * dt));
     slip = wrapAngle(s.heading - s.velAngle);
-    if (Math.abs(slip) > DRIFT_MAX_SLIP) {
-      s.velAngle = wrapAngle(s.heading - Math.sign(slip) * DRIFT_MAX_SLIP);
+    const maxSlip = attribs.drift.maxSlip; // per-variant cap (sedan = today's 40°)
+    if (Math.abs(slip) > maxSlip) {
+      s.velAngle = wrapAngle(s.heading - Math.sign(slip) * maxSlip);
     }
   }
 
@@ -226,7 +327,7 @@ export function stepDrive(
   let earn = s.nearMissFill; // pending near-miss/oncoming credit, spent now
   s.nearMissFill = 0;
   if (s.drifting) {
-    const sideways = Math.abs(wrapAngle(s.heading - s.velAngle)) / DRIFT_MAX_SLIP;
+    const sideways = Math.abs(wrapAngle(s.heading - s.velAngle)) / attribs.drift.maxSlip;
     earn += REFILL_DRIFT * (0.4 + 0.6 * sideways) * dt;
   }
   if (airborne) earn += REFILL_AIR * dt;

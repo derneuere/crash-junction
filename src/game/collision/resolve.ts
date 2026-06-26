@@ -88,6 +88,11 @@ export function resolveRaceContact(ctx: ContactContext): ContactOutcome {
           } else {
             out.destabilizeSelf = 1.5;
             out.shoveSelf = Math.min(22, 3 + impact * 0.6);
+            // SLAM (Feature F): being slammed loose is the one-shot wallop — a
+            // parabolic yaw wobble on top of the sideways shove, distinct from
+            // the aggressor's clean SHUNT punt above (which leaves shoveOther
+            // but no slam). Scaled by impact so a hard slam wobbles more.
+            out.slamSelf = Math.min(1, impact / 12);
           }
         }
       }
@@ -153,6 +158,10 @@ export function resolveRaceContact(ctx: ContactContext): ContactOutcome {
     if (judgeAggressor(self, other) === 'self') {
       out.destabilizeOther = 1.5;
       out.shoveOther = Math.min(20, 2.5 + impact * 0.65);
+      // SLAM (Feature F): a rival slammed loose in a feud gets the same
+      // one-shot yaw wobble the player does when slammed — rivals feel knocked
+      // about, not just nudged sideways.
+      out.slamOther = Math.min(1, impact / 12);
     }
   }
   return out;

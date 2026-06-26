@@ -140,5 +140,76 @@ export const REFILL_AIR = 0.7; // per s airborne
 export const REFILL_NEARMISS = 0.45; // per near-miss/oncoming event (Game feeds it)
 export const BURNOUT_ENTER = 0.999; // bar fraction that arms the sustained Burnout
 
+// ---- Feature C: tire grip curve (guarded modulation) -----------------------
+// CJ's player is kinematic (scalar speed/heading written to the body); the spec
+// is explicit that we do NOT rip that out. Instead the Pacejka-like lateral grip
+// curve (grip.ts) MODULATES the existing yaw/slip rates — a deeper lateral slip
+// past the curve's peak develops LESS grip, so the velocity vector hooks the
+// nose less and the rear steps out, exactly the "break-loose" feel. The blend
+// scalar is how much the curve's verdict bends the stock rate:
+//   modulated = stock · (1 + GRIP_CURVE_BLEND · (coeff − refCoeff))
+// At GRIP_CURVE_BLEND = 0 this is a pure no-op (= today's behaviour). The sedan
+// default is small so its feel is preserved; raise per variant for more
+// breakaway character (bus/tanker lean on it harder via their lower grip
+// coefficients). Reversible to zero, per the guard rails.
+export const GRIP_CURVE_BLEND = 0.35; // 0 = stock; how hard the lat curve bends yaw/chase
+// Reference coefficient the modulation is measured AGAINST: at peak grip
+// (coeff ≈ refCoeff) the rate is unchanged, only the FALL past peak loosens it.
+// Tracks the median peak so a curve sitting at its peak is a no-op.
+export const GRIP_REF_COEFF = 1.0;
+// Floor on the grip multiplier so a fully-slid tyre still bites a little (a 0
+// would freeze the kinematic chase entirely and feel dead).
+export const GRIP_MOD_FLOOR = 0.45;
+
+// ---- Feature D: drift finite-state machine (scripted, gated forces) ---------
+// The boolean `drifting` is hardened to a tri-state FSM (NONE/LEFT/RIGHT, see
+// driving.ts DriftState). EnterDrift latches the direction from the SIGN of the
+// steering input; that sign then signs every drift force. Each scripted force is
+// gated behind its own strength scalar so it can be dialled to zero (= the old
+// pure slip-chase). Defaults are tuned so the sedan's slip-chase feel is largely
+// preserved — the forces are a thin garnish on top, not a replacement — while
+// the heavier variants (which read bigger BP sideForce/naturalYawTorque numbers)
+// get a more pronounced step-out and self-align.
+//
+// MaintainDriftSpeed: anti-scrub impulse along the velocity blend so a slide
+// doesn't bleed all its speed (BP MaintainDriftSpeed, findings §8). As a CJ
+// kinematic nudge: top the drift speed back up toward a maintained target at
+// this fraction of the deficit per second, gated on throttle.
+export const DRIFT_MAINTAIN_STRENGTH = 1.0; // 0 = no anti-scrub (raw scrub only); gated on input.throttle
+// DriftScale/Yaw: self-aligning yaw via the per-variant naturalYawTorque,
+// remapped from BP's torque (thousands, on its internal inertia scale) into a CJ
+// yaw-rate nudge by dividing by this reference. Heavier variants carry a bigger
+// torque AND a bigger reference, so the felt self-align scales gently.
+export const DRIFT_YAW_TORQUE_REF = 9000; // BP NaturalYawTorque → CJ yaw-rate divisor
+export const DRIFT_YAW_STRENGTH = 0.6; // 0 = no self-align; scales the yaw nudge
+// DriftLatForce: the sideways step-out, shaped by the Feature-C DRIFT lateral
+// curve and signed by the latched drift direction. BP SideForceMagnitude
+// (15/27/35) is remapped to a CJ slip-rate add by dividing by this reference.
+export const DRIFT_LAT_FORCE_REF = 40; // BP SideForceMagnitude → CJ slip-rate divisor
+export const DRIFT_LAT_STRENGTH = 0.5; // 0 = no scripted step-out (slip-chase only)
+// drift.angularDamping bleed: extra spin damp while drifting (BP
+// DriftAngularDamping 0.05–0.2), applied as a per-second decay on the slip-chase
+// overspeed. Gated by this scalar.
+export const DRIFT_ANGDAMP_STRENGTH = 1.0; // 0 = no extra spin bleed
+
+// ---- steering input shaping (BP ModifyControlsForSteeringWheelInput) --------
+// BP applies a quartic stiffening to the raw stick: soft centre, sharp extreme
+// (`−1.0 − sign·(s⁴·1.25)`, findings §8). On a keyboard the steer input is
+// already ±1 binary, but analog pads / the AI feed continuous values, and the
+// quartic gives the sedan a calmer centre without losing full lock. Blend keeps
+// the sedan close to linear (the proven feel) while letting heavier variants use
+// more of the soft centre. STEER_SHAPE_BLEND = 0 ⇒ pure linear (= today).
+export const STEER_SHAPE_BLEND = 0.2; // 0 = linear input; 1 = full BP quartic
+export const STEER_SHAPE_EXP = 4; // BP uses s⁴ (quartic)
+
 export const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
 export const wrapAngle = (a: number) => Math.atan2(Math.sin(a), Math.cos(a));
+
+/** BP quartic steering shaping: soft centre, sharp extreme. Blends between the
+ *  raw linear input (blend 0) and `sign·|x|^EXP` (blend 1). Sign-preserving and
+ *  monotone, so it never reverses or saturates beyond ±1. */
+export const shapeSteer = (x: number, blend: number): number => {
+  const a = Math.abs(x);
+  const shaped = Math.sign(x) * Math.pow(a, STEER_SHAPE_EXP);
+  return x + (shaped - x) * blend;
+};

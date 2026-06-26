@@ -45,6 +45,15 @@ export interface ContactOutcome {
   /** The mirrored kick when SELF is the one slammed — the sideways force
    *  that makes a slam felt without scripting a wreck. */
   shoveSelf: number;
+  /** Feature F SLAM (BP UpdateSlam): the victim of a SLAM gets a one-shot
+   *  parabolic yaw wobble (env = r − r², peaks mid-life) layered on top of the
+   *  lateral shove — the contact-time wallop that ramps in then fades. Which
+   *  car it lands on follows the shove: `slamOther` rides shoveOther (the
+   *  rammed rival), `slamSelf` rides shoveSelf (the player when slammed). 0 =
+   *  no slam (e.g. a clean shunt punt). Distinct from race.ts's AI attack-run
+   *  targeting — this is purely the body-side kick. */
+  slamOther: number;
+  slamSelf: number;
   /** Shallow wall touch: scrub a little speed, reroute along the wall. */
   wallGlance: boolean;
 }
@@ -59,5 +68,7 @@ export const none = (): ContactOutcome => ({
   destabilizeOther: 0,
   shoveOther: 0,
   shoveSelf: 0,
+  slamOther: 0,
+  slamSelf: 0,
   wallGlance: false,
 });

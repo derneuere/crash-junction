@@ -7,15 +7,26 @@ import {
 import type { Actor } from '../types';
 import type { HeightSampler } from '../suspension';
 import type { ControlInput } from './input';
-import { stepDrive } from './driving';
+import { DriftState, stepDrive } from './driving';
 import { REFILL_NEARMISS, UP_AXIS, _up } from './constants';
+import { HANDLING, type HandlingAttribs } from '../handling';
 
 export class PlayerControl {
+  // The active variant's grouped handling vault (Feature A foundation). The
+  // feature modules (driving, speed, suspension, collision) read HANDLING
+  // through this field OR import HANDLING directly. Defaults to sedan and is
+  // re-resolved from the player's spec the first time `update()` sees a variant
+  // (PlayerControl is constructed before its car's spec is known) — sedan's
+  // values reproduce today, so the default is also behaviour-identical.
+  attribs: HandlingAttribs = HANDLING.sedan;
+  private attribVariant: string | null = null; // which variant `attribs` is for
+
   heading = 0; // nose yaw; world dir = (sin h, 0, cos h)
   velAngle = 0; // velocity yaw — lags heading while drifting
   steer = 0;
   speed = 0;
-  drifting = false;
+  drifting = false; // derived view of driftState (driftState !== None)
+  driftState: DriftState = DriftState.None; // tri-state drift FSM (Feature D)
   boosting = false;
   // ---- boost economy ----
   // Start with the first segment charged (B3 starts a run WITH boost in the
@@ -88,11 +99,16 @@ export class PlayerControl {
   }
 
   reset(heading: number): void {
+    // Drop the cached variant so the next update() re-resolves attribs from the
+    // (possibly swapped) car's spec; attribs itself stays sedan until then.
+    this.attribVariant = null;
+    this.attribs = HANDLING.sedan;
     this.heading = heading;
     this.velAngle = heading;
     this.steer = 0;
     this.speed = 0;
     this.drifting = false;
+    this.driftState = DriftState.None;
     this.boosting = false;
     this.boostMeter = BOOST_SEGMENT_SECS * BOOST_START_SEGMENTS; // start charged
     this.boostSegments = BOOST_START_SEGMENTS;
@@ -129,6 +145,13 @@ export class PlayerControl {
   update(player: Actor, input: ControlInput, heightAt: HeightSampler): void {
     const b = player.body;
     const dt = FIXED_DT;
+    // Resolve this car's handling vault once (cheap guard — only re-resolves if
+    // the variant changes). Feature modules read `this.attribs.*`.
+    const variant = player.spec?.variant ?? 'sedan';
+    if (variant !== this.attribVariant) {
+      this.attribs = HANDLING[variant];
+      this.attribVariant = variant;
+    }
     if (!player.started) {
       player.started = true;
       b.wakeUp(); // bodies spawn asleep; velocity writes don't wake them
@@ -161,11 +184,13 @@ export class PlayerControl {
     // ---- the driving step proper. Run on a state view of `this` and copied
     // back — bit-identical to the inlined body, just relocated to ./driving. ----
     const s = {
+      variant, // per-variant engine model (Feature E) reads this; sedan = stock
       heading: this.heading,
       velAngle: this.velAngle,
       steer: this.steer,
       speed: this.speed,
       drifting: this.drifting,
+      driftState: this.driftState,
       boosting: this.boosting,
       boostMeter: this.boostMeter,
       boostHeld: this.boostHeld,
@@ -197,12 +222,13 @@ export class PlayerControl {
       airRoll: this.airRoll,
       boostCap: this.boostCap,
     };
-    stepDrive(s, player, input, heightAt);
+    stepDrive(s, player, input, heightAt, this.attribs);
     this.heading = s.heading;
     this.velAngle = s.velAngle;
     this.steer = s.steer;
     this.speed = s.speed;
     this.drifting = s.drifting;
+    this.driftState = s.driftState;
     this.boosting = s.boosting;
     this.boostMeter = s.boostMeter;
     this.boostHeld = s.boostHeld;

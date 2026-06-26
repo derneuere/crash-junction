@@ -57,6 +57,7 @@ import { resetModelPicker } from '../models';
 import { accumulatePanelDamage, makePanelBody, updatePanelFlap } from '../panels';
 import type { PanelState } from '../types';
 import { applySuspension, type HeightSampler } from '../suspension';
+import { HANDLING } from '../handling';
 import { PlayerControl } from '../control';
 import { Pickups } from '../pickups';
 import { Effects } from '../effects';
@@ -72,6 +73,99 @@ import {
   UP, _atF, _kickJ, _kickR, _ctrlInput, _contactIds, NO_CMDS,
   _shadowOrigin, _shadowRight, _shadowUp, _shadowTarget, _camDelta, _mbA, _mbB,
 } from './scratch';
+
+// ---------------------------------------------------------------------------
+// FEATURE F + G tuning — the crash-contact richness layer (BP's contact-impulse
+// model, §11 of RaceCarPhysics_findings.md) and the water kill switch (§10
+// UpdateInWaterBehaviour). These live HERE, with the code that reads them (the
+// crash glue is Game's), not in the shared constants.ts. Every new force below
+// is GUARDED by one of these strength scalars: set a scalar to 0 and that
+// behaviour vanishes (= today). Defaults are tuned so the SEDAN stays close to
+// its current feel; the per-variant CRASH-EXTRA factors (HANDLING.collision)
+// let the bus/tanker diverge more (they barely had distinct crash feel before).
+//
+// DETERMINISM: all of these run inside the fixed step / onCollide (already in
+// the deterministic domain). The only randomness drawn is from the seeded sim
+// RNG (simRand), and only where a draw already happened (the crash-spin sign,
+// mirroring applyShuntKick's "good impact" variation). No wall-clock, no
+// Math.random in any of this.
+
+/** CrashExtra spin (BP CrashExtra{Roll,Yaw,Linear}VelocityFactor, flat 0.3):
+ *  global master scalar on the per-variant factors injected at wreck entry.
+ *  The injected angular velocity = factor × CRASH_EXTRA_STRENGTH × impactNorm.
+ *  0 disables (= old hard wreck with no tumble energy). */
+const CRASH_EXTRA_STRENGTH = 1;
+/** Impact (m/s) that maps to a FULL crash-extra injection — the tumble energy
+ *  saturates here so a gentle bump into a wreck-trigger doesn't helicopter. */
+const CRASH_EXTRA_IMPACT_FULL = 16;
+/** Ceiling (rad/s) on each axis of the injected crash spin, so even a 40 m/s
+ *  boost-ram wreck tumbles believably rather than blurring. */
+const CRASH_EXTRA_SPIN_CAP = 5;
+
+/** SLAM one-shot (BP UpdateSlam): peak yaw-rate (rad/s) of the parabolic
+ *  env = r − r² wobble at the strongest slam. The envelope peaks at r=0.5 so a
+ *  slam ramps in then fades over its life. 0 disables the wobble. */
+const SLAM_KICK_STRENGTH = 2.0;
+/** SLAM life (s) — how long the one-shot wobble plays out. */
+const SLAM_LIFE = 0.5;
+/** SLAM rate limit (s): a fresh slam on the same car within this window is
+ *  ignored (BP AddSlam is rate-limited ≥0.5 s apart, ~2/s). */
+const SLAM_RATE_LIMIT = 0.5;
+
+/** Anisotropic car-to-car friction (BP ApplyCarContactImpulse, NON-crashing
+ *  path): per-step velocity bleed along the victim's three BODY axes — slides
+ *  along forward/up, grips laterally — so a controlled side contact scrubs
+ *  sideways energy without killing the car's drive. Master scalar; 0 disables.
+ *  Defaults kept SMALL so the sedan's contact feel barely shifts. */
+const CAR_FRICTION_STRENGTH = 1;
+/** Per-axis bleed fractions [forward (right axis ×), up (y), lateral (forward
+ *  axis ×)] applied as v −= scale·STRENGTH·(v·axis)·axis once per contact.
+ *  Lateral (the door-to-door grip) is the strongest; forward slides freely. */
+const CAR_FRICTION_FWD = 0.04; // along travel — slides, low grip
+const CAR_FRICTION_UP = 0.25; // vertical chatter — damped hard
+const CAR_FRICTION_LAT = 0.18; // sideways — grips, the directional crash feel
+
+/** Restitution by closing speed (BP ApplyWallContactImpulse inline 0.65/0.70):
+ *  the tangential bounce a SLAMMED victim gets back off the contact. e is 0.65
+ *  normally, 0.70 for a harder hit. Master scalar gates the whole reflection;
+ *  0 = no added bounce (= today, cannon's own restitution only). */
+const CONTACT_RESTITUTION_STRENGTH = 0.5;
+const CONTACT_E_LOW = 0.65;
+const CONTACT_E_HIGH = 0.7;
+const CONTACT_E_HARD_CLOSING = 8; // m/s above which the harder e applies
+
+/** Crash master-switch raw-tumble damping (BP UpdateCrashing per-axis
+ *  vlogefp/vexptefp decay): a CRASHED car's spin bleeds off exponentially each
+ *  step (the controlled-contact friction is swapped out for this raw tumble).
+ *  Per-axis half-life-ish factors per second; 1 = no damping. Roll/pitch settle
+ *  faster than yaw so a wreck stops cartwheeling but can keep spinning flat. */
+const CRASH_TUMBLE_DAMP_ROLL = 0.85; // x axis spin/s retained
+const CRASH_TUMBLE_DAMP_YAW = 0.95; // y axis spin/s retained
+const CRASH_TUMBLE_DAMP_PITCH = 0.85; // z axis spin/s retained
+
+/** Feature G — WATER KILL (BP UpdateInWaterBehaviour: a hard kill, not
+ *  buoyancy). A car whose chassis sinks this far BELOW the level's seaLevel is
+ *  declared drowned: its linear+angular velocity and pending force/torque rows
+ *  are zeroed (it stops dead and sinks), then the off-track/respawn path the
+ *  mode already runs recovers the player. WATER_KILL_DEPTH is how far under the
+ *  surface counts as "deep enough" (BP gates on a depth scalar < threshold). */
+const WATER_KILL_DEPTH = 1.5;
+
+/** A live parabolic SLAM wobble (BP SlamEffect): the seeded yaw sign + the peak
+ *  rate + remaining life. Folded into the victim's angular velocity each step
+ *  via env = r − r² until life expires. */
+interface SlamEffect {
+  sign: number; // ±1 — which way the wobble throws (seeded at AddSlam)
+  peak: number; // peak yaw rate (rad/s) at the envelope's midpoint
+  life: number; // seconds remaining
+  total: number; // original life (for the r = life/total envelope)
+  applied: number; // the yaw-rate this wobble has currently folded in (for the delta)
+}
+
+// Feature F/G scratch — a module-local CANNON vector reused per call (no per-
+// step alloc), kept here in core.ts (we own it) rather than the shared
+// scratch.ts which other tasks also touch.
+const _bodyAxis = new CANNON.Vec3();
 
 export class Game {
   readonly events = new Emitter<GameEvents>();
@@ -147,6 +241,12 @@ export class Game {
   private deformQueue: DeformJob[] = [];
   private pairCooldown = new Map<string, number>();
   private checked = new Map<number, number>(); // bodyId → simTime of the shunt
+  // Feature F SLAM one-shots (BP SlamEffect): bodyId → the live parabolic yaw
+  // wobble a slammed car is playing out. Stepped + drained in stepControls;
+  // pin-safe (lives entirely in the deterministic step). lastSlamAt rate-limits
+  // a fresh slam on the same car (BP AddSlam ≥0.5 s apart).
+  private slamEffects = new Map<number, SlamEffect>();
+  private lastSlamAt = new Map<number, number>();
   // near-miss boost credit (B3/BP "Driving Skills"): bodyId → simTime a close
   // pass was last credited, so one fly-by earns once, not every step
   private nearMissAt = new Map<number, number>();
@@ -980,6 +1080,8 @@ export class Game {
     this.fx.reset();
     this.pairCooldown.clear();
     this.checked.clear();
+    this.slamEffects.clear();
+    this.lastSlamAt.clear();
     this.nearMissAt.clear();
     this.deformQueue.length = 0;
 
@@ -1338,6 +1440,9 @@ export class Game {
           // applyShuntKick). self is the aggressor and powers through.
           this.applyShuntKick(oa, e, out.shoveOther, impact, self, true);
         }
+        // SLAM one-shot (Feature F): a rival slammed loose gets the parabolic
+        // yaw wobble on top of the shove (queued, stepped in stepControls).
+        if (out.slamOther > 0) this.queueSlam(oa, e, out.slamOther);
       }
       if (out.destabilizeSelf > 0 && !self.crashed) {
         if (self.destabilized <= 0 && self.isPlayer) {
@@ -1355,10 +1460,13 @@ export class Game {
           // player out. oa is the aggressor here and powers through.
           this.applyShuntKick(self, e, out.shoveSelf, impact, oa, true);
         }
+        // SLAM one-shot (Feature F): self is the slammed car — the parabolic
+        // yaw wobble that makes a slam FELT (queued, stepped in stepControls).
+        if (out.slamSelf > 0) this.queueSlam(self, e, out.slamSelf);
       }
-      if (out.wreckOther && oa) this.markCrashed(oa);
+      if (out.wreckOther && oa) this.markCrashed(oa, impact);
       if (out.wreckSelf) {
-        this.markCrashed(self);
+        this.markCrashed(self, impact);
         if (self.isPlayer && this.state === GameState.Launch) this.enterCrashTime();
       }
       if (out.wallGlance && self.isPlayer) this.applyWallGlance(e, wallDir);
@@ -1513,6 +1621,27 @@ export class Game {
     const r = victimIsBi ? c.ri : c.rj;
     _kickR.set(r.x, r.y, r.z);
     vb.applyImpulse(_kickJ, _kickR);
+    // Restitution by closing speed (Feature F, BP ApplyWallContactImpulse): a
+    // SLAMMED victim that's NOT yet a wreck gets a little of the contact back as
+    // a bounce along the push normal — e = 0.65 normally, 0.70 for a harder hit
+    // (BP's inline literals). Gated by the master scalar (0 = today, cannon's
+    // own restitution only) and skipped for crashed cars (they take the raw
+    // tumble, not a controlled bounce).
+    if (CONTACT_RESTITUTION_STRENGTH > 0 && !victim.crashed) {
+      const e = impact > CONTACT_E_HARD_CLOSING ? CONTACT_E_HIGH : CONTACT_E_LOW;
+      const bounce = shove * gate * e * CONTACT_RESTITUTION_STRENGTH;
+      vb.velocity.x += nx * bounce;
+      vb.velocity.z += nz * bounce; // road-plane only — never loft off a bumper
+    }
+    // Anisotropic car-to-car friction (Feature F, BP ApplyCarContactImpulse,
+    // NON-crashing path): bleed velocity along the victim's three BODY axes with
+    // different per-axis scales — slides forward, grips sideways, damps vertical
+    // chatter — so a side contact scrubs lateral energy without killing the
+    // car's drive. Skipped for wrecks (the raw tumble owns them). Gated by the
+    // master scalar (0 = today).
+    if (CAR_FRICTION_STRENGTH > 0 && !victim.crashed) {
+      this.applyAnisoFriction(vb);
+    }
     // Re-clamp vertical — a shunt is a road-plane event, nobody gets lofted off
     // a bumper (same ceiling the destabilized-slide rule uses).
     if (vb.velocity.y > LIVE_CAR_CONTACT_VY) vb.velocity.y = LIVE_CAR_CONTACT_VY;
@@ -1538,6 +1667,153 @@ export class Game {
     }
   }
 
+  /** Anisotropic car-to-car contact friction (Feature F, BP
+   *  ApplyCarContactImpulse): remove a fraction of the body's velocity along
+   *  each of its THREE body axes, with a different scale per axis — forward
+   *  slides (low grip), lateral grips (the directional crash feel), vertical
+   *  chatter damps hard. Reads the body's orientation columns straight off the
+   *  quaternion; pure velocity edit, deterministic. */
+  private applyAnisoFriction(vb: CANNON.Body): void {
+    const s = CAR_FRICTION_STRENGTH;
+    const v = vb.velocity;
+    const q = vb.quaternion;
+    // forward axis = hull -z (CJ convention); right axis = +x. vmult rotates the
+    // body-local unit vector into world space.
+    const bleed = (lx: number, ly: number, lz: number, scale: number): void => {
+      _bodyAxis.set(lx, ly, lz);
+      q.vmult(_bodyAxis, _bodyAxis); // → world axis (unit, q normalized)
+      const along = v.x * _bodyAxis.x + v.y * _bodyAxis.y + v.z * _bodyAxis.z;
+      const k = scale * s * along;
+      v.x -= _bodyAxis.x * k;
+      v.y -= _bodyAxis.y * k;
+      v.z -= _bodyAxis.z * k;
+    };
+    bleed(0, 0, -1, CAR_FRICTION_FWD); // along travel — slides
+    bleed(1, 0, 0, CAR_FRICTION_LAT); // sideways — grips
+    bleed(0, 1, 0, CAR_FRICTION_UP); // vertical — damped
+  }
+
+  /** Queue a one-shot SLAM wobble (Feature F, BP AddSlam/UpdateSlam): a
+   *  parabolic yaw kick (env = r − r², peaks mid-life) that ramps in then fades
+   *  over SLAM_LIFE, rate-limited per car (~2/s). `strength` (0..1, from the
+   *  resolveContact slam intent, scaled by impact) sets the peak; the sign is
+   *  seeded from the contact's lateral side + a seeded "good slam" variation so
+   *  flank slams throw the car the way it was hit and repeats never feel
+   *  identical. Stepped + drained in stepControls. Deterministic. */
+  private queueSlam(victim: Actor, e: CollideEvent, strength: number): void {
+    if (SLAM_KICK_STRENGTH <= 0 || victim.crashed) return;
+    const id = victim.body.id;
+    if (this.simTime - (this.lastSlamAt.get(id) ?? -9) < SLAM_RATE_LIMIT) return;
+    this.lastSlamAt.set(id, this.simTime);
+    // which way the wobble throws: the contact normal's lateral component
+    // relative to the victim's heading. ni points bi→bj; orient it to push away
+    // from the rammer like applyShuntKick does. The push direction baked into
+    // the contact normal carries which side the hit landed on.
+    const c = e.contact;
+    const victimIsBi = c.bi === victim.body;
+    const ns = victimIsBi ? -1 : 1;
+    const nx = c.ni.x * ns;
+    const nz = c.ni.z * ns;
+    // sign = cross of the victim's forward (travel) and the push direction —
+    // which side the hit landed on; fall back to the push's x sign if stopped.
+    const v = victim.body.velocity;
+    const sp = Math.hypot(v.x, v.z);
+    let sign: number;
+    if (sp > 1) sign = Math.sign(v.z * nx - v.x * nz) || 1;
+    else sign = Math.sign(nx) || 1;
+    // seeded variation so the wobble isn't metronomic (same RNG the shunt uses)
+    const variation = 1 + (simRand() * 2 - 1) * SHUNT_GOOD_IMPACT_VAR;
+    this.slamEffects.set(id, {
+      sign,
+      peak: SLAM_KICK_STRENGTH * Math.min(1, strength) * variation,
+      life: SLAM_LIFE,
+      total: SLAM_LIFE,
+      applied: 0,
+    });
+  }
+
+  /** Step every live SLAM wobble (Feature F, BP UpdateSlam): decay life by dt
+   *  and, while alive, fold the parabolic envelope env = r − r² (r = life/total,
+   *  peaks at r=0.5) into the victim's yaw rate. A slam that wrecks its car, or
+   *  whose car despawned, is dropped. Runs inside the fixed step — deterministic. */
+  private stepSlams(): void {
+    if (this.slamEffects.size === 0) return;
+    for (const [id, s] of this.slamEffects) {
+      const a = this.byBody.get(id);
+      if (!a || a.crashed) {
+        // a slam that wrecked its car (or whose car despawned) is dropped — a
+        // wreck keeps whatever spin it had as part of its tumble (the
+        // crash-tumble damping owns it from here).
+        this.slamEffects.delete(id);
+        continue;
+      }
+      s.life -= FIXED_DT;
+      // target wobble yaw-rate this step: sign × peak × env, where env = r − r²
+      // (peaks 0.25 at r=0.5) ×4 normalises the peak to the configured rate. We
+      // apply only the DELTA from last step's contribution, so the body's yaw
+      // RAMPS to peak at mid-life then back to ~0 as the slam fades — a wobble,
+      // not an accumulating spin. On expiry the final target is 0, so the slam
+      // removes exactly what it added.
+      const r = s.life > 0 ? s.life / s.total : 0;
+      const target = s.sign * s.peak * (r - r * r) * 4;
+      a.body.angularVelocity.y += target - s.applied;
+      s.applied = target;
+      // keep it from helicoptering — same ceiling the shunt yaw uses
+      const yw = a.body.angularVelocity.y;
+      if (yw > SHUNT_YAW_MAX) a.body.angularVelocity.y = SHUNT_YAW_MAX;
+      else if (yw < -SHUNT_YAW_MAX) a.body.angularVelocity.y = -SHUNT_YAW_MAX;
+      a.body.wakeUp();
+      if (s.life <= 0) this.slamEffects.delete(id);
+    }
+  }
+
+  /** Feature F crash master-switch + Feature G water kill, per fixed step.
+   *
+   *  CRASH MASTER SWITCH (BP UpdateCrashing): CJ's `crashed` flag is the master
+   *  gate — a crashed car is past controlled contact, so instead of the
+   *  anisotropic contact friction (applyShuntKick, gated on !crashed) it takes
+   *  a RAW per-axis exponential spin damp here. This is the formalised swap the
+   *  spec asks for: one `crashed` gate, controlled-contact one side, raw tumble
+   *  the other — no duplicate state, layered on the existing crashed/destabilized.
+   *
+   *  WATER KILL (Feature G, BP UpdateInWaterBehaviour — a hard kill, not
+   *  buoyancy): a car whose chassis has sunk WATER_KILL_DEPTH below the level's
+   *  seaLevel is drowned — zero its linear+angular velocity AND the pending
+   *  force/torque rows (so nothing this step re-accelerates the corpse), then
+   *  let the mode's existing off-track rescue recover the player (the un-crashed
+   *  player below the surface always reads off-track) or leave a wreck to sink.
+   *  Deterministic: seaLevel is a level constant, the depth test is a pure read. */
+  private stepCrashTumbleAndWater(): void {
+    const seaLevel = this.level.coast?.seaLevel;
+    const drownY = seaLevel !== undefined ? seaLevel - WATER_KILL_DEPTH : -Infinity;
+    for (const a of this.actors) {
+      if (a.kind !== 'vehicle') continue;
+      // Feature G — water kill first: a drowned car is dead, no tumble.
+      if (a.body.position.y < drownY) {
+        const v = a.body.velocity;
+        const av = a.body.angularVelocity;
+        if (v.x !== 0 || v.y !== 0 || v.z !== 0 || av.x !== 0 || av.y !== 0 || av.z !== 0) {
+          v.set(0, 0, 0);
+          av.set(0, 0, 0);
+          a.body.force.set(0, 0, 0); // zero the accumulated force row (BP)
+          a.body.torque.set(0, 0, 0); // and the torque row
+        }
+        // off-track rescue is mode-owned (race director) and already covers a
+        // live player carried over the edge; a wrecked car just sinks in place.
+        continue;
+      }
+      // Feature F — crash master switch: raw per-axis tumble damping. Only a
+      // CRASHED car (controlled contact is off) gets the raw decay; live cars
+      // keep their angular velocity for the driving model. Per-axis factors are
+      // per-second, so raise to dt for a frame-rate-independent decay.
+      if (!a.crashed) continue;
+      const av = a.body.angularVelocity;
+      av.x *= CRASH_TUMBLE_DAMP_ROLL ** FIXED_DT;
+      av.y *= CRASH_TUMBLE_DAMP_YAW ** FIXED_DT;
+      av.z *= CRASH_TUMBLE_DAMP_PITCH ** FIXED_DT;
+    }
+  }
+
   /** The named signature theatre the victim wrecked inside, or null. Zones are
    *  circles in the race def with no colliders — the red/white wall stays the
    *  actual wrecking surface; the classifier turns a non-null name into a
@@ -1555,8 +1831,13 @@ export class Game {
 
   /** Wreck an actor: the full collision mask returns (wrecks tumble over
    *  ramps and plinths) and each non-player vehicle charges the
-   *  crashbreaker a step, Burnout-Revenge style. */
-  private markCrashed(a: Actor): void {
+   *  crashbreaker a step, Burnout-Revenge style.
+   *
+   *  `impact` (the closing speed that caused the wreck, m/s) drives the Feature
+   *  F CrashExtra spin injection: a fresh wreck gets extra tumble energy scaled
+   *  by the hit. Omitted (debug/blast paths) ⇒ no injection, so those callers
+   *  keep their current behaviour. */
+  private markCrashed(a: Actor, impact = 0): void {
     if (a.crashed) return;
     this.perf.tag('wreck');
     if (a.isPlayer && this.replay) {
@@ -1580,6 +1861,42 @@ export class Game {
     // chain reward you built up is the thing you lose when you wreck.
     if (a.isPlayer) this.control.resetBoostBar();
     if (!a.isPlayer && a.kind === 'vehicle') this.mode.score?.chargeCrashbreaker();
+    // CrashExtra spin (Feature F, BP CrashExtra{Roll,Yaw,Linear}VelocityFactor):
+    // a fresh wreck gets extra tumble energy — angular velocity injected per
+    // body axis from the per-VARIANT collision factors (HANDLING.collision,
+    // flat 0.3 in BP), scaled by the impact that caused it. This is what turns a
+    // hard takedown into a cartwheel instead of a dead stop. The raw-tumble
+    // damping in stepControls then bleeds it off (the crash master-switch).
+    if (a.kind === 'vehicle' && impact > 0) this.injectCrashExtra(a, impact);
+  }
+
+  /** Inject the BP CrashExtra tumble energy onto a fresh wreck (Feature F).
+   *  Reads the actor's per-variant collision factors and adds angular velocity
+   *  per body axis (roll/yaw) plus a small linear lift, scaled by normalised
+   *  impact and the global strength scalar, capped per axis. The roll/yaw sign
+   *  is seeded (same RNG the shunt's "good impact" draw uses) so a wreck doesn't
+   *  always tumble the same way. Deterministic; gated by CRASH_EXTRA_STRENGTH
+   *  (0 = a dead-stop wreck, the old behaviour). */
+  private injectCrashExtra(a: Actor, impact: number): void {
+    if (CRASH_EXTRA_STRENGTH <= 0) return;
+    const col = HANDLING[a.spec?.variant ?? 'sedan'].collision;
+    const imp = Math.min(1, impact / CRASH_EXTRA_IMPACT_FULL);
+    const base = CRASH_EXTRA_STRENGTH * imp;
+    // seeded ± sign per rotational axis so tumbles vary (pin-safe seeded RNG)
+    const rollSign = simRand() < 0.5 ? -1 : 1;
+    const yawSign = simRand() < 0.5 ? -1 : 1;
+    const cap = (x: number): number => Math.max(-CRASH_EXTRA_SPIN_CAP, Math.min(CRASH_EXTRA_SPIN_CAP, x));
+    const av = a.body.angularVelocity;
+    // BP CrashExtra factors are in its internal angular unit; here they scale a
+    // believable rad/s tumble. Pitch is 0 in BP (CrashExtraPitch = 0 roster-
+    // wide) so only roll (x) + yaw (y) get injected.
+    av.x = cap(av.x + col.crashExtraRoll * base * rollSign * CRASH_EXTRA_SPIN_CAP);
+    av.y = cap(av.y + col.crashExtraYaw * base * yawSign * CRASH_EXTRA_SPIN_CAP);
+    // a small upward kick (CrashExtraLinear) so the wreck hops as it breaks
+    // loose — clamped to the same road-plane ceiling a shunt uses.
+    a.body.velocity.y += col.crashExtraLinear * base * LIVE_CAR_CONTACT_VY;
+    if (a.body.velocity.y > LIVE_CAR_CONTACT_VY) a.body.velocity.y = LIVE_CAR_CONTACT_VY;
+    a.body.wakeUp();
   }
 
   /** Shallow wall touch at racing speed: scrub a little speed and point the
@@ -1786,6 +2103,13 @@ export class Game {
         this.control.speed = Math.hypot(v.x, v.z);
       }
     }
+
+    // Feature F: step the one-shot SLAM wobbles + the crash master-switch raw
+    // tumble, and Feature G: the water kill switch — all inside the fixed step,
+    // before the player-drive block, so a fresh slam/water-kill is felt this
+    // step (and crashed cars take the raw tumble, not the controlled contact).
+    this.stepSlams();
+    this.stepCrashTumbleAndWater();
 
     // the player drives for real (until they crash or get slammed loose —
     // then physics owns the car)
