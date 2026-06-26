@@ -10,6 +10,7 @@ import {
   SUSP_MAX_COMP,
   WRECK_GRIP,
 } from './constants';
+import { HANDLING } from './handling';
 import { GameState, type Actor } from './types';
 
 // Four virtual wheel rays per car, solved analytically against the level's
@@ -27,6 +28,41 @@ const _sR = new CANNON.Vec3();
 const _sPv = new CANNON.Vec3();
 const _sF = new CANNON.Vec3();
 const Y_AXIS = new CANNON.Vec3(0, 1, 0);
+
+// Feature B — weight transfer as additive external spring force
+// (docs/research/physics-overhaul-spec.md). BP injects a clamped weight-transfer
+// vector as additive F_ext onto each spring (CalculateWeightTransfer in
+// RaceCarPhysics_findings.md §5) — it NEVER moves the COM. CJ until now only
+// added speed²-downforce; brake-dive / throttle-squat / corner-lean were
+// visual-only. Here each corner spring gains an external load term derived from
+// the body's longitudinal & lateral acceleration THIS step:
+//   Fext = clamp( load * (aLong·signFrontRear·kZ + aLat·signLeftRight·kX) )
+// so the front corners press harder under braking, the rear under throttle, and
+// the outside under cornering (→ more grip once the Feature-C grip curve lands).
+// kX/kZ are the per-variant body-roll weight factors (HANDLING[variant].bodyroll).
+
+// Master strength scalar — dial to 0 to reproduce the old (downforce-only)
+// behaviour exactly; ~1 is the BP-grounded feel. Sedan defaults keep the feel
+// close to today (small kX/kZ); bus/tanker diverge more (heavier transfer).
+const WEIGHT_TRANSFER_STRENGTH = 1;
+// Clamp each corner's external load to this fraction of its STATIC load
+// (s.preload = mass/4·g). Keeps a hard brake or a sharp swerve from lifting a
+// corner spring to absurd force / spiking the contact solver — BP likewise
+// clamps mWeightTransfer to a bounded 3-vector before distributing it.
+const WEIGHT_TRANSFER_CLAMP = 0.6;
+
+// Previous-frame world velocity per actor, so longitudinal/lateral acceleration
+// can be differenced INSIDE this module without a new caller argument or an
+// edit to the Actor type (this is where the suspension/spring state lives). A
+// WeakMap keyed by the actor is deterministic — population order follows the
+// fixed-step actor list, no wall-clock / RNG involved — and self-cleans when an
+// actor is dropped. First frame for an actor has no previous sample → zero
+// accel → zero transfer (a clean, side-effect-free warm-up).
+const _prevVel = new WeakMap<Actor, CANNON.Vec3>();
+const _sFwd = new CANNON.Vec3(); // body forward axis (−z local), world space
+const _sRight = new CANNON.Vec3(); // body right axis (+x local), world space
+const FWD_LOCAL = new CANNON.Vec3(0, 0, -1);
+const X_AXIS = new CANNON.Vec3(1, 0, 0);
 
 /** The driving surface, decomposed (elevation.md Phase 1):
  *    total(x, z)  = base(x, z) + feature(x, z)   — what the wheels ride
@@ -57,6 +93,32 @@ export function applySuspension(actors: Actor[], state: GameState, heightAt: Hei
     let grounded = 0;
     let fSum = 0;
 
+    // ---- Feature B: this step's body-frame acceleration -> weight transfer ---
+    // Difference world velocity against last frame's stored sample, project onto
+    // the body forward/right axes for longitudinal (aLong) & lateral (aLat)
+    // accel. Like the downforce below it only runs while DRIVING (a wreck tumbles
+    // free; the start line is inert), and it's gated to zero by the strength
+    // scalar. kZ/kX are the per-variant body-roll weight factors. Computed once
+    // per car here, consumed per corner in the spring loop. prevVel is refreshed
+    // at the END of the car's iteration so the difference always spans one frame.
+    const roll = HANDLING[a.spec.variant].bodyroll;
+    let aLong = 0;
+    let aLat = 0;
+    const wtActive = WEIGHT_TRANSFER_STRENGTH > 0 && !a.crashed && state !== GameState.Idle;
+    if (wtActive) {
+      const prev = _prevVel.get(a);
+      if (prev) {
+        b.quaternion.vmult(FWD_LOCAL, _sFwd); // forward (−z local), world
+        b.quaternion.vmult(X_AXIS, _sRight); // right (+x local), world
+        // world Δv/dt projected onto each body axis (reuse _sPv as scratch)
+        _sPv.copy(b.velocity);
+        _sPv.vsub(prev, _sPv);
+        _sPv.scale(1 / FIXED_DT, _sPv);
+        aLong = _sPv.dot(_sFwd); // +accelerating forward, − braking
+        aLat = _sPv.dot(_sRight); // +accelerating rightward
+      }
+    }
+
     for (const s of a.susp) {
       s.grounded = false;
       if (_sUp.y < 0.35) {
@@ -76,6 +138,25 @@ export function applySuspension(actors: Actor[], state: GameState, heightAt: Hei
       _sPv.vadd(b.velocity, _sPv); // wheel-anchor velocity
       // sag < 1 = crash-bent corner carrying less load (axle sag lean)
       let f = (s.preload + s.k * comp) * s.sag - s.c * _sPv.dot(_sUp);
+      // Feature B: additive external load. signFrontRear = sign(az) (front az<0
+      // loads under braking, rear az>0 under throttle); signLeftRight = −sign(ax)
+      // (the OUTSIDE corner loads in a turn). massLoad = the corner's STATIC load
+      // (s.preload), so the transfer is a fraction of the weight the spring
+      // already carries. Clamped to ±WEIGHT_TRANSFER_CLAMP of that static load so
+      // a hard brake / sharp swerve can't pole-vault or null a corner spring.
+      // Folded in only while driving (aLong/aLat are 0 otherwise) — never on a
+      // wreck — and scaled by the master strength scalar (0 = old behaviour).
+      if (wtActive) {
+        const signFR = Math.sign(s.az); // front −1, rear +1
+        const signLR = -Math.sign(s.ax); // outside-loads-in-a-turn
+        let fext =
+          s.preload * (aLong * signFR * roll.factorOfWeightZ + aLat * signLR * roll.factorOfWeightX);
+        fext *= WEIGHT_TRANSFER_STRENGTH * s.sag; // a bent corner transfers less
+        const cap = s.preload * WEIGHT_TRANSFER_CLAMP;
+        if (fext > cap) fext = cap;
+        else if (fext < -cap) fext = -cap;
+        f += fext;
+      }
       if (f <= 0) continue; // springs can't pull
       if (f > s.fmax) f = s.fmax;
       _sUp.scale(f, _sF);
@@ -152,5 +233,18 @@ export function applySuspension(actors: Actor[], state: GameState, heightAt: Hei
       }
       b.angularVelocity.y *= 1 - Math.min(0.5, 1.8 * FIXED_DT); // spin-down
     }
+
+    // Feature B: store THIS frame's incoming velocity for next frame's accel
+    // difference. Captured fresh each call (not the intra-frame-mutated value —
+    // the landing-absorb above only touches v.y) so the difference always spans
+    // exactly one fixed step. Stored unconditionally so the sample never goes
+    // stale (a car that was crashed/idle then resumes driving warms up from a
+    // current sample rather than a frame-old one → no transfer spike on resume).
+    let store = _prevVel.get(a);
+    if (!store) {
+      store = new CANNON.Vec3();
+      _prevVel.set(a, store);
+    }
+    store.copy(b.velocity);
   }
 }
