@@ -82,6 +82,12 @@ const STEER_MIN_AT = 38; // m/s — lock fades fast: gripped steering is for
 //                          (BP SpeedForMinAngle is 90+ mph; ours is tighter
 //                          because the map is tiny)
 const STEER_RAMP = 1 / 0.4; // full lock in 0.4 s
+// VISUAL-ONLY gain on the front-wheel render angle (steerAngle), read by
+// Game.updateWheels — NOT the handling lock. The physics lock above is tuned
+// for ramming feel, but at that angle the cranked wheels barely read from the
+// chase cam; exaggerating the rendered turn (≈40° at full low-speed lock) makes
+// the steer obvious without touching handling. Pure presentation → replay-safe.
+const VISUAL_STEER_GAIN = 1.8;
 const CENTER_BIAS = 2.5;
 const WHEELBASE = 2.95;
 
@@ -510,10 +516,12 @@ export class PlayerControl {
     // MaxAngle at low speed lerps down to MinAngle by SpeedForMinAngle. this.steer
     // is already eased toward input, so steerAngle is smooth with no extra easing.
     // Game.updateWheels yaws the front wheel meshes by this; the sim never reads it.
+    // VISUAL_STEER_GAIN exaggerates the RENDERED turn for readability (the handling
+    // lock is unchanged) — see the constant's note.
     const lockVis =
       STEER_LOCK_LOW +
       (STEER_LOCK_HIGH - STEER_LOCK_LOW) * clamp((this.speed - STEER_FULL_BELOW) / (STEER_MIN_AT - STEER_FULL_BELOW), 0, 1);
-    this.steerAngle = lockVis * this.steer;
+    this.steerAngle = lockVis * this.steer * VISUAL_STEER_GAIN;
     // raw input flags for the wheelspin/lockup spin model (presentation-only)
     this.throttling = input.throttle;
     this.braking = input.brake;
