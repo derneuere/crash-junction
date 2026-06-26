@@ -2,10 +2,37 @@ import * as CANNON from 'cannon-es';
 import { FIXED_DT } from './constants';
 import { GameState, type Actor } from './types';
 import type { HeightSampler } from './suspension';
+import { createForceState, stepVehicleForces, type VehicleForceState } from './control/driving';
+import type { ControlInput } from './control/input';
+import { HANDLING } from './handling';
+import { clamp, wrapAngle } from './control/constants';
 
 const X_AXIS = new CANNON.Vec3(1, 0, 0);
 const Z_AXIS = new CANNON.Vec3(0, 0, 1);
 const _qTilt = new CANNON.Quaternion();
+
+// ---- force-port: traffic now drives the SAME force solver as the player ----
+// Each traffic car carries a lightweight VehicleForceState (createForceState),
+// seeded the first frame it is stepped (deterministic: from its spawn dir +
+// current speed). A scripted ControlInput (steer/throttle/brake) computed from
+// the cruise/brake/yield decision below is fed to stepVehicleForces, replacing
+// the old velocity/quaternion writes. At junction crawl speed the steering lock
+// fades and the car loses lateral authority to hold its lane, so a gentle
+// DAMPED YAW-ASSIST TORQUE (not a quaternion pin) nudges the heading back onto
+// the lane axis — honoring the grounded yaw-only lock (it is a pure yaw torque).
+const _trafficForce = new WeakMap<Actor, VehicleForceState>();
+const _tFwd = new CANNON.Vec3();
+const FWD_LOCAL_T = new CANNON.Vec3(0, 0, -1);
+const _yawAssist = new CANNON.Vec3();
+// Lane-hold PD (N·m, scaled by mass/1450). STARTING values — re-tune: lane
+// drift through the box = too low; oscillation = too high.
+const LANE_HOLD_KP = 2.5;
+const LANE_HOLD_KD = 1.4;
+
+/** Heading the car should hold = its spawn lane direction (dir is unit). */
+function laneHeading(dir: { x: number; z: number }): number {
+  return Math.atan2(dir.x, dir.z);
+}
 
 // Scripted traffic AI. Cars cruise their lane, brake behind anything in it,
 // yield at the junction box to crossing traffic and wrecks, and loop back
@@ -95,37 +122,46 @@ export function updateTraffic(actors: readonly Actor[], state: GameState, simTim
 
     a.curSpeed += Math.max(-BRAKE * FIXED_DT, Math.min(ACCEL * FIXED_DT, target - a.curSpeed));
     if (a.curSpeed < 0) a.curSpeed = 0;
-    b.velocity.set(d.x * a.curSpeed, b.velocity.y, d.z * a.curSpeed);
 
-    // on level road, hard-lock the heading; on a ramp or airborne, let the
-    // suspension pitch the car naturally and only pin the yaw. Like the
-    // player pin (control.ts), the test reads FEATURE slope only and the
-    // lock pins to the local road plane — so traffic on a graded road (none
-    // exists today; gantry runs no traffic) would still hold its lane
-    // instead of never re-pinning. On flat ground the differentials are
-    // exactly 0 and this is bit-identical to the old world-flat lock.
-    const baseF = heightAt.base(b.position.x + d.x * 1.6, b.position.z + d.z * 1.6);
-    const baseA = heightAt.base(b.position.x - d.x * 1.6, b.position.z - d.z * 1.6);
-    const slope = Math.abs(
-      heightAt(b.position.x + d.x * 1.6, b.position.z + d.z * 1.6) - baseF -
-        (heightAt(b.position.x - d.x * 1.6, b.position.z - d.z * 1.6) - baseA),
-    );
+    // ---- force-port: drive the body via the shared solver instead of writing
+    // velocity/quaternion. a.curSpeed is the cruise/brake/yield TARGET pace
+    // (unchanged decision logic above); turn it into throttle/brake bangs and a
+    // lane-holding steer for stepVehicleForces. ------------------------------
+    b.quaternion.vmult(FWD_LOCAL_T, _tFwd); // hull forward, world
+    const bodyHeading = Math.atan2(_tFwd.x, _tFwd.z);
+    const planar = Math.hypot(b.velocity.x, b.velocity.z);
+    const fwdSpeed = b.velocity.x * _tFwd.x + b.velocity.z * _tFwd.z; // signed
+    const lane = laneHeading(d);
+    const headErr = wrapAngle(lane - bodyHeading); // + = lane is to our left
+
+    let fs = _trafficForce.get(a);
+    if (!fs) {
+      fs = createForceState(a.spec?.variant ?? 'sedan', lane, a.curSpeed);
+      _trafficForce.set(a, fs);
+    }
+    fs.heading = bodyHeading;
+    fs.velAngle = planar > 0.05 ? Math.atan2(b.velocity.x, b.velocity.z) : bodyHeading;
+    fs.speed = Math.max(0, fwdSpeed);
+    fs.variant = a.spec?.variant ?? 'sedan';
+
+    const tInput: ControlInput = {
+      steer: clamp(-headErr * 1.8, -1, 1), // hold the lane axis; sign per +1=right
+      throttle: a.curSpeed > fwdSpeed + 0.3,
+      boost: false,
+      brake: a.curSpeed < fwdSpeed - 0.3 || a.curSpeed <= 0.01,
+    };
+    stepVehicleForces(fs, a, tInput, heightAt, HANDLING[a.spec?.variant ?? 'sedan']);
+
+    // crawl-speed lateral authority: below the steering lock's effective band
+    // the steer command alone can't hold the lane, so add a damped yaw-assist
+    // TORQUE toward the lane axis (pure yaw -> honors the grounded lock). Gated
+    // off when nearly stopped (a parked car at a red shouldn't creep-rotate).
     const grounded = a.susp.some((sp) => sp.grounded);
-    if (grounded && slope < 0.02) {
-      b.angularVelocity.set(0, 0, 0);
-      b.quaternion.copy(a.q0);
-      const baseR = heightAt.base(b.position.x - d.z * 1.6, b.position.z + d.x * 1.6); // lane right
-      const baseL = heightAt.base(b.position.x + d.z * 1.6, b.position.z - d.x * 1.6);
-      if (baseF !== baseA || baseR !== baseL) {
-        _qTilt.setFromAxisAngle(X_AXIS, Math.atan2(baseF - baseA, 3.2));
-        b.quaternion.mult(_qTilt, b.quaternion);
-        _qTilt.setFromAxisAngle(Z_AXIS, Math.atan2(baseR - baseL, 3.2));
-        b.quaternion.mult(_qTilt, b.quaternion);
-      }
-    } else {
-      b.angularVelocity.y = 0;
-      b.angularVelocity.x *= 0.99;
-      b.angularVelocity.z *= 0.99;
+    if (grounded && a.curSpeed > 0.5) {
+      const mScale = b.mass / 1450;
+      const tau = (LANE_HOLD_KP * headErr - LANE_HOLD_KD * b.angularVelocity.y) * mScale;
+      _yawAssist.set(0, tau, 0);
+      b.applyTorque(_yawAssist);
     }
   }
 }

@@ -127,6 +127,15 @@ export const BURNOUT_ACCEL = 11; // Burnout-state accel — markedly stronger
 export const KICK_ACCEL = 15;
 export const KICK_TIME = 0.75;
 export const KICK_BELOW = 42;
+// ---- boost-kick wheelie (the boost-kick is a wheelie
+// generator that self-limits past a max angle; 2.0s cooldown). The kick FORCE
+// itself is the KICK_ACCEL add already in the speed economy; these tune the
+// nose-up POSE the kick produces. ----
+export const KICK_COOLDOWN = 2.0; // s min gap since last boost-kick
+export const WHEELIE_RISE = 1 / 0.18; // 1/s — cosmetic nose-up ramps in fast on the kick
+export const WHEELIE_DECAY = 1 / 0.3; // 1/s — eases back down after the kick window
+export const WHEELIE_PITCH_MAX = 0.22; // rad (~13°) cosmetic grounded nose-up self-limit
+export const WHEELIE_AIR_SEED = 0.3; // rad — physical air-pitch seed if we launch mid-kick (< MAX_WHEELIE_ANGLE 0.38)
 export const BRAKE_DECEL = 26;
 export const COAST_DRAG = 4.5; // m/s² rolloff with no throttle
 
@@ -201,6 +210,17 @@ export const DRIFT_ANGDAMP_STRENGTH = 1.0; // 0 = no extra spin bleed
 // more of the soft centre. STEER_SHAPE_BLEND = 0 ⇒ pure linear (= today).
 export const STEER_SHAPE_BLEND = 0.2; // 0 = linear input; 1 = full BP quartic
 export const STEER_SHAPE_EXP = 4; // BP uses s⁴ (quartic)
+
+// ---- slope-following chassis tilt ------------------------------------------
+// Post-world.step fixup (orientation.ts pinChassisSlope) slerps the GROUNDED
+// chassis roll+pitch toward the resampled contact-plane normal, keeping the
+// emergent yaw and never unlocking angularFactor. Per-frame slerp fraction kept
+// low (the roadmap's corrected ~0.05, not 0.25) so a sharp kerb lip can't set up
+// a resample limit-cycle — the low-pass + the gates below damp the feedback.
+export const SLOPE_FOLLOW_RATE = 0.05; // chassis→slope slerp per frame
+export const SLOPE_MIN_GROUNDED = 3; // need ≥3 grounded corners to fit a plane
+export const SLOPE_MIN_NY = 0.5; // floor on the fitted normal's world-y (skip too-steep/degenerate fits)
+export const SLOPE_MIN_UP_Y = 0.5; // chassis-up.y below this = tipped/on its side → skip (matches the playerControl tipped gate)
 
 export const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
 export const wrapAngle = (a: number) => Math.atan2(Math.sin(a), Math.cos(a));

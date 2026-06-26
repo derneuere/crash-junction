@@ -1,5 +1,6 @@
 import type { Actor } from '../types';
 import type { RaceSection } from './sections';
+import type { VehicleForceState } from '../control/driving';
 
 /** A shortcut's resampled section chain plus where it hands progress back.
  *  Player-only: rivals NEVER take shortcuts — BP-style, the AI owns the
@@ -35,4 +36,8 @@ export interface RacerState {
   //               over the barrier, and there's no driving back in
   progress: number;
   loose: boolean; // was destabilized last step — resync AI on recovery
+  /** Per-rival force-solver state (createForceState). The rival feeds the SAME
+   *  stepVehicleForces the player uses a scripted ControlInput each frame;
+   *  heading/speed are re-seeded from the body at the top of stepRival. */
+  fs: VehicleForceState;
 }

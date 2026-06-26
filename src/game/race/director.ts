@@ -6,11 +6,16 @@ import type { Emitter } from '../emitter';
 import type { PlayerControl } from '../control';
 import { GROUP_DECOR } from '../physics';
 import { simRand } from '../rng';
+import { HANDLING } from '../handling';
+import { createForceState, stepVehicleForces } from '../control/driving';
+import type { ControlInput } from '../control/input';
+import type { HeightSampler } from '../suspension';
 import type { RaceSection } from './sections';
 import { buildOpenSections, SHORTCUT_SPACING, wrapAngle, clamp } from './sections';
 import type { ShortcutChain, RacerState } from './types';
 import {
   AI_YAW,
+  AI_STEER_GAIN,
   AI_ACC,
   AI_BRAKE,
   RESPAWN_AFTER,
@@ -39,11 +44,18 @@ import {
   UP,
 } from './constants';
 
+// force-port scratch: derive the rival's heading from its body each frame.
+const FWD_LOCAL = new CANNON.Vec3(0, 0, -1); // hull forward is -z local
+const _aiFwd = new CANNON.Vec3();
+
 export class RaceDirector {
   readonly laps: number;
   /** Dev/probe counters — read via window.__raceAI in bug reports and the
    *  headless AI probe. Display-only; the sim never reads them back. */
   readonly tele = { shunts: 0, slams: 0 };
+  /** Height sampler (set by the host right after construction) so rivals can
+   *  run the shared force solver. Same sampler the player controller uses. */
+  heightAt!: HeightSampler;
   private secs: RaceSection[];
   private N: number;
   private width: number;
@@ -115,6 +127,7 @@ export class RaceDirector {
         aggression, lane, laneNow: lane, phase: i * 2.4,
         attackT: 0, attackKind: 'shunt', slamCut: false, victim: PLAYER, cooldown: 2.5, decideT: 0.3 + i * 0.17,
         rubber: 1, heat: 1, offT: 0, progress: 0, loose: false,
+        fs: createForceState(actor.spec?.variant ?? 'sedan', heading, 0),
       });
     });
     (window as unknown as { __raceAI?: object }).__raceAI = this.tele;
@@ -187,9 +200,17 @@ export class RaceDirector {
     if (r.loose) {
       // gathered it up — resume the racing line from wherever we slid to
       r.loose = false;
-      const sp = Math.hypot(b.velocity.x, b.velocity.z);
-      if (sp > 2) r.heading = Math.atan2(b.velocity.x / sp, b.velocity.z / sp);
-      r.speed = sp;
+    }
+
+    // ---- force-port: heading/speed are now DERIVED from the body (the solver
+    // owns the orientation). Re-seed the rival's decision geometry from the
+    // body FIRST so relTo/slamTarget/holdGap/aim/cornerClose all read reality,
+    // not a stale kinematic heading. (Replaces the old loose-recovery resync +
+    // every later `r.heading =`/`r.speed =` author.) --------------------------
+    {
+      b.quaternion.vmult(FWD_LOCAL, _aiFwd); // hull forward is -z local
+      r.heading = Math.atan2(_aiFwd.x, _aiFwd.z);
+      r.speed = Math.hypot(b.velocity.x, b.velocity.z);
     }
 
     const t = this.secs[r.target];
@@ -286,8 +307,11 @@ export class RaceDirector {
       aimZ = (next.z + t.z) / 2 + pz * r.laneNow;
     }
     const aim = Math.atan2(aimX - b.position.x, aimZ - b.position.z);
-    const err = wrapAngle(aim - r.heading);
-    r.heading = wrapAngle(r.heading + clamp(err * 3, -AI_YAW, AI_YAW) * dt);
+    // ---- force-port: scripted STEER command (not a heading write). The solver
+    // turns the body; we hand it a steer in [-1,1] off the heading error. NOT
+    // divided by the steer lock (the solver already scales by it). -------------
+    const steerErr = wrapAngle(aim - r.heading);
+    const aiSteer = clamp(-steerErr * AI_STEER_GAIN, -1, 1);
 
     // ---- speed: brake for the slowest of the next few sections, paced by
     // the band; hold a gap to the car ahead so the pack doesn't rear-end
@@ -321,11 +345,26 @@ export class RaceDirector {
       target = Math.max(target, Math.hypot(vv.x, vv.z) + surge);
     }
     target = Math.min(target, AI_TOP);
-    r.speed += clamp(target - r.speed, -AI_BRAKE * dt, AI_ACC * Math.max(1, r.rubber) * dt);
-
-    b.velocity.set(Math.sin(r.heading) * r.speed, b.velocity.y, Math.cos(r.heading) * r.speed);
-    b.angularVelocity.set(0, 0, 0);
-    b.quaternion.setFromAxisAngle(UP, r.heading + Math.PI); // hull forward is -z
+    // ---- force-port: turn the desired target speed into throttle/brake bangs
+    // for the solver instead of writing velocity. The rival's engine economy +
+    // tire grip (stepVehicleForces) realise the pace through the gears; the
+    // catch-up band (r.rubber) still shapes `target` above, so the AI boost is
+    // preserved as faster TARGET pace, not a teleport. ------------------------
+    const wantFaster = target > r.speed + 0.4;
+    const wantSlower = target < r.speed - 0.4;
+    const aiInput: ControlInput = {
+      steer: aiSteer,
+      throttle: wantFaster,
+      boost: false, // rivals lean on the rubber band, not the player's boost bar
+      brake: wantSlower && r.speed > 6, // don't ride the brake to a dead stop
+    };
+    // re-seed the solver state from the body each frame (heading/speed derived),
+    // then bank this rival's forces. attribs = the rival's own variant vault.
+    r.fs.heading = r.heading;
+    r.fs.velAngle = r.heading;
+    r.fs.speed = r.speed;
+    r.fs.variant = r.a.spec?.variant ?? 'sedan';
+    stepVehicleForces(r.fs, r.a, aiInput, this.heightAt, HANDLING[r.a.spec?.variant ?? 'sedan']);
   }
 
   /** Gate-reached test, shared by main-loop tracking and shortcut rejoin:

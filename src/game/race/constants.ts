@@ -1,6 +1,12 @@
 import * as CANNON from 'cannon-es';
 
 export const AI_YAW = 1.35; // rad/s steering authority (a touch under the player's drift)
+// ---- force-port: scripted rival steering ----
+// AI steer = clamp(-wrapAngle(aim - bodyHeading) * AI_STEER_GAIN, -1, 1). NOT
+// divided by steerLock (that double-compensates — the solver already scales
+// the wheel angle by the speed-sensitive lock). STARTING value; re-tune in
+// preview vs the ~0.2 s emergent yaw build (weaving=too high, wide=too low).
+export const AI_STEER_GAIN = 2.2;
 export const AI_ACC = 13;
 export const AI_BRAKE = 20;
 export const RESPAWN_AFTER = 2.5; // s wrecked before the reset pair kicks in

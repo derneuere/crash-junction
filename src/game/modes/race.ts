@@ -28,6 +28,10 @@ export class RaceMode implements GameMode {
       (pos) => this.onRaceFinish(pos),
       (a) => host.repairActor(a), // taken-down rivals respawn good as new
     );
+    // force-port: hand the director the height sampler so its rivals can run
+    // the shared force solver (stepVehicleForces needs heightAt). Same sampler
+    // the player controller uses, so determinism is unaffected.
+    this.director.heightAt = host.heightAt;
   }
 
   fixedStep(dt: number, state: GameState): void {

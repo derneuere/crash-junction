@@ -31,8 +31,8 @@ const Y_AXIS = new CANNON.Vec3(0, 1, 0);
 
 // Feature B — weight transfer as additive external spring force
 // (docs/research/physics-overhaul-spec.md). BP injects a clamped weight-transfer
-// vector as additive F_ext onto each spring (CalculateWeightTransfer in
-// RaceCarPhysics_findings.md §5) — it NEVER moves the COM. CJ until now only
+// vector as additive F_ext onto each spring (Burnout's weight-transfer model) —
+// it NEVER moves the COM. CJ until now only
 // added speed²-downforce; brake-dive / throttle-squat / corner-lean were
 // visual-only. Here each corner spring gains an external load term derived from
 // the body's longitudinal & lateral acceleration THIS step:
@@ -121,6 +121,7 @@ export function applySuspension(actors: Actor[], state: GameState, heightAt: Hei
 
     for (const s of a.susp) {
       s.grounded = false;
+      s.load = 0; // normal force this corner reports to the tire model (0 = airborne)
       if (_sUp.y < 0.35) {
         s.dist = ride + SUSP_DROOP; // tipped over
         continue;
@@ -162,6 +163,7 @@ export function applySuspension(actors: Actor[], state: GameState, heightAt: Hei
       _sUp.scale(f, _sF);
       b.applyForce(_sF, _sR); // cannon-es: world-oriented offset from COM
       s.grounded = true;
+      s.load = f; // the friction-circle radius for this corner's tire this step
       grounded++;
       fSum += f;
     }
