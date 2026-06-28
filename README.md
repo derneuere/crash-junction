@@ -176,6 +176,26 @@ Adding a level = adding a `LevelDef` (no engine changes): traffic spawns
 with direction/speed/`delay`, barrel and pole positions, ramps, buildings,
 medal thresholds.
 
+## Driving physics
+
+The most important thing to know about this engine: **every car — player, rivals
+and traffic — is a force-accumulate / integrate-late rigid body**, the same shape
+as Burnout's race-car physics. Nothing scripts velocity or heading. Each frame
+the controller *banks* engine, tire, drift, boost and contact **forces** onto the
+cannon-es body, and the integrator commits them all in one `world.step`. Grip,
+yaw, drift and spin-out **emerge** from per-wheel tire forces — a weight-loaded
+friction ellipse, applied at the contact patches — instead of canned animation;
+`heading`/`speed` are *derived* from the body each frame, never authored.
+
+The keystone that makes a force vehicle stable is that the **grounded chassis is
+yaw-only**: while a car is on the ground, cannon's `body.angularFactor` locks out
+roll and pitch, so steering, drift and spin stay fully emergent but the car can't
+roll itself over under hard cornering. Roll and pitch return in the air (jumps
+tumble and auto-level via corrective torques), and slope-following is a small
+post-step tilt. The whole model rides cannon-es's **public API**
+(`applyForce` / `applyImpulse` / `applyTorque` / `angularFactor` / `world.step`),
+so no fork of the physics engine is needed.
+
 ## Physics bug reports & deterministic replay
 
 Saw the physics do something wrong? Press **R** (any time — recording is

@@ -245,6 +245,39 @@ export const MAX_WHEELIE_ANGLE = 0.38; // rad
 // teleport). Invented — BP air control is faint and torque-based.
 export const AIR_STEER_TORQUE = 0.9; // rad/s at full steer
 
+// ---- airborne attitude TORQUES (Burnout's airborne attitude, ported from the
+// kinematic pin to real corrective torques applied in the airborne else-branch
+// where angularFactor is (1,1,1)). Gains sized against the player box inertia
+// (Iroll≈748, Ipitch≈3058 kg·m²) for ζ≈1.2 — critically-overdamped, no wobble. ----
+// ROLL auto-level (steady-air): τ_roll = +AIR_ROLL_KP·rollErr − AIR_ROLL_KD·ωroll.
+// The P-term is PLUS: a leading minus would drive the car toward INVERTED.
+export const AIR_ROLL_KP = 2100; // N·m per rad of roll error (ζ≈1.2 with KD below)
+export const AIR_ROLL_KD = 3000; // N·m per (rad/s) of roll rate — retuned ~3× (was ζ≈0.4 wobble)
+// PITCH follow/clamp (steady-air): nose eases toward the trajectory tangent,
+// clamped to MAX_WHEELIE_ANGLE so a steep launch/dive never points past it.
+export const AIR_PITCH_KP = 11000; // N·m per rad of pitch error (ζ≈1.2 with KD below)
+export const AIR_PITCH_KD = 14000; // N·m per (rad/s) of pitch rate — retuned ~3×
+// Gentle yaw damp in air (BP kYawDamp_Min→Target). Light: yaw spin is mostly the
+// player's wheel input on takeoff and should bleed slowly, not snap.
+export const AIR_YAW_KD = 1800; // N·m per (rad/s) of yaw rate, airborne only
+// Steady-air pitch trajectory follow: how strongly the pitch TARGET chases the
+// velocity-vector tangent (vs holding the takeoff seed). ~0.3 s to take up the arc.
+export const AIR_PITCH_FOLLOW = 3.0; // 1/s — target eases toward the trajectory tangent
+// One-shot TAKE-OFF spin-bleed (Burnout's takeoff damping): on the takeoff frame ω is
+// decomposed onto the orthonormal body basis {_right(pitch),_up(yaw),_fwd(roll)}
+// and each component scaled by its KEEP fraction, then ω rebuilt. Bleeding about
+// body _up (not world (0,1,0)) keeps a banked-lip launch from corrupting yaw.
+export const TAKEOFF_KEEP_ROLL = 0.0125; // keep ~1% of roll ω (BP RollDampingOnTakeOff intent)
+export const TAKEOFF_KEEP_PITCH = 0.9; // keep most pitch ω (BP PitchDampingOnTakeOff median 0.9)
+export const TAKEOFF_KEEP_YAW = 0.5; // keep half the yaw ω (player launch rotation reads, but tamed)
+// HARD-LANDING settle (Burnout's hard-landing stabilisation): a heavy touchdown (long
+// airtime + fast descent) arms a short window damping residual yaw ω + softening
+// steering so the car doesn't bounce/spin or snap-turn out of the squash.
+export const HARD_LAND_MIN_AIR = 0.6; // s of airtime before a landing counts as "hard"
+export const HARD_LAND_MIN_VY = 6; // m/s of downward speed at touchdown to count as "hard"
+export const HARD_LAND_SETTLE_SECS = 0.35; // s of post-landing settle window
+export const HARD_LAND_YAW_DAMP = 6.0; // 1/s residual-yaw bleed during the window
+
 // Landing settle: over this window the chassis blends to the road plane
 // (replaces the old instant slope<0.02 re-pin). from BP TimeToDampAfterLanding
 // median 0.1

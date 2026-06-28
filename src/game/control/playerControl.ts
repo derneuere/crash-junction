@@ -27,6 +27,7 @@ export class PlayerControl {
   speed = 0;
   drifting = false; // derived view of driftState (driftState !== None)
   driftState: DriftState = DriftState.None; // tri-state drift FSM (Feature D)
+  driftScale = 0; // 0..1 slide depth (force-model drift, driving.ts)
   boosting = false;
   // ---- boost economy ----
   // Start with the first segment charged (B3 starts a run WITH boost in the
@@ -53,6 +54,9 @@ export class PlayerControl {
   private yawVel = 0; // the chassis takes time to start (and stop) rotating
   private grip = 1; // 1 = full grip, 0 = drift slip
   private kickLeft = 0;
+  private kickCooldown = 0; // boost-kick cooldown timer (s)
+  private wheelieT = 0; // 0..1 boost-kick wheelie amount
+  private kickPrev = false; // fresh-boost-press edge detector
   private boostHeld = false;
   private tippedTime = 0;
   private recentBrake = 0; // tap buffer: a brake tap arms the drift briefly
@@ -67,6 +71,7 @@ export class PlayerControl {
   private takeoffHeading = 0; // launch attitude snapshot
   private landingSettleT = 0; // s remaining of the road-plane settle blend
   private steerSoftenT = 0; // s remaining of post-landing steer softening
+  private hardLandT = 0; // s remaining of the hard-landing settle window (yaw damp + steer soften)
   private airPitch = 0; // eased airborne pitch — chases the trajectory tangent
   private airRoll = 0; // eased airborne roll — player lean that auto-levels
 
@@ -109,6 +114,7 @@ export class PlayerControl {
     this.speed = 0;
     this.drifting = false;
     this.driftState = DriftState.None;
+    this.driftScale = 0;
     this.boosting = false;
     this.boostMeter = BOOST_SEGMENT_SECS * BOOST_START_SEGMENTS; // start charged
     this.boostSegments = BOOST_START_SEGMENTS;
@@ -128,6 +134,9 @@ export class PlayerControl {
     this.yawVel = 0;
     this.grip = 1;
     this.kickLeft = 0;
+    this.kickCooldown = 0;
+    this.wheelieT = 0;
+    this.kickPrev = false;
     this.boostHeld = false;
     this.tippedTime = 0;
     this.recentBrake = 0;
@@ -138,6 +147,7 @@ export class PlayerControl {
     this.takeoffHeading = 0;
     this.landingSettleT = 0;
     this.steerSoftenT = 0;
+    this.hardLandT = 0;
     this.airPitch = 0;
     this.airRoll = 0;
   }
@@ -161,6 +171,7 @@ export class PlayerControl {
     // tumble the car freely, then right it after a beat, Burnout-style ----
     b.quaternion.vmult(UP_AXIS, _up);
     if (_up.y < 0.5) {
+      b.angularFactor.set(1, 1, 1); // tumbling: let it rotate on all axes (force model locks roll/pitch when driving)
       this.tippedTime += dt;
       this.speed = Math.hypot(b.velocity.x, b.velocity.z); // track reality
       const ride = player.spec?.rideHeight ?? 0.8;
@@ -191,10 +202,14 @@ export class PlayerControl {
       speed: this.speed,
       drifting: this.drifting,
       driftState: this.driftState,
+      driftScale: this.driftScale,
       boosting: this.boosting,
       boostMeter: this.boostMeter,
       boostHeld: this.boostHeld,
       kickLeft: this.kickLeft,
+      kickCooldown: this.kickCooldown,
+      wheelieT: this.wheelieT,
+      kickPrev: this.kickPrev,
       burnout: this.burnout,
       burnoutArmed: this.burnoutArmed,
       burnoutWasFull: this.burnoutWasFull,
@@ -218,6 +233,7 @@ export class PlayerControl {
       takeoffHeading: this.takeoffHeading,
       landingSettleT: this.landingSettleT,
       steerSoftenT: this.steerSoftenT,
+      hardLandT: this.hardLandT,
       airPitch: this.airPitch,
       airRoll: this.airRoll,
       boostCap: this.boostCap,
@@ -229,10 +245,14 @@ export class PlayerControl {
     this.speed = s.speed;
     this.drifting = s.drifting;
     this.driftState = s.driftState;
+    this.driftScale = s.driftScale;
     this.boosting = s.boosting;
     this.boostMeter = s.boostMeter;
     this.boostHeld = s.boostHeld;
     this.kickLeft = s.kickLeft;
+    this.kickCooldown = s.kickCooldown;
+    this.wheelieT = s.wheelieT;
+    this.kickPrev = s.kickPrev;
     this.burnout = s.burnout;
     this.burnoutArmed = s.burnoutArmed;
     this.burnoutWasFull = s.burnoutWasFull;
@@ -256,6 +276,7 @@ export class PlayerControl {
     this.takeoffHeading = s.takeoffHeading;
     this.landingSettleT = s.landingSettleT;
     this.steerSoftenT = s.steerSoftenT;
+    this.hardLandT = s.hardLandT;
     this.airPitch = s.airPitch;
     this.airRoll = s.airRoll;
   }

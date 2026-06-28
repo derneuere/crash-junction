@@ -105,11 +105,25 @@ export interface HandlingAttribs {
     adhesiveLimit: number; // static-friction adhesion ceiling — BP AdhesiveLimit
   };
   /** Extra spin/launch energy injected on a crash — BP CrashExtra*Factor (flat
-   *  0.3 across the whole roster). See Feature F. */
+   *  0.3 across the whole roster) — PLUS the per-variant car-on-car CONTACT
+   *  response: the anisotropic body-axis friction scales (the controlled
+   *  non-crashing projection) and the closing-speed tangential restitution. */
   collision: {
     crashExtraRoll: number; // BP CrashExtraRollVelocityFactor
     crashExtraYaw: number; // BP CrashExtraYawVelocityFactor
     crashExtraLinear: number; // BP CrashExtraLinearVelocityFactor
+    /** Anisotropic car-car friction bleed per BODY axis (fraction of the
+     *  along-axis velocity removed per contact): forward slides freely, lateral
+     *  GRIPS (the door-to-door directional crash feel), vertical chatter damps
+     *  hard. Heavier variants grip/damp harder. */
+    frictionFwd: number; // along travel — slides, low grip
+    frictionUp: number; // vertical chatter — damped hard
+    frictionLat: number; // sideways — grips, the directional crash feel
+    /** Closing-speed tangential restitution: restitutionHigh for the GENTLER
+     *  hit (closing < 0.65 m/s), restitutionLow at/above. Near-vestigial at CJ
+     *  speeds (resolves to restitutionLow). */
+    restitutionLow: number; // e for a harder hit (closing ≥ 0.65 m/s)
+    restitutionHigh: number; // e for the gentler hit (closing < 0.65 m/s)
   };
 }
 
@@ -193,6 +207,11 @@ const SEDAN: HandlingAttribs = {
     crashExtraRoll: 0.3, // BP CrashExtraRollVelocityFactor (flat 0.3 roster-wide)
     crashExtraYaw: 0.3, // BP CrashExtraYawVelocityFactor
     crashExtraLinear: 0.3, // BP CrashExtraLinearVelocityFactor
+    frictionFwd: 0.04, // = old global CAR_FRICTION_FWD (today)
+    frictionUp: 0.25, // = old global CAR_FRICTION_UP (today)
+    frictionLat: 0.18, // = old global CAR_FRICTION_LAT (today)
+    restitutionLow: 0.65, // inline literals (closing ≥ 0.65 m/s)
+    restitutionHigh: 0.7, // (closing < 0.65 m/s)
   },
 };
 
@@ -274,6 +293,11 @@ const BUS: HandlingAttribs = {
     crashExtraRoll: 0.3, // flat 0.3 roster-wide
     crashExtraYaw: 0.3,
     crashExtraLinear: 0.3,
+    frictionFwd: 0.03, // a heavy slides a little more freely along travel
+    frictionUp: 0.3, // damps vertical chatter harder (more mass to settle)
+    frictionLat: 0.22, // grips harder sideways — a heavy contact plants
+    restitutionLow: 0.65,
+    restitutionHigh: 0.7,
   },
 };
 
@@ -354,6 +378,11 @@ const TANKER: HandlingAttribs = {
     crashExtraRoll: 0.3, // flat 0.3 roster-wide
     crashExtraYaw: 0.3,
     crashExtraLinear: 0.3,
+    frictionFwd: 0.025, // slides most freely along travel for its mass
+    frictionUp: 0.34, // hardest vertical chatter damp (heaviest to settle)
+    frictionLat: 0.26, // strongest sideways grip — contacts plant dead
+    restitutionLow: 0.65,
+    restitutionHigh: 0.7,
   },
 };
 

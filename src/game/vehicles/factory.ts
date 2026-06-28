@@ -133,6 +133,7 @@ export function buildSuspension(spec: VehicleSpec, wheels: THREE.Mesh[], mass: n
   return wheels.map((w) => ({
     ax: w.position.x, az: w.position.z, preload, k, c,
     fmax: (preload + k * SUSP_MAX_COMP) * 1.5, dist: spec.rideHeight, grounded: false, sag: 1,
+    load: preload, // seed at static load so the tire model has grip from frame 1
   }));
 }
 

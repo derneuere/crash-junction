@@ -57,6 +57,7 @@ import { resetModelPicker } from '../models';
 import { accumulatePanelDamage, makePanelBody, updatePanelFlap } from '../panels';
 import type { PanelState } from '../types';
 import { applySuspension, type HeightSampler } from '../suspension';
+import { pinChassisSlope } from '../control/orientation';
 import { HANDLING } from '../handling';
 import { PlayerControl } from '../control';
 import { Pickups } from '../pickups';
@@ -75,9 +76,9 @@ import {
 } from './scratch';
 
 // ---------------------------------------------------------------------------
-// FEATURE F + G tuning — the crash-contact richness layer (BP's contact-impulse
-// model, §11 of RaceCarPhysics_findings.md) and the water kill switch (§10
-// UpdateInWaterBehaviour). These live HERE, with the code that reads them (the
+// FEATURE F + G tuning — the crash-contact richness layer (Burnout's contact-
+// impulse model) and the water kill switch. These live HERE, with the code that
+// reads them (the
 // crash glue is Game's), not in the shared constants.ts. Every new force below
 // is GUARDED by one of these strength scalars: set a scalar to 0 and that
 // behaviour vanishes (= today). Defaults are tuned so the SEDAN stays close to
@@ -112,27 +113,36 @@ const SLAM_LIFE = 0.5;
  *  ignored (BP AddSlam is rate-limited ≥0.5 s apart, ~2/s). */
 const SLAM_RATE_LIMIT = 0.5;
 
-/** Anisotropic car-to-car friction (BP ApplyCarContactImpulse, NON-crashing
- *  path): per-step velocity bleed along the victim's three BODY axes — slides
- *  along forward/up, grips laterally — so a controlled side contact scrubs
- *  sideways energy without killing the car's drive. Master scalar; 0 disables.
- *  Defaults kept SMALL so the sedan's contact feel barely shifts. */
+/** Anisotropic car-to-car friction (Burnout's car-on-car contact, NON-crashing
+ *  path) MASTER SCALAR: per-step velocity bleed along the victim's three BODY
+ *  axes — slides along forward/up, grips laterally — so a controlled side
+ *  contact scrubs sideways energy without killing the car's drive. The PER-AXIS
+ *  bleed fractions are now per-variant (HANDLING.collision.friction{Fwd,Up,Lat});
+ *  this scalar gates the whole pass. 0 disables (= today, no aniso projection).
+ *  Kept SMALL so the sedan's contact feel barely shifts. */
 const CAR_FRICTION_STRENGTH = 1;
-/** Per-axis bleed fractions [forward (right axis ×), up (y), lateral (forward
- *  axis ×)] applied as v −= scale·STRENGTH·(v·axis)·axis once per contact.
- *  Lateral (the door-to-door grip) is the strongest; forward slides freely. */
-const CAR_FRICTION_FWD = 0.04; // along travel — slides, low grip
-const CAR_FRICTION_UP = 0.25; // vertical chatter — damped hard
-const CAR_FRICTION_LAT = 0.18; // sideways — grips, the directional crash feel
 
-/** Restitution by closing speed (BP ApplyWallContactImpulse inline 0.65/0.70):
- *  the tangential bounce a SLAMMED victim gets back off the contact. e is 0.65
- *  normally, 0.70 for a harder hit. Master scalar gates the whole reflection;
- *  0 = no added bounce (= today, cannon's own restitution only). */
+/** Restitution by closing speed (Burnout's wall contact, inline 0.70/0.65):
+ *  the tangential bounce a SLAMMED victim gets back off the contact. MASTER
+ *  SCALAR gates the whole reflection; 0 = no added bounce (= today, cannon's own
+ *  restitution only). The two e-values are now per-variant
+ *  (HANDLING.collision.restitution{Low,High}); the closing-speed THRESHOLD that
+ *  picks between them is the inline 0.65 m/s — below it the GENTLER hit gets the
+ *  HIGHER e (0.70), at/above it the harder hit gets 0.65 (this sense was
+ *  previously inverted in CJ — corrected to match Burnout). At CJ closing speeds
+ *  (~all car-car hits are >>0.65 m/s) this resolves to the LOW e on essentially
+ *  every contact, so it is faithful-but-near-vestigial here. */
 const CONTACT_RESTITUTION_STRENGTH = 0.5;
-const CONTACT_E_LOW = 0.65;
-const CONTACT_E_HIGH = 0.7;
-const CONTACT_E_HARD_CLOSING = 8; // m/s above which the harder e applies
+const CONTACT_E_CLOSING_SPLIT = 0.65; // m/s: BELOW → restitutionHigh (gentler hit), AT/ABOVE → restitutionLow
+
+/** Force-correct WALL reflection (applyWallGlance, modernized for the force
+ *  body). Walls hit the matGround/matCar contact material — restitution FLOOR
+ *  0.03 (physics.ts) — NOT the matCar/matCar 0.12 floor cars get; the old glance
+ *  used neither (it re-aimed the now-dead kinematic heading). A glancing barrier
+ *  scrape keeps WALL_GLANCE_SPEED_KEEP of its planar speed redirected along the
+ *  wall, plus a sliver of normal-direction restitution off the 0.03 floor. */
+const WALL_REFLECT_E = 0.03; // the matGround/matCar restitution floor (NOT the 0.12 matCar/matCar one)
+const WALL_GLANCE_SPEED_KEEP = 0.82; // planar speed retained through a glance (the wall takes its toll)
 
 /** Crash master-switch raw-tumble damping (BP UpdateCrashing per-axis
  *  vlogefp/vexptefp decay): a CRASHED car's spin bleeds off exponentially each
@@ -166,6 +176,18 @@ interface SlamEffect {
 // step alloc), kept here in core.ts (we own it) rather than the shared
 // scratch.ts which other tasks also touch.
 const _bodyAxis = new CANNON.Vec3();
+
+/** crash MASTER SWITCH (Burnout's per-car crash flag),
+ *  centralized. CJ's `crashed` flag IS this gate. While NOT crashing → the
+ *  controlled contact response (anisotropic body-axis friction projection +
+ *  closing-speed restitution, in applyShuntKick/applyAnisoFriction). While
+ *  crashing → that controlled projection is SKIPPED and the body takes the raw
+ *  impulse pass-through plus the per-axis exponential tumble damp
+ *  (stepCrashTumbleAndWater). Both sides read this one predicate so the swap is
+ *  stated in exactly one place, mirroring BP's single master flag. */
+function contactCrashing(a: Actor): boolean {
+  return a.crashed;
+}
 
 export class Game {
   readonly events = new Emitter<GameEvents>();
@@ -1621,26 +1643,31 @@ export class Game {
     const r = victimIsBi ? c.ri : c.rj;
     _kickR.set(r.x, r.y, r.z);
     vb.applyImpulse(_kickJ, _kickR);
-    // Restitution by closing speed (Feature F, BP ApplyWallContactImpulse): a
+    // Restitution by closing speed (Feature F, Burnout's wall contact): a
     // SLAMMED victim that's NOT yet a wreck gets a little of the contact back as
     // a bounce along the push normal — e = 0.65 normally, 0.70 for a harder hit
     // (BP's inline literals). Gated by the master scalar (0 = today, cannon's
     // own restitution only) and skipped for crashed cars (they take the raw
     // tumble, not a controlled bounce).
-    if (CONTACT_RESTITUTION_STRENGTH > 0 && !victim.crashed) {
-      const e = impact > CONTACT_E_HARD_CLOSING ? CONTACT_E_HIGH : CONTACT_E_LOW;
+    if (CONTACT_RESTITUTION_STRENGTH > 0 && !contactCrashing(victim)) {
+      // BP sense: the GENTLER hit (closing < 0.65 m/s) bounces
+      // back HARDER (0.70); a harder hit (≥0.65 m/s) gets the lower 0.65. Today's
+      // code had this inverted. Per-variant e-values; near-vestigial at CJ speeds
+      // (impact is essentially always ≫0.65 m/s → restitutionLow).
+      const col = HANDLING[victim.spec?.variant ?? 'sedan'].collision;
+      const e = impact < CONTACT_E_CLOSING_SPLIT ? col.restitutionHigh : col.restitutionLow;
       const bounce = shove * gate * e * CONTACT_RESTITUTION_STRENGTH;
       vb.velocity.x += nx * bounce;
       vb.velocity.z += nz * bounce; // road-plane only — never loft off a bumper
     }
-    // Anisotropic car-to-car friction (Feature F, BP ApplyCarContactImpulse,
+    // Anisotropic car-to-car friction (Feature F, Burnout's car-on-car contact,
     // NON-crashing path): bleed velocity along the victim's three BODY axes with
     // different per-axis scales — slides forward, grips sideways, damps vertical
     // chatter — so a side contact scrubs lateral energy without killing the
     // car's drive. Skipped for wrecks (the raw tumble owns them). Gated by the
     // master scalar (0 = today).
-    if (CAR_FRICTION_STRENGTH > 0 && !victim.crashed) {
-      this.applyAnisoFriction(vb);
+    if (CAR_FRICTION_STRENGTH > 0 && !contactCrashing(victim)) {
+      this.applyAnisoFriction(victim);
     }
     // Re-clamp vertical — a shunt is a road-plane event, nobody gets lofted off
     // a bumper (same ceiling the destabilized-slide rule uses).
@@ -1668,15 +1695,17 @@ export class Game {
   }
 
   /** Anisotropic car-to-car contact friction (Feature F, BP
-   *  ApplyCarContactImpulse): remove a fraction of the body's velocity along
+   *  the car-on-car contact): remove a fraction of the body's velocity along
    *  each of its THREE body axes, with a different scale per axis — forward
    *  slides (low grip), lateral grips (the directional crash feel), vertical
    *  chatter damps hard. Reads the body's orientation columns straight off the
    *  quaternion; pure velocity edit, deterministic. */
-  private applyAnisoFriction(vb: CANNON.Body): void {
+  private applyAnisoFriction(victim: Actor): void {
     const s = CAR_FRICTION_STRENGTH;
+    const vb = victim.body;
     const v = vb.velocity;
     const q = vb.quaternion;
+    const fr = HANDLING[victim.spec?.variant ?? 'sedan'].collision;
     // forward axis = hull -z (CJ convention); right axis = +x. vmult rotates the
     // body-local unit vector into world space.
     const bleed = (lx: number, ly: number, lz: number, scale: number): void => {
@@ -1688,9 +1717,9 @@ export class Game {
       v.y -= _bodyAxis.y * k;
       v.z -= _bodyAxis.z * k;
     };
-    bleed(0, 0, -1, CAR_FRICTION_FWD); // along travel — slides
-    bleed(1, 0, 0, CAR_FRICTION_LAT); // sideways — grips
-    bleed(0, 1, 0, CAR_FRICTION_UP); // vertical — damped
+    bleed(0, 0, -1, fr.frictionFwd); // along travel — slides
+    bleed(1, 0, 0, fr.frictionLat); // sideways — grips
+    bleed(0, 1, 0, fr.frictionUp); // vertical — damped
   }
 
   /** Queue a one-shot SLAM wobble (Feature F, BP AddSlam/UpdateSlam): a
@@ -1806,6 +1835,8 @@ export class Game {
       // CRASHED car (controlled contact is off) gets the raw decay; live cars
       // keep their angular velocity for the driving model. Per-axis factors are
       // per-second, so raise to dt for a frame-rate-independent decay.
+      // (the !a.crashed gate here is the crash master switch, mirrored
+      // by contactCrashing() on the controlled-contact side — see its doc.)
       if (!a.crashed) continue;
       const av = a.body.angularVelocity;
       av.x *= CRASH_TUMBLE_DAMP_ROLL ** FIXED_DT;
@@ -1857,6 +1888,7 @@ export class Game {
     a.destabilizedByPlayer = false;
     a.destabilizedBy = 0;
     a.body.collisionFilterMask = -1;
+    a.body.angularFactor.set(1, 1, 1); // a wreck tumbles freely (the force-driven player locks roll/pitch while driving)
     // B3: a crash collapses the earned (extended) boost bar back to 1x — the
     // chain reward you built up is the thing you lose when you wreck.
     if (a.isPlayer) this.control.resetBoostBar();
@@ -1899,8 +1931,18 @@ export class Game {
     a.body.wakeUp();
   }
 
-  /** Shallow wall touch at racing speed: scrub a little speed and point the
-   *  car back along the wall instead of grinding into it. */
+  /** Shallow wall touch at racing speed: scrub a little speed and redirect the
+   *  car along the wall instead of grinding into it.
+   *
+   *  FORCE-MODEL REWRITE: the player is now a force body — heading/velAngle/speed
+   *  are DERIVED from the body inside stepDrive every frame, so the old code's
+   *  control.heading/velAngle/speed writes were DEAD (overwritten the next step).
+   *  Walls also never reach applyShuntKick (resolve.ts only emits wallGlance/
+   *  wreckSelf for walls), so this is the ONLY wall response. We now edit the
+   *  BODY velocity directly: reflect/slide the planar velocity along the wall and
+   *  let stepDrive re-derive heading/velAngle/speed from it. Applied at the COM
+   *  (a glance is a linear redirect, not a spin; a grounded roll/pitch torque
+   *  would be ignored by the (0,1,0) angularFactor lock anyway). */
   private applyWallGlance(e: CollideEvent, wallDir: { x: number; z: number } | null): void {
     const p = this.player;
     if (!p || p.crashed || p.destabilized > 0) return;
@@ -1909,16 +1951,27 @@ export class Game {
     const v = p.body.velocity;
     let tx: number;
     let tz: number;
+    // nx/nz = the wall's inward normal (from the wall into the car), used both to
+    // build the slide tangent (fallback path) and to add the restitution sliver.
+    let nx = 0;
+    let nz = 0;
     if (wallDir) {
       // slide along the barrier, whichever way we're already going
       const s = Math.sign(v.x * wallDir.x + v.z * wallDir.z) || 1;
       tx = wallDir.x * s;
       tz = wallDir.z * s;
+      // inward normal ⟂ wallDir, oriented against the approach (−vn side)
+      nx = -wallDir.z;
+      nz = wallDir.x;
+      if (v.x * nx + v.z * nz > 0) {
+        nx = -nx;
+        nz = -nz;
+      }
     } else {
       const c = e.contact;
       // contact normal, oriented to point from the wall into the car
-      let nx = c.ni.x;
-      let nz = c.ni.z;
+      nx = c.ni.x;
+      nz = c.ni.z;
       if (c.bi === p.body) {
         nx = -nx;
         nz = -nz;
@@ -1931,13 +1984,25 @@ export class Game {
       tx /= tl;
       tz /= tl;
     }
-    const speed = Math.hypot(v.x, v.z) * 0.82; // the wall takes its toll
-    const heading = Math.atan2(tx, tz);
-    this.control.heading = heading; // not control.reset() — that refills boost
-    this.control.velAngle = heading;
-    this.control.drifting = false;
-    this.control.speed = speed;
-    p.body.velocity.set(tx * speed, v.y, tz * speed);
+    // carry a fraction of the incoming planar speed redirected along the wall…
+    const speed = Math.hypot(v.x, v.z) * WALL_GLANCE_SPEED_KEEP; // the wall takes its toll
+    let rvx = tx * speed;
+    let rvz = tz * speed;
+    // …plus a small restitution kick back along the inward normal (off the 0.03
+    // matGround floor — walls are NOT the 0.12 matCar material). The normal here
+    // is unit (wallDir ⟂ or the cannon contact normal), so no NaN-guard beyond
+    // the tl<1 crawl bail above.
+    const vnIn = v.x * nx + v.z * nz; // ≤0 (approaching the wall)
+    if (vnIn < 0) {
+      const bounce = -vnIn * WALL_REFLECT_E;
+      rvx += nx * bounce;
+      rvz += nz * bounce;
+    }
+    // write the reflected velocity straight to the BODY (vy untouched — a glance
+    // is a road-plane event); stepDrive re-derives heading/velAngle/speed next
+    // step. No kinematic control.* writes (those are derived outputs now).
+    p.body.velocity.set(rvx, v.y, rvz);
+    p.body.wakeUp();
     this.director.addShake(0.18);
   }
 
@@ -2294,7 +2359,7 @@ export class Game {
   // wheel meshes ride the suspension and spin with the wheel's OWN angular
   // velocity (BP Wheel::UpdateRotation: rotation += ω·dt), not raw ground speed:
   // the player's rears overspin under launch power (wheelspin) and all four
-  // near-lock under braking. Front wheels also yaw to the BP GetSteeringAngle.
+  // near-lock under braking. Front wheels also yaw to the Burnout's speed-sensitive steering.
   // Everything here is visual; the fixed-step sim never reads any of it.
   private updateWheels(simDt: number): void {
     for (const a of this.actors) {
@@ -2642,6 +2707,15 @@ export class Game {
       for (const a of this.actors) {
         if (a.kind !== 'vehicle' || a.crashed || !_contactIds.has(a.body.id)) continue;
         if (a.body.velocity.y > LIVE_CAR_CONTACT_VY) a.body.velocity.y = LIVE_CAR_CONTACT_VY;
+      }
+      // slope-following chassis tilt (canonical post-step body fixup): AFTER
+      // world.step + the vy/contact-cap clamps, slerp each
+      // GROUNDED live car's roll+pitch toward the resampled contact-plane —
+      // yaw stays emergent, angularFactor stays (0,1,0). crashed/tipped/airborne
+      // are skipped inside pinChassisSlope (+ the grounded gate here).
+      for (const a of this.actors) {
+        if (a.kind !== 'vehicle' || a.crashed || !a.susp.some((su) => su.grounded)) continue;
+        pinChassisSlope(a, this.heightAt);
       }
       this.updateFuses(FIXED_DT);
       this.simTime += FIXED_DT;

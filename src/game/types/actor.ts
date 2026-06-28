@@ -23,6 +23,12 @@ export interface SuspensionCorner {
   /** Crash damage scaling of preload+spring (1 = healthy). A battered
    *  corner carries less load, so wrecks settle with a Paradise lean. */
   sag: number;
+  /** Normal force this spring applied to the chassis THIS step (N). Written by
+   *  applySuspension, read by the force-based tire model as the friction-circle
+   *  radius for this corner (Burnout's weight-on-tire → grip loop).
+   *  Seeded to the static load (preload) so there is grip from the first frame
+   *  before the spring has reported; 0 when the wheel is off the ground. */
+  load: number;
 }
 
 export interface DeformablePart {
