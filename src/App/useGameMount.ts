@@ -6,6 +6,7 @@ import { LEVELS, type LevelId } from '../game/levels';
 import { setPlayerCar, type PlayerCarId } from '../game/models';
 import { GameState } from '../game/types';
 import type { ReplayFile } from '../game/replay';
+import type { GraphicsSettings } from '../game/graphics';
 import type { BoostState, CashFloatData, RaceStanding, ReportData, TakedownBanner } from '../game/events';
 import type { FlashState } from '../ui/Hud';
 import { upgradeBest, writeBest, type BestMap } from '../ui/storage';
@@ -24,6 +25,7 @@ export interface GameMountDeps {
   todRef: MutableRefObject<TimeOfDay>;
   engineRef: MutableRefObject<EngineFlavor>;
   mutedRef: MutableRefObject<boolean>;
+  gfxRef: MutableRefObject<GraphicsSettings>;
   stateRef: MutableRefObject<GameState>;
   replayingRef: MutableRefObject<boolean>;
   runTod: MutableRefObject<TimeOfDay>;
@@ -54,7 +56,7 @@ export function useGameMount(deps: GameMountDeps): void {
   const {
     gameMounted, levelId, carId,
     containerRef, gameRef, levelRef, pendingReplay, autoLaunchNext,
-    todRef, engineRef, mutedRef, stateRef, replayingRef, runTod, perEventRef,
+    todRef, engineRef, mutedRef, gfxRef, stateRef, replayingRef, runTod, perEventRef,
     setGameReady, setLoadingDone, setState, setDamage, setFlash, setTakedown,
     setReport, setCash, setCrashbreaker, setMultiplier, setRace, setReplaying,
     setCineCam, setPerEvent, setBoost, setBest,
@@ -72,6 +74,10 @@ export function useGameMount(deps: GameMountDeps): void {
     // the render path before the first frame; ?verify=1 still forces FAST).
     game.setTimeOfDay(todRef.current);
     game.setEngineFlavor(engineRef.current);
+    // apply the persisted graphics toggles before the first rendered frame so a
+    // disabled layer (clouds/water/grass/ao) never flashes on at mount. Presentation
+    // only — runs after setTimeOfDay so the clouds flag wins over the tod's cloud bake.
+    game.setGraphics(gfxRef.current);
     // apply the SETTINGS mute preference to the fresh (unmuted) Game's audio.
     // Game exposes no public mute setter; reach the audio graph through the
     // same runtime surface the debug overlay + M-key use. Presentation only.

@@ -2,6 +2,7 @@ import type { Medal } from '../game/events';
 import type { TimeOfDay } from '../game/daynight';
 import { LEVELS, type LevelId } from '../game/levels';
 import { DEFAULT_CAR, PLAYER_CARS, type PlayerCarId } from '../game/models';
+import { DEFAULT_GRAPHICS, type GraphicsSettings } from '../game/graphics';
 
 // localStorage contracts for the event picker (research doc §3.6).
 //
@@ -102,4 +103,30 @@ export function readMuted(): boolean {
 
 export function writeMuted(m: boolean): void {
   localStorage.setItem('cj-mute', m ? '1' : '0');
+}
+
+//   cj-gfx   graphics toggles { clouds, water, grass, ao, reflections, shadows,
+//            props, stats }. All presentation-only; the Game applies the visual
+//            ones at mount (and live via setGraphics), `stats` only shows the
+//            corner readout. Each key falls back to its default, so a partial/old
+//            blob upgrades cleanly with no migration step.
+export function readGraphics(): GraphicsSettings {
+  const raw = readJson('cj-gfx');
+  if (typeof raw !== 'object' || raw === null) return { ...DEFAULT_GRAPHICS };
+  const o = raw as Record<string, unknown>;
+  const bool = (v: unknown, d: boolean) => (typeof v === 'boolean' ? v : d);
+  return {
+    clouds: bool(o.clouds, DEFAULT_GRAPHICS.clouds),
+    water: bool(o.water, DEFAULT_GRAPHICS.water),
+    grass: bool(o.grass, DEFAULT_GRAPHICS.grass),
+    ao: bool(o.ao, DEFAULT_GRAPHICS.ao),
+    reflections: bool(o.reflections, DEFAULT_GRAPHICS.reflections),
+    shadows: bool(o.shadows, DEFAULT_GRAPHICS.shadows),
+    props: bool(o.props, DEFAULT_GRAPHICS.props),
+    stats: bool(o.stats, DEFAULT_GRAPHICS.stats),
+  };
+}
+
+export function writeGraphics(s: GraphicsSettings): void {
+  localStorage.setItem('cj-gfx', JSON.stringify(s));
 }

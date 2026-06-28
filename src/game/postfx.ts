@@ -66,6 +66,9 @@ export class Postfx {
   // Game.ts (setSpeedBlur). Held so the wiring can drive it without reaching
   // into the EffectPass internals.
   private speedBlur: SpeedBlurEffect;
+  // the screen-space ambient-occlusion pass — held so the graphics setting can
+  // skip it (pass.enabled = false makes the composer step over it entirely).
+  private ao: N8AOPostPass;
 
   constructor(renderer: THREE.WebGLRenderer, scene: THREE.Scene, camera: THREE.PerspectiveCamera, width: number, height: number) {
     this.composer = new EffectComposer(renderer, {
@@ -80,6 +83,7 @@ export class Postfx {
     ao.configuration.distanceFalloff = 0.7;
     ao.configuration.intensity = 2.6;
     this.composer.addPass(ao);
+    this.ao = ao;
 
     // SPEED BLUR: a center-sharp radial streak driven by the car's translational
     // speed (Game.ts feeds setStrength/setFocus). The world rushes outward from
@@ -119,6 +123,13 @@ export class Postfx {
   setSpeedBlur(strength: number, focusU = 0.5, focusV = 0.55): void {
     this.speedBlur.setStrength(strength);
     this.speedBlur.setFocus(focusU, focusV);
+  }
+
+  /** Graphics setting: enable / disable the screen-space ambient occlusion pass.
+   *  Disabled, the composer steps right over it — the single biggest post cost
+   *  to drop when chasing framerate. Presentation-only. */
+  setAO(on: boolean): void {
+    this.ao.enabled = on;
   }
 
   setSize(w: number, h: number): void {

@@ -109,7 +109,13 @@ export class PropInstancer {
   private items: Collected[] = [];
   private plains: PlainMesh[] = [];
 
-  constructor(private scene: THREE.Scene) {}
+  // the parent the batched draws are added to. Usually a dedicated 'cj-props'
+  // Group (props.ts) rather than the scene directly, so a single group.visible
+  // flip toggles the whole prop set — and any props that stream in AFTER the
+  // toggle inherit it (a parent's visible=false hides all descendants in
+  // three's render walk). Identity transform, so the baked world matrices land
+  // exactly where adding to the scene would.
+  constructor(private parent: THREE.Object3D) {}
 
   /** Harvest one positioned prop instance (a cloned, transformed GLB/builtin
    *  group). Reads each mesh's world matrix — the caller MUST have set the
@@ -172,7 +178,7 @@ export class PropInstancer {
       mesh.castShadow = p.castShadow;
       mesh.receiveShadow = p.receiveShadow;
       mesh.frustumCulled = true;
-      this.scene.add(mesh);
+      this.parent.add(mesh);
     }
     this.plains.length = 0;
 
@@ -228,7 +234,7 @@ export class PropInstancer {
             mesh.castShadow = it.castShadow;
             mesh.receiveShadow = it.receiveShadow;
             mesh.frustumCulled = true;
-            this.scene.add(mesh);
+            this.parent.add(mesh);
           }
           continue;
         }
@@ -252,7 +258,7 @@ export class PropInstancer {
         // frustum culling drop the stacks behind the camera (the whole point of
         // the spatial chunking) instead of drawing the level-wide batch always.
         inst.computeBoundingSphere();
-        this.scene.add(inst);
+        this.parent.add(inst);
       }
     }
 

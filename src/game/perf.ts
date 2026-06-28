@@ -97,6 +97,14 @@ export class Perf {
   private frameId = 0;
   private cur: PerfFrame;
   private median = 16.7;
+  // exponential moving averages for the live corner readout — a steady FPS /
+  // draw-call / triangle display that tracks changes within a few frames
+  // without the per-frame jitter the raw values show (the throttled player cube
+  // re-renders the whole scene every other frame, so raw calls/triangles swing
+  // hard between cube and non-cube frames). Fed in endFrame; read by live().
+  private smoothWall = 16.7;
+  private smoothCalls = 0;
+  private smoothTris = 0;
   private scratch: number[] = [];
   private lastLights = -1;
   private forceLightSample = false;
@@ -143,6 +151,8 @@ export class Perf {
   endFrame(wallMs: number): void {
     const f = this.cur;
     f.wall = wallMs;
+    // smooth the wall dt for the live FPS readout (responsive, low jitter)
+    this.smoothWall += (wallMs - this.smoothWall) * 0.1;
     f.sim = this.simMs;
     f.cube = this.cubeMs;
     f.post = this.postMs;
@@ -156,6 +166,10 @@ export class Perf {
     f.triangles = info.render.triangles;
     f.geometries = info.memory.geometries;
     f.textures = info.memory.textures;
+    // smooth the draw-call / triangle counts for the live readout (raw values
+    // alternate between cube and non-cube frames — see the field comment)
+    this.smoothCalls += (f.calls - this.smoothCalls) * 0.1;
+    this.smoothTris += (f.triangles - this.smoothTris) * 0.1;
 
     const work = f.sim + f.cube + f.post;
     const threshold = Math.max(SPIKE_FLOOR_MS, SPIKE_MEDIAN_RATIO * this.median);
@@ -220,6 +234,18 @@ export class Perf {
     if (this.count < RING) this.count++;
     this.frameId++;
     if (this.frameId % MEDIAN_EVERY === 0) this.updateMedian();
+  }
+
+  /** Cheap live readout for the corner HUD: smoothed FPS plus the most recent
+   *  completed frame's draw-call and triangle counts. No allocation — safe to
+   *  poll a few times a second. (this.cur still points at the frame just ended
+   *  until the next beginFrame.) */
+  live(): { fps: number; calls: number; triangles: number } {
+    return {
+      fps: this.smoothWall > 0 ? Math.round(1000 / this.smoothWall) : 0,
+      calls: Math.round(this.smoothCalls),
+      triangles: Math.round(this.smoothTris),
+    };
   }
 
   report(): PerfReport {
