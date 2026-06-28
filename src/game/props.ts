@@ -81,7 +81,15 @@ function loadPropScene(url: string): Promise<THREE.Group> {
 /** Build every PropDef of the level: colliders synchronously (call this
  *  before the first physics step), visuals async. collider 'none' or
  *  absent = pure decor, no body. */
-export function loadLevelProps(scene: THREE.Scene, phys: PhysicsContext, level: LevelDef): void {
+export function loadLevelProps(scene: THREE.Scene, phys: PhysicsContext, level: LevelDef): THREE.Group {
+  // All prop visuals live under ONE group so the graphics 'props' toggle can
+  // hide the whole set with a single group.visible flip (and props that stream
+  // in after the toggle inherit it). Identity transform — the batcher bakes
+  // world matrices, so a child lands exactly where adding to the scene would.
+  const propsGroup = new THREE.Group();
+  propsGroup.name = 'cj-props';
+  scene.add(propsGroup);
+
   // The DRAW-CALL BATCHER (propinstancer.ts): every positioned prop visual is
   // harvested into this collector instead of being added to the scene one mesh
   // at a time. Once all the GLBs have streamed in we flush() — collapsing the
@@ -89,7 +97,7 @@ export function loadLevelProps(scene: THREE.Scene, phys: PhysicsContext, level: 
   // builtins, …) into per-region instanced draws. Identical scene, far fewer
   // draw calls; that win then multiplies ×6 through the live cube reflection.
   // PRESENTATION ONLY — colliders below are untouched (the determinism contract).
-  const instancer = new PropInstancer(scene);
+  const instancer = new PropInstancer(propsGroup);
   const visuals: Promise<unknown>[] = [];
 
   for (const def of level.props ?? []) {
@@ -146,6 +154,8 @@ export function loadLevelProps(scene: THREE.Scene, phys: PhysicsContext, level: 
   // Ordering is pure presentation — colliders already exist — so awaiting the
   // whole set here can't touch determinism.
   void Promise.all(visuals).then(() => instancer.flush());
+
+  return propsGroup;
 }
 
 const UP = new CANNON.Vec3(0, 1, 0);

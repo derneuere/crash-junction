@@ -879,6 +879,148 @@ canvas {
   color: rgba(255, 255, 255, 0.85);
 }
 
+/* ---------- graphics overlay (corner stats + gear + settings dialog) ---------- */
+/* a right-anchored column: the live FPS/draw/triangle readout, the GRAPHICS gear,
+   and the settings dialog beneath it. Children opt back into pointer events so
+   the cluster never blocks the canvas underneath. */
+.gfxCorner {
+  position: fixed;
+  top: 14px;
+  right: 14px;
+  z-index: 8;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 7px;
+  font-family: Impact, Haettenschweiler, 'Arial Narrow Bold', 'Arial Black', sans-serif;
+  user-select: none;
+  pointer-events: none;
+}
+.gfxCorner > * {
+  pointer-events: auto;
+}
+.perfHud {
+  min-width: 96px;
+  padding: 6px 10px;
+  background: rgba(8, 10, 14, 0.78);
+  border: 1px solid rgba(255, 160, 60, 0.3);
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.45);
+}
+.perfRow {
+  display: flex;
+  justify-content: space-between;
+  gap: 14px;
+  font-size: 11px;
+  letter-spacing: 1.5px;
+  line-height: 1.55;
+  color: rgba(255, 255, 255, 0.5);
+}
+.perfRow b {
+  font-weight: normal;
+  color: #ffd34d;
+  font-variant-numeric: tabular-nums;
+}
+.perfRow b.lo {
+  color: #ff6a4d; /* sub-50 fps warning */
+}
+.gfxGear {
+  cursor: pointer;
+  font-family: inherit;
+  padding: 5px 13px;
+  font-size: 12px;
+  letter-spacing: 3px;
+  color: rgba(255, 255, 255, 0.6);
+  background: rgba(8, 10, 14, 0.6);
+  border: 1px solid rgba(255, 160, 60, 0.3);
+  transform: skewX(-8deg);
+  transition: color 0.15s, border-color 0.15s, box-shadow 0.15s;
+}
+.gfxGear:hover,
+.gfxGear.active {
+  color: #ffd34d;
+  border-color: rgba(255, 180, 70, 0.95);
+  box-shadow: 0 0 14px rgba(255, 140, 40, 0.3);
+}
+.gfxPanel {
+  width: 232px;
+  padding: 10px 12px 12px;
+  background: rgba(8, 10, 14, 0.9);
+  border: 1px solid rgba(255, 160, 60, 0.4);
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.55);
+}
+.gfxHead {
+  display: flex;
+  align-items: center;
+  font-size: 13px;
+  letter-spacing: 4px;
+  color: #ffd34d;
+}
+.gfxHead span {
+  flex: 1;
+}
+.gfxHead button {
+  cursor: pointer;
+  padding: 1px 8px;
+  font-family: inherit;
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.6);
+  background: transparent;
+  border: 1px solid rgba(255, 160, 60, 0.3);
+}
+.gfxHead button:hover {
+  color: #fff;
+  border-color: rgba(255, 160, 60, 0.7);
+}
+.gfxGroupLabel {
+  margin-top: 11px;
+  font-size: 9px;
+  letter-spacing: 3px;
+  color: #ffb46b;
+}
+.gfxToggle {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  margin-top: 7px;
+  padding: 7px 10px;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 11px;
+  letter-spacing: 1.5px;
+  color: rgba(255, 255, 255, 0.6);
+  background: rgba(8, 10, 14, 0.6);
+  border: 1px solid rgba(120, 140, 170, 0.25);
+  transition: color 0.15s, border-color 0.15s, box-shadow 0.15s;
+}
+.gfxToggle:hover {
+  color: #fff;
+  border-color: rgba(255, 160, 60, 0.6);
+}
+.gfxToggleLabel {
+  flex: 1;
+  text-align: left;
+}
+.gfxToggleState {
+  font-size: 11px;
+  letter-spacing: 2px;
+  color: rgba(255, 255, 255, 0.4);
+}
+.gfxToggle.on {
+  color: #ffd34d;
+  border-color: rgba(255, 180, 70, 0.9);
+  box-shadow: 0 0 12px rgba(255, 140, 40, 0.22);
+}
+.gfxToggle.on .gfxToggleState {
+  color: #8fe28f;
+}
+.gfxNote {
+  margin-top: 9px;
+  font-size: 9px;
+  letter-spacing: 1px;
+  line-height: 1.5;
+  color: rgba(255, 255, 255, 0.4);
+}
+
 /* in-game pre-launch overlay (Idle, level loaded) */
 .launchPrompt {
   position: absolute;

@@ -9,9 +9,11 @@ import type { ReplayFile } from './game/replay';
 import type { BoostState, CashFloatData, RaceStanding, ReportData, TakedownBanner } from './game/events';
 import { Hud, type FlashState } from './ui/Hud';
 import { DebugOverlay } from './ui/DebugOverlay';
+import { GraphicsOverlay } from './ui/GraphicsOverlay';
 import { Loading } from './ui/menu/Loading';
+import type { GraphicsSettings } from './game/graphics';
 import {
-  readBest, readCar, readMuted, readSel, writeMuted, writeSel, type BestMap,
+  readBest, readCar, readGraphics, readMuted, readSel, writeGraphics, writeMuted, writeSel, type BestMap,
 } from './ui/storage';
 import { readFastPath, type Phase } from './App/fastpath';
 import { useGameMount } from './App/useGameMount';
@@ -66,6 +68,11 @@ export default function App() {
   const engineRef = useRef(engineSound);
   const [muted, setMutedState] = useState(readMuted);
   const mutedRef = useRef(muted);
+  // graphics quality toggles (clouds/water/grass/ao/stats) — presentation-only.
+  // The mount applies them to a fresh Game; setGfx pushes live edits too.
+  const [gfx, setGfxState] = useState<GraphicsSettings>(readGraphics);
+  const gfxRef = useRef(gfx);
+  const [gfxOpen, setGfxOpen] = useState(false);
 
   // FLOW: start on TITLE, unless a fast-path/replay deep-link jumps to gameplay
   const [phase, setPhaseState] = useState<Phase>(fast0.current ? 'gameplay' : 'title');
@@ -104,6 +111,17 @@ export default function App() {
     writeMuted(m); // applied to the Game's audio at mount (toggleMute on a
     // fresh, unmuted Game). Settings is a menu screen — no Game is mounted
     // while it's open — so there's nothing live to flip here.
+  }, []);
+
+  /** Merge a graphics-toggle change, persist it, and push it to the live Game.
+   *  Presentation-only — setGraphics rides render-time seams the sim never reads,
+   *  so editing mid-run can't perturb a replay or a determinism pin. */
+  const setGfx = useCallback((patch: Partial<GraphicsSettings>) => {
+    const next = { ...gfxRef.current, ...patch };
+    gfxRef.current = next;
+    setGfxState(next);
+    writeGraphics(next);
+    gameRef.current?.setGraphics(next);
   }, []);
 
   /** EVENT SELECT highlight: move the highlighted card / pin a variant. This is
@@ -152,7 +170,7 @@ export default function App() {
   useGameMount({
     gameMounted, levelId, carId,
     containerRef, gameRef, levelRef, pendingReplay, autoLaunchNext,
-    todRef, engineRef, mutedRef, stateRef, replayingRef, runTod, perEventRef,
+    todRef, engineRef, mutedRef, gfxRef, stateRef, replayingRef, runTod, perEventRef,
     setGameReady, setLoadingDone, setState, setDamage, setFlash, setTakedown,
     setReport, setCash, setCrashbreaker, setMultiplier, setRace, setReplaying,
     setCineCam, setPerEvent, setBoost, setBest,
@@ -252,6 +270,13 @@ export default function App() {
         onSetEngineSound={setEngineSound}
         onSelectLevel={selectEvent}
         onLoadReplay={loadReplay}
+      />
+      <GraphicsOverlay
+        gfx={gfx}
+        open={gfxOpen}
+        onOpen={() => setGfxOpen(true)}
+        onClose={() => setGfxOpen(false)}
+        onChange={setGfx}
       />
     </>
   );

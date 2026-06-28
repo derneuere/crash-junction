@@ -30,6 +30,19 @@ export class SkyRig {
   private rt: THREE.WebGLRenderTarget | null = null;
   private readonly material: THREE.ShaderMaterial;
 
+  // ---- cloud on/off (graphics setting, presentation-only) ----
+  /** whether the visible cloud layer is shown. When off the dome samples no
+   *  panorama and the inline march density is forced to 0 → clear sky. The bake
+   *  still runs at full preset density, so toggling back on is instant (the
+   *  panorama is already in hand). */
+  private cloudsOn = true;
+  /** true once a panorama has been baked at least once (so uUseCloudTex is safe
+   *  to enable); set by cloudBake(). */
+  private cloudsBaked = false;
+  /** the last preset cloud density configure() wrote — restored to the live
+   *  dome when clouds are toggled back on. */
+  private presetCloudDensity = 0.9;
+
   // ---- equirect cloud bake (the perf win) ----
   /** High-res equirect HDR panorama; the cloud march fills it ONCE per tod with
    *  a clean, full-res, premultiplied-RGBA cloud field. The dome samples it by
@@ -168,9 +181,29 @@ export class SkyRig {
     renderer.setRenderTarget(this.cloudTex);
     renderer.render(this.cloudScene, this.cloudCam);
     renderer.setRenderTarget(prevTarget);
-    // point the dome at the fresh panorama + enable the sample path
+    // point the dome at the fresh panorama; whether the dome actually samples it
+    // (uUseCloudTex) is gated by the clouds-on flag via applyCloudVisibility().
     this.material.uniforms.uCloudTex.value = this.cloudTex.texture;
-    this.material.uniforms.uUseCloudTex.value = 1;
+    this.cloudsBaked = true;
+    this.applyCloudVisibility();
+  }
+
+  /** Show / hide the visible cloud layer (graphics setting). The dome either
+   *  samples the baked panorama or shows clear sky — no re-bake, no sim touch,
+   *  safe to call any time. The panorama persists, so toggling is instant. */
+  setCloudsEnabled(on: boolean): void {
+    this.cloudsOn = on;
+    this.applyCloudVisibility();
+  }
+
+  /** Drive the DISPLAY-side cloud uniforms from the on/off flag. When on, the
+   *  dome samples the baked panorama (once baked) at the preset density; when
+   *  off, the sample path is disabled and the inline-march density is zeroed so
+   *  even a not-yet-baked dome renders a clear sky (never live-marched clouds). */
+  private applyCloudVisibility(): void {
+    const u = this.material.uniforms;
+    u.uUseCloudTex.value = this.cloudsOn && this.cloudsBaked ? 1 : 0;
+    u.uCloudDensity.value = this.cloudsOn ? this.presetCloudDensity : 0;
   }
 
   /** Back-compat no-op: clouds used to be re-rendered per frame into a half-res
@@ -212,9 +245,13 @@ export class SkyRig {
     u.uNight.value = preset.night ?? 0;
     (u.uNightTint.value as THREE.Vector3).copy(toVec(preset.nightTint ?? 0x0a1430));
     u.uStarStrength.value = preset.starStrength ?? 0.9;
-    // cloud layer per-tod knobs (uCloudDrift is scrolled every frame, not here)
+    // cloud layer per-tod knobs (uCloudDrift is scrolled every frame, not here).
+    // Leave uCloudDensity at the preset value here so a following cloudBake()
+    // marches the panorama at full density; the on/off display gate is applied
+    // afterwards by applyCloudVisibility() (from cloudBake / setCloudsEnabled).
     u.uCloudCoverage.value = preset.cloudCoverage ?? 0.42;
     u.uCloudDensity.value = preset.cloudDensity ?? 0.9;
+    this.presetCloudDensity = u.uCloudDensity.value as number;
     (u.uCloudTint.value as THREE.Vector3).copy(toVec(preset.cloudTint ?? 0xb9c6d6));
 
     this.sunDir.setFromSphericalCoords(

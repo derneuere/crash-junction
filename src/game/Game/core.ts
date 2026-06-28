@@ -44,6 +44,7 @@ import { GROUP_DECOR, createPhysics, type PhysicsContext } from '../physics';
 import { buildEnvironment, makeHeightSampler } from '../environment';
 import { setSeaCamera, type Sea } from '../sea';
 import type { GrassField } from '../grass';
+import { DEFAULT_GRAPHICS, type GraphicsSettings } from '../graphics';
 import { loadLevelProps } from '../props';
 import { BRAKE_INTENSITY, HEADLIGHT_INTENSITY, charActor, createBarrel, createPole, createVehicle, deformActor, exhaustAnchors, popWheel, repairVehicle, shatterGlass, type LoosePart } from '../vehicles';
 import { applyCarEnvScale, applyGlassParams, glassParams, setCarEnvMap, setPlayerEnvMap, type GlassParams } from '../geometry';
@@ -227,6 +228,13 @@ export class Game {
   private sea: Sea | null = null;
   // the instanced blade grass (coast levels); wind runs off RENDER time too
   private grass: GrassField | null = null;
+  // player-facing graphics quality + draw-call diagnostic toggles. All
+  // presentation-only — applied through render-time seams, never read by the
+  // sim, so they're pin-safe. Defaults to everything on (prior behavior).
+  private gfx: GraphicsSettings = { ...DEFAULT_GRAPHICS };
+  // every set-dressing prop lives under this group (loadLevelProps) so the
+  // 'props' toggle hides the whole ~900-object set with one visible flip.
+  private propsGroup: THREE.Group | null = null;
 
   private actors: Actor[] = [];
   private byBody = new Map<number, Actor>();
@@ -479,7 +487,7 @@ export class Game {
     setSeaCamera(this.camera); // the sea reads the camera for fresnel/sparkle
     // prop colliders are synchronous and must exist before the first
     // physics step (their GLB visuals stream in whenever — see props.ts)
-    loadLevelProps(this.scene, this.phys, level);
+    this.propsGroup = loadLevelProps(this.scene, this.phys, level);
     // prop anchors double as pass-by whoosh triggers (sense-of-speed A5):
     // presentation only — static positions in, positioned one-shots out
     this.audio.setTrackside((level.props ?? []).map((p) => ({ x: p.x, y: 2, z: p.z })));
@@ -603,6 +611,49 @@ export class Game {
    *  Pure audio — the sim, and so replay determinism, never sees it. */
   setEngineFlavor(f: EngineFlavor): void {
     this.audio.setEngineFlavor(f);
+  }
+
+  /** Apply the player-facing graphics quality toggles (clouds / water / grass /
+   *  screen-space AO). Every one is PRESENTATION-ONLY — it rides a render-time
+   *  seam (sky-dome uniforms, mesh visibility, the cine composer's N8AO pass)
+   *  the sim never reads, so flipping any mid-take can't move a replay checksum
+   *  or a determinism pin. `stats` is UI-only (the corner FPS readout) and is
+   *  not applied here. Water/grass are no-ops on levels that have none. */
+  setGraphics(s: GraphicsSettings): void {
+    this.gfx = s;
+    this.perf.tag('gfx-settings');
+    this.skyRig.setCloudsEnabled(s.clouds);
+    this.postfx.setAO(s.ao);
+    if (this.sea) this.sea.mesh.visible = s.water;
+    if (this.grass) for (const m of this.grass.meshes) m.visible = s.grass;
+    // draw-call diagnostics: hide the whole prop set with one group flip, and
+    // toggle the shadow pass; the cube reflection is gated in the frame loop
+    // off this.gfx.reflections (skipping its whole-scene ×6 re-render).
+    if (this.propsGroup) this.propsGroup.visible = s.props;
+    this.applyShadows(s.shadows);
+  }
+
+  /** Enable/disable the sun's shadow depth pass (graphics setting). Off drops
+   *  the whole shadow render — a full extra pass over every caster — from the
+   *  draw-call budget. shadowMap.enabled is part of every lit material's program
+   *  key, so a change needs a one-time recompile sweep (guarded to the actual
+   *  edge). Presentation-only; the sim never sees shadows. */
+  private applyShadows(on: boolean): void {
+    if (this.renderer.shadowMap.enabled === on) return;
+    this.renderer.shadowMap.enabled = on;
+    this.renderer.shadowMap.needsUpdate = true;
+    this.scene.traverse((o) => {
+      const mat = (o as THREE.Mesh).material;
+      if (!mat) return;
+      for (const m of Array.isArray(mat) ? mat : [mat]) m.needsUpdate = true;
+    });
+  }
+
+  /** Live perf readout for the corner HUD: smoothed FPS plus the last frame's
+   *  draw-call and triangle counts. Presentation-only (reads renderer.info via
+   *  the lag tracker), so the sim/replay never sees it. */
+  perfLive(): { fps: number; calls: number; triangles: number } {
+    return this.perf.live();
   }
 
   /** Time-of-day toggle (day / dusk / night): regrades the lights and fog,
@@ -2846,9 +2897,11 @@ export class Game {
     af.player = p;
     this.audio.frame(af);
 
-    // presentation pixels only from here down — the sim never reads back
-    this.sea?.update(af.dt); // animate the waves off RENDER time (pin-safe)
-    this.grass?.update(af.dt, this.camera.position); // sway + distance-cull off RENDER time (pin-safe)
+    // presentation pixels only from here down — the sim never reads back.
+    // The water/grass graphics toggles skip the per-frame work entirely (not
+    // just the draw) when off — that's the framerate win, not only the pixels.
+    if (this.gfx.water) this.sea?.update(af.dt); // animate the waves off RENDER time (pin-safe)
+    if (this.gfx.grass) this.grass?.update(af.dt, this.camera.position); // sway + distance-cull off RENDER time (pin-safe)
     this.skyClock += af.dt; // scroll the baked cloud lookup off RENDER time (pin-safe)
     this.skyRig.setCloudTime(this.skyClock);
     // Clouds are PRERENDERED once per time-of-day into a high-res equirect
@@ -2872,9 +2925,11 @@ export class Game {
       // the counter and the gate live below the sim's read-back line, so
       // determinism is untouched. (cubeEvery is tunable via setCubeEvery — drop
       // to 1 for an every-frame capture.)
-      if (p && this.renderFrame % this.cubeEvery === 0) {
+      if (p && this.gfx.reflections && this.renderFrame % this.cubeEvery === 0) {
         // the world sweeps through the player's paint: re-capture the cube
-        // map (the car must not reflect itself; the flare is screen dressing)
+        // map (the car must not reflect itself; the flare is screen dressing).
+        // The 'reflections' graphics toggle skips this whole-scene ×6 re-render
+        // — by far the biggest single draw-call multiplier on dressed levels.
         const tCube = performance.now();
         this.reflections.update(this.renderer, this.scene, p.group.position, [p.group, this.sunFlare.group]);
         this.perf.cubeMs = performance.now() - tCube;
