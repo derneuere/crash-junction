@@ -22,10 +22,42 @@ import * as THREE from 'three';
 //   bounding sphere wraps the whole 200 m port, so it is "on screen" from every
 //   angle and three draws ALL of its instances every frame — even the ones
 //   behind the camera. That is MORE triangles, not fewer. So, exactly like
-//   grass.ts, we bin instances into spatial TILES and emit ONE InstancedMesh
-//   PER (geometry+material, tile). Each tile gets a tight bounding sphere, so
-//   three's own frustum test drops the off-screen tiles and the dockyard only
-//   pays for the stacks actually in view (and the cube faces likewise).
+//   grass.ts, we bin REPEATED-geometry instances into spatial TILES and emit ONE
+//   InstancedMesh PER (geometry+material, tile). Each tile gets a tight bounding
+//   sphere, so three's own frustum test drops the off-screen tiles and the
+//   dockyard only pays for the stacks actually in view (and the cube faces
+//   likewise).
+//
+// ── THE SINGLETON TAIL → ONE THREE.BatchedMesh PER MATERIAL (perf-batching) ───
+//   The InstancedMesh path only collapses geometry that REPEATS within a tile.
+//   The dockyard is dressed with hundreds of DIFFERENT-shape prototypes (cranes,
+//   silos, chimneys, warehouses, …) that are each unique within their tile, so
+//   they fell through to plain singleton Meshes — ~828 of them, one draw call
+//   each. THREE.BatchedMesh (three r166+/0.170) packs MANY different geometries
+//   that SHARE ONE material into a SINGLE draw, keeping a per-geometry bounding
+//   volume and doing its OWN per-object frustum cull + depth sort. So we group
+//   that tail by MATERIAL identity and emit one BatchedMesh per material —
+//   ~828 singletons sharing ~20–40 materials → ~20–40 draws — with no tiling
+//   needed (BatchedMesh culls per geometry, so a level-wide per-material batch
+//   does NOT have the "one giant always-on-screen sphere" pathology a level-wide
+//   InstancedMesh has). Per-instance tint rides as setColorAt; per-instance
+//   matrix as setMatrixAt; the shared base material (AO patch + night tag) is
+//   worn verbatim, so daynight's material sweep and the AO shader reach it
+//   exactly as they reach an InstancedMesh.
+//
+// ── THE LOAD-BEARING NORMALIZATION (BatchedMesh's hard constraint) ────────────
+//   BatchedMesh refuses to mix geometries with different attribute SETS or a
+//   different index-or-not (it throws). Our prototypes are NOT uniform: ao.ts
+//   adds an `aoVert` attribute to SOME prototypes and not others, and a stray
+//   prototype may lack `uv` or be (non-)indexed differently. So before packing a
+//   material bucket we NORMALIZE every distinct geometry to a common shape —
+//   a neutral `aoVert` of all 1.0 (the AO shader's no-op) where missing, a
+//   neutral zero `uv` where missing, and a consistent index mode — on a CLONE
+//   (never mutating the shared template the InstancedMesh path also draws,
+//   except for the idempotent neutral-aoVert add which is itself a no-op). And
+//   the whole per-bucket pack is wrapped in try/catch: ANY throw falls the bucket
+//   back to today's singleton plain-Mesh path, so the change is strictly
+//   NON-REGRESSING — a bucket BatchedMesh can't swallow renders exactly as before.
 //
 // ── WHAT'S PRESERVED (fidelity contract) ─────────────────────────────────────
 //   * GEOMETRY: clone(true) shares the cached template geometry across every
@@ -71,6 +103,13 @@ const TILE_SIZE = 40;
 const MIN_INSTANCES = 2;
 
 const WHITE = new THREE.Color(0xffffff);
+
+/** Cache of normalized (packable) geometry clones, keyed by (source geometry,
+ *  normalization signature). One clone per distinct prototype sub-mesh per
+ *  bucket shape — NOT per instance — so packing 828 singletons still only clones
+ *  the few dozen distinct prototype geometries. Module-scoped so a re-flush
+ *  (rebuild) reuses prior clones for the same template geometries. */
+const normCache = new WeakMap<THREE.BufferGeometry, Map<string, THREE.BufferGeometry>>();
 
 /** One collected sub-mesh of a loaded prop: its shared geometry + material and
  *  the WORLD matrix it should render at (group transform already folded in),
@@ -207,6 +246,11 @@ export class PropInstancer {
       arr.push(it);
     }
 
+    // the singleton TAIL: every item that is unique within its tile (would have
+    // become a plain Mesh). We don't emit it inline any more — we collect it by
+    // MATERIAL and pack one BatchedMesh per material after the instancing loop.
+    const tail: Collected[] = [];
+
     const m4 = new THREE.Matrix4();
     for (const members of groups.values()) {
       // bin this geometry+material run into spatial tiles
@@ -222,20 +266,12 @@ export class PropInstancer {
 
       for (const bucket of tiles.values()) {
         if (bucket.length < MIN_INSTANCES) {
-          // singleton in this tile: a plain mesh baked to its world matrix is
-          // one draw with no instancing overhead. Reuses the SHARED geometry +
-          // material (no memory cost); a tint is applied by cloning the one
-          // material so the singleton's look matches its instanced siblings.
-          for (const it of bucket) {
-            const mat = it.color.equals(WHITE) ? it.material : tintClone(it.material, it.color.getHex());
-            const mesh = new THREE.Mesh(it.geometry, mat);
-            mesh.matrixAutoUpdate = false;
-            mesh.matrix.copy(it.matrix);
-            mesh.castShadow = it.castShadow;
-            mesh.receiveShadow = it.receiveShadow;
-            mesh.frustumCulled = true;
-            this.parent.add(mesh);
-          }
+          // singleton in this tile: NOT instanceable here (only one of this
+          // geometry in this tile). Defer to the per-material BatchedMesh pass —
+          // it collapses these shape-diverse singletons that SHARE a material
+          // into one draw. (Falls back to a plain Mesh per item if a material
+          // bucket can't be batched; see emitBatchedTail.)
+          for (const it of bucket) tail.push(it);
           continue;
         }
         const first = bucket[0];
@@ -262,7 +298,134 @@ export class PropInstancer {
       }
     }
 
+    this.emitBatchedTail(tail);
+
     this.items.length = 0;
+  }
+
+  /** Collapse the shape-diverse singleton tail into ONE THREE.BatchedMesh per
+   *  material (perf-batching). Each item is unique within its tile, so it can't
+   *  be instanced — but most share a material (the Kenney colormap atlas, stone,
+   *  the metals), and BatchedMesh packs different geometries that share a
+   *  material into a single draw with its own per-object frustum cull.
+   *
+   *  Strictly non-regressing: any material bucket that BatchedMesh rejects (an
+   *  attribute set it can't reconcile, a sizing throw, anything) falls back to
+   *  the exact plain-Mesh-per-item path the singleton branch used before. */
+  private emitBatchedTail(tail: Collected[]): void {
+    if (!tail.length) return;
+
+    // group by (material, shadow-flag pair). The flag split keeps shadow
+    // correctness — a BatchedMesh has ONE castShadow/receiveShadow, so a bucket
+    // mixing flags would draw some props' shadows wrong. In practice props.ts
+    // sets cast=receive=true on every prop mesh, so this is one bucket per
+    // material; the split is cheap insurance.
+    const buckets = new Map<string, Collected[]>();
+    const matKey = new Map<THREE.Material, number>();
+    for (const it of tail) {
+      let mk = matKey.get(it.material);
+      if (mk === undefined) matKey.set(it.material, (mk = matKey.size));
+      const key = `${mk}|${it.castShadow ? 1 : 0}${it.receiveShadow ? 1 : 0}`;
+      let arr = buckets.get(key);
+      if (!arr) buckets.set(key, (arr = []));
+      arr.push(it);
+    }
+
+    for (const bucket of buckets.values()) {
+      // a bucket of one is the same ONE draw whether plain or BatchedMesh, with
+      // less machinery as a plain mesh — emit it directly (mirrors MIN_INSTANCES
+      // for the instanced path). BatchedMesh only pays off at >= 2 members.
+      if (bucket.length < 2 || !this.tryEmitBatch(bucket)) {
+        // either a lone-material singleton or a bucket BatchedMesh refused — in
+        // BOTH cases render exactly as the legacy singleton branch did: one
+        // plain matrix-baked Mesh per item (tint via a one-off material clone,
+        // glass skipped). Strictly non-regressing.
+        this.emitPlain(bucket);
+      }
+    }
+  }
+
+  /** Emit each item as a plain matrix-baked Mesh — the pre-batching singleton
+   *  path. Used for lone-material singletons and as the BatchedMesh fallback. */
+  private emitPlain(items: Collected[]): void {
+    for (const it of items) {
+      const mat = it.color.equals(WHITE) ? it.material : tintClone(it.material, it.color.getHex());
+      const mesh = new THREE.Mesh(it.geometry, mat);
+      mesh.matrixAutoUpdate = false;
+      mesh.matrix.copy(it.matrix);
+      mesh.castShadow = it.castShadow;
+      mesh.receiveShadow = it.receiveShadow;
+      mesh.frustumCulled = true;
+      this.parent.add(mesh);
+    }
+  }
+
+  /** Pack ONE material bucket into a BatchedMesh. Returns false (emitting
+   *  nothing) if the bucket can't be batched, so the caller falls back. */
+  private tryEmitBatch(bucket: Collected[]): boolean {
+    const first = bucket[0];
+    // The bucket's common attribute shape: position+normal always; uv if ANY
+    // member has it; aoVert if ANY member has it (so AO-baked and un-baked
+    // prototypes can share a batch — the un-baked ones get a neutral 1.0 fill).
+    // The index mode is "indexed" only if EVERY member is indexed.
+    let wantUv = false;
+    let wantAo = false;
+    let allIndexed = true;
+    const distinct = new Set<THREE.BufferGeometry>();
+    for (const it of bucket) {
+      const g = it.geometry;
+      distinct.add(g);
+      if (g.getAttribute('uv')) wantUv = true;
+      if (g.getAttribute('aoVert')) wantAo = true;
+      if (!g.getIndex()) allIndexed = false;
+    }
+    const sig = `${wantUv ? 'u' : ''}${wantAo ? 'a' : ''}${allIndexed ? 'i' : 'n'}`;
+
+    // Normalize each DISTINCT prototype geometry once (cached), and sum the
+    // vertex/index counts to size the BatchedMesh exactly (props are static and
+    // fully known here — no growth needed).
+    const normByGeo = new Map<THREE.BufferGeometry, THREE.BufferGeometry>();
+    let maxVerts = 0;
+    let maxIndices = 0;
+    try {
+      for (const g of distinct) {
+        const n = normalizeForBatch(g, wantUv, wantAo, allIndexed, sig);
+        normByGeo.set(g, n);
+        maxVerts += n.getAttribute('position').count;
+        const idx = n.getIndex();
+        maxIndices += idx ? idx.count : n.getAttribute('position').count;
+      }
+      if (maxVerts === 0) return false;
+
+      const batched = new THREE.BatchedMesh(bucket.length, maxVerts, maxIndices, first.material);
+      batched.name = 'cj-prop-batched';
+      batched.castShadow = first.castShadow;
+      batched.receiveShadow = first.receiveShadow;
+      batched.frustumCulled = true; // per-object frustum cull culls off-screen protos
+      batched.sortObjects = false; // opaque props — no transparency sort needed
+
+      // pack each distinct geometry once, remembering its geometryId
+      const geoId = new Map<THREE.BufferGeometry, number>();
+      for (const [src, norm] of normByGeo) geoId.set(src, batched.addGeometry(norm));
+
+      for (const it of bucket) {
+        const id = batched.addInstance(geoId.get(it.geometry)!);
+        batched.setMatrixAt(id, it.matrix);
+        // per-instance tint, exactly as InstancedMesh.setColorAt — three
+        // multiplies diffuse by it. White = untinted/glass = no change.
+        batched.setColorAt(id, it.color);
+      }
+      batched.computeBoundingSphere();
+      this.parent.add(batched);
+      return true;
+    } catch {
+      // any throw (attribute mismatch we didn't catch, sizing, an immature
+      // prototype) → caller renders the bucket as plain meshes. Never drop a
+      // prop. Dispose the normalized clones we made for this failed attempt
+      // unless they're the shared cache (cache clones are reused, never disposed
+      // here — they live in normCache for the fallback-free buckets).
+      return false;
+    }
   }
 }
 
@@ -274,4 +437,108 @@ function tintClone(m: THREE.Material, tint: number): THREE.Material {
   const c = m.clone(); // deep-copies userData, so night tags survive
   (c as THREE.MeshStandardMaterial).color?.multiply(new THREE.Color(tint));
   return c;
+}
+
+/** Produce a BatchedMesh-packable clone of a prototype sub-mesh geometry with a
+ *  CANONICAL attribute set so every member of a material bucket matches:
+ *
+ *    - exactly {position, normal[, uv][, aoVert]} — any other attribute (tangent,
+ *      vertex color, a second uv set) is DROPPED so a stray one never breaks the
+ *      uniform-attribute requirement. position+normal always (normal computed if
+ *      missing); uv/aoVert present iff the bucket needs them (wantUv/wantAo).
+ *    - `aoVert` neutral-filled to 1.0 where missing — 1.0 is the AO shader's
+ *      no-op (ao.ts FRAG_AO: factor = 1 when vAoVert = 1), so an un-baked
+ *      prototype renders identically to its un-batched self.
+ *    - `uv` neutral-filled to 0 where missing — only happens if SOME bucket
+ *      member has uv and this one doesn't; a colormap material without uv on a
+ *      sub-mesh samples a fixed texel, matching its un-batched behaviour (it had
+ *      no uv there before either).
+ *    - index mode forced to the bucket's (indexed iff every member is indexed,
+ *      else non-indexed via toNonIndexed()).
+ *
+ *  The result is CACHED per (source geometry, signature) — one clone per distinct
+ *  prototype per bucket shape, never per instance. The shared template geometry
+ *  is never mutated here (we clone), so the InstancedMesh path that also draws it
+ *  is untouched. */
+function normalizeForBatch(
+  src: THREE.BufferGeometry,
+  wantUv: boolean,
+  wantAo: boolean,
+  indexed: boolean,
+  sig: string,
+): THREE.BufferGeometry {
+  let perGeo = normCache.get(src);
+  if (!perGeo) normCache.set(src, (perGeo = new Map()));
+  const hit = perGeo.get(sig);
+  if (hit) return hit;
+
+  // start from the source; force index mode first so vertex counts are final
+  let base = src;
+  const srcIndexed = !!src.getIndex();
+  if (indexed && !srcIndexed) {
+    // shouldn't occur (indexed=true means every member was indexed) — guard anyway
+    base = src;
+  } else if (!indexed && srcIndexed) {
+    base = src.toNonIndexed(); // expands to per-vertex; matching attrs come along
+  }
+
+  const out = new THREE.BufferGeometry();
+  const pos = base.getAttribute('position');
+  out.setAttribute('position', cloneAttr(pos));
+  const vcount = pos.count;
+
+  // normal: required for shading; compute it on a throwaway if the source lacks
+  // one so every batch member carries it (un-normaled prototypes are rare).
+  let normal = base.getAttribute('normal');
+  if (!normal) {
+    const tmp = base.clone();
+    tmp.computeVertexNormals();
+    normal = tmp.getAttribute('normal');
+  }
+  out.setAttribute('normal', cloneAttr(normal));
+
+  if (wantUv) {
+    const uv = base.getAttribute('uv');
+    out.setAttribute('uv', uv ? cloneAttr(uv) : new THREE.Float32BufferAttribute(new Float32Array(vcount * 2), 2));
+  }
+  if (wantAo) {
+    const ao = base.getAttribute('aoVert');
+    if (ao) {
+      out.setAttribute('aoVert', cloneAttr(ao));
+    } else {
+      // neutral AO = fully open = shader no-op (factor 1.0)
+      const neutral = new Float32Array(vcount);
+      neutral.fill(1);
+      out.setAttribute('aoVert', new THREE.Float32BufferAttribute(neutral, 1));
+    }
+  }
+
+  if (indexed) {
+    const idx = base.getIndex();
+    if (idx) out.setIndex(cloneIndex(idx));
+  }
+
+  perGeo.set(sig, out);
+  return out;
+}
+
+/** Copy a BufferAttribute into a fresh one with the same itemSize/normalized.
+ *  (BatchedMesh.addGeometry reads attribute arrays into its packed buffer; a
+ *  fresh copy keeps the canonical clone independent of the source.) */
+function cloneAttr(a: THREE.BufferAttribute | THREE.InterleavedBufferAttribute): THREE.BufferAttribute {
+  const out = new THREE.BufferAttribute(new Float32Array(a.count * a.itemSize), a.itemSize, a.normalized);
+  for (let i = 0; i < a.count; i++) {
+    out.setX(i, a.getX(i));
+    if (a.itemSize > 1) out.setY(i, a.getY(i));
+    if (a.itemSize > 2) out.setZ(i, a.getZ(i));
+    if (a.itemSize > 3) out.setW(i, a.getW(i));
+  }
+  return out;
+}
+
+/** Copy an index attribute into a fresh Uint32 one. */
+function cloneIndex(idx: THREE.BufferAttribute): THREE.BufferAttribute {
+  const arr = new Uint32Array(idx.count);
+  for (let i = 0; i < idx.count; i++) arr[i] = idx.getX(i);
+  return new THREE.BufferAttribute(arr, 1);
 }
