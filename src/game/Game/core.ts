@@ -2729,11 +2729,14 @@ export class Game {
         const a = this.actors[i];
         this.vyBefore[i] = a.kind === 'vehicle' && !a.crashed ? a.body.velocity.y : Infinity;
       }
-      // capture the player's pre-solver yaw + grounded state for the wall-graze
-      // anti-spin below. Suspension grounding is fresh (applySuspension ran this
-      // step); the yaw is pre-solver so a wall contact's yaw impulse can be undone.
+      // capture the player's pre-solver yaw + planar velocity + grounded state for
+      // the wall-graze anti-spin and the landing anti-scrub below. Suspension
+      // grounding is fresh (applySuspension ran this step); the values are
+      // pre-solver so a contact's impulse can be undone.
       const pl = this.player;
       const plYawPre = pl && !pl.crashed ? pl.body.angularVelocity.y : 0;
+      const plVxPre = pl && !pl.crashed ? pl.body.velocity.x : 0;
+      const plVzPre = pl && !pl.crashed ? pl.body.velocity.z : 0;
       const plGrounded = !!pl && !pl.crashed && pl.susp.some((su) => su.grounded);
       this.phys.world.step(FIXED_DT);
       for (let i = 0; i < this.actors.length; i++) {
@@ -2758,15 +2761,21 @@ export class Game {
       // the fling); batted poles/barrels aren't vehicles and still fly.
       _contactIds.clear();
       let playerWallContact = false;
+      let playerGroundContact = false;
       for (const c of this.phys.world.contacts) {
         _contactIds.add(c.bi.id);
         _contactIds.add(c.bj.id);
         if (pl && (c.bi === pl.body || c.bj === pl.body)) {
-          // a STATIC body that isn't the ground plane = a wall / building /
-          // barrier (live cars are décor-filtered off ramps/plinths, and the
-          // suspension floats the box clear of the ground plane).
           const otherBody = c.bi === pl.body ? c.bj : c.bi;
-          if (otherBody.mass === 0 && otherBody.id !== this.phys.groundBody.id) playerWallContact = true;
+          if (otherBody.id === this.phys.groundBody.id) {
+            // the chassis box punched down onto the ground plane — only happens
+            // on a hard landing (the suspension floats it clear otherwise).
+            playerGroundContact = true;
+          } else if (otherBody.mass === 0) {
+            // a STATIC body that isn't the ground plane = a wall / building /
+            // barrier (live cars are décor-filtered off ramps/plinths).
+            playerWallContact = true;
+          }
         }
       }
       for (const a of this.actors) {
@@ -2783,6 +2792,18 @@ export class Game {
       // restores full yaw control on the very next step.
       if (pl && plGrounded && pl.destabilized <= 0 && playerWallContact) {
         pl.body.angularVelocity.y = plYawPre;
+      }
+      // LANDING ANTI-SCRUB: on a hard landing the chassis box slams through the
+      // suspension onto the ground plane, and that box↔ground friction (matGround
+      // 0.65) scrubs the car's HORIZONTAL speed to almost nothing — a flat 45 m/s
+      // touchdown otherwise stops dead. A live car's grip is the tire model, not
+      // this contact, so restore the pre-solver planar velocity (vy is left to the
+      // suspension + the landing vy caps above). Only fires on the slam — the box
+      // never reaches the ground plane in normal driving — so it can't disable the
+      // tire forces. Crashed cars keep the scrub (a wreck should grind to a halt).
+      if (pl && !pl.crashed && playerGroundContact) {
+        pl.body.velocity.x = plVxPre;
+        pl.body.velocity.z = plVzPre;
       }
       // slope-following chassis tilt (canonical post-step body fixup): AFTER
       // world.step + the vy/contact-cap clamps, slerp each
