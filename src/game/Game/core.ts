@@ -2729,6 +2729,12 @@ export class Game {
         const a = this.actors[i];
         this.vyBefore[i] = a.kind === 'vehicle' && !a.crashed ? a.body.velocity.y : Infinity;
       }
+      // capture the player's pre-solver yaw + grounded state for the wall-graze
+      // anti-spin below. Suspension grounding is fresh (applySuspension ran this
+      // step); the yaw is pre-solver so a wall contact's yaw impulse can be undone.
+      const pl = this.player;
+      const plYawPre = pl && !pl.crashed ? pl.body.angularVelocity.y : 0;
+      const plGrounded = !!pl && !pl.crashed && pl.susp.some((su) => su.grounded);
       this.phys.world.step(FIXED_DT);
       for (let i = 0; i < this.actors.length; i++) {
         const a = this.actors[i];
@@ -2751,13 +2757,32 @@ export class Game {
       // player plowing into a pileup is wrecked by the judgment before
       // the fling); batted poles/barrels aren't vehicles and still fly.
       _contactIds.clear();
+      let playerWallContact = false;
       for (const c of this.phys.world.contacts) {
         _contactIds.add(c.bi.id);
         _contactIds.add(c.bj.id);
+        if (pl && (c.bi === pl.body || c.bj === pl.body)) {
+          // a STATIC body that isn't the ground plane = a wall / building /
+          // barrier (live cars are décor-filtered off ramps/plinths, and the
+          // suspension floats the box clear of the ground plane).
+          const otherBody = c.bi === pl.body ? c.bj : c.bi;
+          if (otherBody.mass === 0 && otherBody.id !== this.phys.groundBody.id) playerWallContact = true;
+        }
       }
       for (const a of this.actors) {
         if (a.kind !== 'vehicle' || a.crashed || !_contactIds.has(a.body.id)) continue;
         if (a.body.velocity.y > LIVE_CAR_CONTACT_VY) a.body.velocity.y = LIVE_CAR_CONTACT_VY;
+      }
+      // WALL-GRAZE ANTI-SPIN: a barrier's off-centre friction impulse funnels
+      // entirely into yaw on the grounded yaw-only chassis (angularFactor 0,1,0),
+      // so a light graze grabs a corner and pivots the car ~180°. Restore the
+      // pre-solver yaw for a live, grounded, in-control player so a glance stays a
+      // linear redirect, not a spin — applyWallGlance handles the linear side but
+      // runs in the collide event BEFORE the solver, so it can't undo this. Shunt/
+      // slam spins (destabilized) are intentional and exempt; leaving the wall
+      // restores full yaw control on the very next step.
+      if (pl && plGrounded && pl.destabilized <= 0 && playerWallContact) {
+        pl.body.angularVelocity.y = plYawPre;
       }
       // slope-following chassis tilt (canonical post-step body fixup): AFTER
       // world.step + the vy/contact-cap clamps, slerp each
