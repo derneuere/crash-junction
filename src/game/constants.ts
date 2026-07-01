@@ -257,9 +257,15 @@ export const AIR_ROLL_KD = 3000; // N·m per (rad/s) of roll rate — retuned ~3
 // clamped to MAX_WHEELIE_ANGLE so a steep launch/dive never points past it.
 export const AIR_PITCH_KP = 11000; // N·m per rad of pitch error (ζ≈1.2 with KD below)
 export const AIR_PITCH_KD = 14000; // N·m per (rad/s) of pitch rate — retuned ~3×
-// Gentle yaw damp in air (BP kYawDamp_Min→Target). Light: yaw spin is mostly the
-// player's wheel input on takeoff and should bleed slowly, not snap.
-export const AIR_YAW_KD = 1800; // N·m per (rad/s) of yaw rate, airborne only
+// Airborne AFTERTOUCH (Burnout air control): steering commands a YAW RATE, not a
+// raw torque — a rate-target PD snaps the nose toward ±AIR_YAW_RATE at full lock
+// and back to 0 on release, so you can line up a landing or pull the car around
+// WITHIN a jump. (A plain torque+damp has a yaw-inertia time constant longer than
+// the airtime, so it barely turns.) AIR_YAW_FOLLOW is the follow stiffness and
+// doubles as the release damp — at steer 0 the target is 0, so it bleeds residual
+// yaw so the nose isn't still slewing at touchdown.
+export const AIR_YAW_RATE = 2.1; // rad/s commanded at full steer, airborne only
+export const AIR_YAW_FOLLOW = 16000; // N·m per (rad/s) of yaw-rate error, airborne only
 // Steady-air pitch trajectory follow: how strongly the pitch TARGET chases the
 // velocity-vector tangent (vs holding the takeoff seed). ~0.3 s to take up the arc.
 export const AIR_PITCH_FOLLOW = 3.0; // 1/s — target eases toward the trajectory tangent
