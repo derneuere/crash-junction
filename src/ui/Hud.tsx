@@ -8,6 +8,7 @@ import { synthKey } from './keys';
 import { BoostBar, CrashbreakerBar, RaceChip, RaceTagline, ScoreChip } from './chips';
 import { ControlsPanel } from './ControlsPanel';
 import { ReportPanel } from './ReportPanel';
+import { TouchControls } from './TouchControls';
 import type { BestMap } from './storage';
 
 export interface FlashState {
@@ -137,6 +138,9 @@ export function Hud({
       )}
 
       {controlsOpen && <ControlsPanel mode={mode} onClose={() => setControlsOpen(false)} />}
+
+      {/* on-screen thumb controls (phones/tablets only — null on desktop) */}
+      <TouchControls state={state} mode={mode} crashbreaker={crashbreaker} replaying={replaying} />
 
       {driving && <BoostBar boost={boost} />}
 

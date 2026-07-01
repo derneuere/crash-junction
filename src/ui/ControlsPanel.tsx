@@ -74,7 +74,9 @@ export function ControlsPanel({ mode, onClose }: ControlsPanelProps) {
             ))}
           </tbody>
         </table>
-        <div className="ctrlFoot">XBOX 360 &amp; COMPATIBLE PADS &middot; ESC TO CLOSE</div>
+        <div className="ctrlFoot">
+          XBOX 360 &amp; COMPATIBLE PADS &middot; ON-SCREEN CONTROLS ON TOUCH DEVICES &middot; ESC TO CLOSE
+        </div>
       </div>
     </div>
   );

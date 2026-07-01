@@ -1862,3 +1862,272 @@ canvas {
     transition: none;
   }
 }
+
+/* ════════════════════════════════════════════════════════════════════════
+   TOUCH CONTROLS (src/ui/TouchControls.tsx)
+   On-screen thumb controls for phones/tablets. Mounted only when the primary
+   pointer is coarse (a finger); every button fires the SAME recorded key path
+   the keyboard uses (keys.ts), so touch play is replay-deterministic. Placed
+   against the safe-area insets so the notch / home indicator never sits under a
+   thumb. All controls opt back into pointer events over the click-through HUD.
+   ════════════════════════════════════════════════════════════════════════ */
+#game,
+#game canvas {
+  touch-action: none; /* keep a scroll / pinch-zoom gesture from stealing a drive */
+}
+
+.touch {
+  position: fixed;
+  inset: 0;
+  z-index: 7; /* above the boost bar + cine bars, below the debug/controls panels */
+  pointer-events: none; /* only the buttons opt back in */
+  font-family: Impact, Haettenschweiler, 'Arial Narrow Bold', 'Arial Black', sans-serif;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.tBtn {
+  pointer-events: auto;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+  -webkit-tap-highlight-color: transparent;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  font-family: inherit;
+  letter-spacing: 2px;
+  color: rgba(255, 255, 255, 0.85);
+  background: rgba(8, 10, 14, 0.5);
+  border: 1px solid rgba(255, 160, 60, 0.55);
+  border-radius: 14px;
+  box-shadow: 0 2px 14px rgba(0, 0, 0, 0.4), inset 0 0 18px rgba(255, 120, 40, 0.06);
+  backdrop-filter: blur(2px);
+  transition: transform 0.06s, background 0.1s, box-shadow 0.1s, border-color 0.1s;
+}
+.tBtn:active {
+  transform: scale(0.94);
+  background: rgba(255, 122, 24, 0.28);
+  border-color: rgba(255, 200, 90, 0.95);
+  box-shadow: 0 0 20px rgba(255, 140, 40, 0.5), inset 0 0 24px rgba(255, 150, 60, 0.25);
+  color: #fff;
+}
+
+/* --- left thumb: steering (driving) --- */
+.touchSteer {
+  position: fixed;
+  left: calc(env(safe-area-inset-left, 0px) + 20px);
+  bottom: calc(env(safe-area-inset-bottom, 0px) + 22px);
+  display: flex;
+  gap: 14px;
+  pointer-events: none;
+}
+.touchSteer .tDir {
+  width: 92px;
+  height: 92px;
+  font-size: 34px;
+}
+
+/* --- right thumb: gas / drift / boost (driving) --- */
+.touchDrive {
+  position: fixed;
+  right: calc(env(safe-area-inset-right, 0px) + 20px);
+  bottom: calc(env(safe-area-inset-bottom, 0px) + 22px);
+  display: grid;
+  grid-template-columns: auto auto;
+  grid-template-areas:
+    'boost boost'
+    'drift gas';
+  gap: 12px;
+  align-items: end;
+  justify-items: end;
+  pointer-events: none;
+}
+.tGas {
+  grid-area: gas;
+  width: 116px;
+  height: 116px;
+  font-size: 22px;
+  color: #dfffe6;
+  border-color: rgba(120, 230, 140, 0.6); /* GO = green tint */
+}
+.tGas:active {
+  background: rgba(60, 200, 100, 0.3);
+  border-color: rgba(150, 255, 180, 0.95);
+  box-shadow: 0 0 22px rgba(60, 210, 110, 0.5), inset 0 0 24px rgba(90, 230, 140, 0.28);
+}
+.tBrake {
+  grid-area: drift;
+  width: 92px;
+  height: 92px;
+  font-size: 16px;
+}
+.tBoost {
+  grid-area: boost;
+  width: 100%;
+  min-width: 116px;
+  height: 54px;
+  font-size: 16px;
+  color: #ffe27a;
+}
+
+/* --- crashbreaker (crash mode, after a wreck) --- */
+.tCb {
+  width: 130px;
+  height: 130px;
+  font-size: 26px;
+  letter-spacing: 3px;
+  color: rgba(255, 220, 200, 0.7);
+  border-color: rgba(255, 90, 50, 0.6);
+  background: rgba(40, 8, 6, 0.5);
+}
+.tCb.ready {
+  color: #fff;
+  border-color: rgba(255, 210, 90, 0.95);
+  background: linear-gradient(180deg, rgba(255, 90, 30, 0.4), rgba(200, 30, 20, 0.4));
+  box-shadow: 0 0 26px rgba(255, 90, 30, 0.6);
+  animation: cbPulse 0.6s ease-in-out infinite alternate;
+}
+
+/* --- left thumb: aftertouch d-pad (after a wreck) --- */
+.touchPad {
+  position: fixed;
+  left: calc(env(safe-area-inset-left, 0px) + 20px);
+  bottom: calc(env(safe-area-inset-bottom, 0px) + 22px);
+  display: grid;
+  grid-template-columns: repeat(3, 66px);
+  grid-template-rows: repeat(3, 66px);
+  gap: 6px;
+  pointer-events: none;
+}
+.touchPad .tDir {
+  font-size: 26px;
+}
+.tUp { grid-area: 1 / 2 / 2 / 3; }
+.tLeft { grid-area: 2 / 1 / 3 / 2; }
+.tRight { grid-area: 2 / 3 / 3 / 4; }
+.tDown { grid-area: 3 / 2 / 4 / 3; }
+
+/* --- retry (done screen) — top-right so it clears the centred report/MENU --- */
+.tRestart {
+  position: fixed;
+  top: calc(env(safe-area-inset-top, 0px) + 16px);
+  right: calc(env(safe-area-inset-right, 0px) + 16px);
+  padding: 12px 20px;
+  font-size: 15px;
+  letter-spacing: 3px;
+}
+
+/* --- rotate-to-landscape nudge (portrait only) --- */
+.rotateHint { display: none; }
+@media (orientation: portrait) {
+  .rotateHint {
+    position: fixed;
+    inset: 0;
+    z-index: 3;
+    pointer-events: auto;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    background: rgba(5, 6, 9, 0.88);
+    backdrop-filter: blur(4px);
+  }
+  /* the landscape thumb clusters would be cramped in portrait — hide them
+     behind the nudge until the device is turned */
+  .touchSteer,
+  .touchDrive,
+  .touchPad {
+    display: none;
+  }
+}
+.rotateIcon {
+  font-size: 64px;
+  color: #ffb46b;
+  animation: rotateNudge 1.8s ease-in-out infinite;
+}
+.rotateMsg {
+  margin-top: 14px;
+  font-size: 24px;
+  letter-spacing: 5px;
+  background: linear-gradient(180deg, #ffd34d, #ff7a18 55%, #ff3b1f);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+.rotateSub {
+  margin-top: 8px;
+  font-size: 12px;
+  letter-spacing: 3px;
+  color: rgba(255, 255, 255, 0.5);
+}
+@keyframes rotateNudge {
+  0%, 100% { transform: rotate(-18deg); }
+  50% { transform: rotate(72deg); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .tCb.ready,
+  .rotateIcon {
+    animation: none;
+  }
+}
+
+/* ════════════════════════════════════════════════════════════════════════
+   MENU FLOW — PHONE LAYOUT (short landscape / narrow portrait)
+   The menu screens are absolutely-positioned percentage layouts tuned for a
+   desktop window. On a phone they overflow: the EVENT strip's auto-width +
+   translateX(-50%) collapses on a narrow viewport and wraps the last two
+   events off the bottom of the screen (unselectable). This block compacts the
+   chrome and lays the event strip out full-width so it wraps predictably and
+   scrolls instead of running off-screen. Desktop (wide AND tall) never matches.
+   ════════════════════════════════════════════════════════════════════════ */
+@media (max-height: 480px), (max-width: 720px) {
+  .menuHeader { top: 3%; }
+  .menuWordmark { font-size: 22px; margin-top: 4px; }
+  .menuWordmark.sm,
+  .region { font-size: 15px; letter-spacing: 5px; }
+  .menuKicker { font-size: 11px; letter-spacing: 6px; }
+
+  /* main menu — tighter rows so all four options clear the footer */
+  .menuList { top: 24%; width: min(560px, 94vw); }
+  .menuRow { margin: 4px 0; padding: 8px 18px; }
+  .menuRowLabel { font-size: 22px; }
+  .menuRowSub { font-size: 10px; }
+
+  /* EVENT SELECT — full-width centred strip that wraps + scrolls instead of
+     pushing cards past the bottom edge. All four events stay reachable. */
+  .eventScreen .eventCards {
+    top: 22%;
+    bottom: 11%;
+    left: 8px;
+    right: 8px;
+    max-width: none;
+    transform: none;
+    gap: 10px;
+    justify-content: center;
+    align-content: flex-start;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+    touch-action: pan-y;
+    padding: 2px 0 6px;
+  }
+  .eventScreen .card { width: 168px; padding-bottom: 8px; }
+  .eventScreen .card.focused { transform: skewX(-8deg) scale(1.02); }
+  .eventScreen .card .thumb { height: 44px; }
+  .eventScreen .card .evName { font-size: 15px; }
+  .eventScreen .card .launchRow { font-size: 13px; margin-top: 6px; }
+
+  /* settings — let tall groups scroll rather than clip */
+  .setBody {
+    top: 14%;
+    bottom: 12%;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+  .setGroup { margin-bottom: 12px; padding: 10px 14px; }
+
+  .menuFoot { bottom: 2%; font-size: 10px; }
+  .backBtn { bottom: 3%; left: 3%; }
+}
