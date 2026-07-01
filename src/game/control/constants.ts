@@ -139,6 +139,17 @@ export const WHEELIE_AIR_SEED = 0.3; // rad — physical air-pitch seed if we la
 export const BRAKE_DECEL = 26;
 export const COAST_DRAG = 4.5; // m/s² rolloff with no throttle
 
+// ---- reverse (arcade brake-is-reverse) -------------------------------------
+// There is no separate reverse key: holding the brake once the car has braked
+// to a near-stop drives it backward at a limited speed (Burnout Paradise does
+// exactly this). The engine/boost economy is forward-only — updateSpeed clamps
+// speed ≥ 0 — so reverse can't come from there; the grounded drive path applies
+// it as a modest negative drive force, cut once the reverse-speed cap is
+// reached so it settles at a steady crawl.
+export const REVERSE_ACCEL = 6; // m/s² backward push while reversing
+export const REVERSE_MAX_SPEED = 8; // m/s cap on reverse speed (~29 km/h)
+export const REVERSE_ENGAGE_BELOW = 0.8; // engage once forward speed drops below this (m/s)
+
 // ---- boost economy (earned + segmented; see header) ----
 // One full segment is BOOST_SEGMENT_SECS of burn; the bar holds `segments` of
 // them. BOOST_CAP is kept as the *starting* capacity (one segment) so callers

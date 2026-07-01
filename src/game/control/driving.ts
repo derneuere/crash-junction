@@ -39,6 +39,9 @@ import {
   PITCH_MAX,
   PITCH_MIN,
   PITCH_PER_ACCEL,
+  REVERSE_ACCEL,
+  REVERSE_ENGAGE_BELOW,
+  REVERSE_MAX_SPEED,
   ROLL_MAX,
   ROLL_PER_LATG,
   STEER_FULL_BELOW,
@@ -415,6 +418,18 @@ export function stepVehicleForces(
   );
 
   const airborne = !player.susp.some((su) => su.grounded);
+
+  // ---- reverse: once braking has brought the car to a near-stop, continuing to
+  //      hold the brake drives it backward at a limited speed (arcade brake-is-
+  //      reverse — there's no separate reverse key, and the forward-only speed
+  //      economy above never produces this). A modest negative drive force, cut
+  //      once the reverse-speed cap is reached so it settles at a steady crawl.
+  //      Grounded-only; suppressed on throttle (forward intent) and while
+  //      drifting (a brake tap there is the drift, not reverse). ---------------
+  if (!airborne && input.brake && !input.throttle && !s.drifting && forwardSpeed < REVERSE_ENGAGE_BELOW) {
+    brakeForce = 0; // don't let the brake fight the reverse drive (it opposes motion either way)
+    driveForce = -forwardSpeed >= REVERSE_MAX_SPEED ? 0 : -b.mass * REVERSE_ACCEL;
+  }
 
   if (!airborne) {
     // ---- yaw-only chassis while grounded (the stability keystone) ------------
