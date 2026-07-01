@@ -5,7 +5,8 @@ import {
   AIR_PITCH_KP,
   AIR_ROLL_KD,
   AIR_ROLL_KP,
-  AIR_YAW_KD,
+  AIR_YAW_FOLLOW,
+  AIR_YAW_RATE,
   FIXED_DT,
   HARD_LAND_MIN_AIR,
   HARD_LAND_MIN_VY,
@@ -600,9 +601,15 @@ export function stepVehicleForces(
     _torque.copy(_right).scale(pitchTau, _torque);
     b.applyTorque(_torque);
 
-    // gentle yaw damp (BP kYawDamp): bleed spin about body up so the nose isn't
-    // still slewing at touchdown (pure rate damp — heading is the player's to set).
-    _torque.copy(_up).scale(-AIR_YAW_KD * wYaw, _torque);
+    // airborne AFTERTOUCH: steering commands a YAW RATE — the missing air control.
+    // A rate-target PD chases ±AIR_YAW_RATE at full lock (so you can line up a
+    // landing or pull the nose around mid-jump) and, at steer 0, chases 0 so the
+    // nose settles instead of slewing at touchdown. +steer = right, and a
+    // +rotation about body-up points the nose LEFT (grounded-steer convention), so
+    // the target is negated.
+    const targetYaw = -AIR_YAW_RATE * s.steer;
+    const yawTau = AIR_YAW_FOLLOW * (targetYaw - wYaw);
+    _torque.copy(_up).scale(yawTau, _torque);
     b.applyTorque(_torque);
 
     s.airRoll = Math.asin(clamp(_right.dot(UP_W), -1, 1)); // bank readout (NaN-guarded; nothing consumes it yet)
