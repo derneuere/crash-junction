@@ -33,3 +33,6 @@ screenshots/
 # Stryker mutation-testing reports + incremental cache
 reports/mutation/
 .stryker-tmp/
+
+# local visual-reference photos (web-sourced, not for redistribution)
+references/

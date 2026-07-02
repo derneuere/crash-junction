@@ -68,6 +68,10 @@ export interface GraphicsSettings {
    *  horizon are distance-culled (invisible anyway), so this is the phone's
    *  vertex/raster budget knob — 0.6 halves the dockyard's drawn dressing. */
   drawDistance: number;
+  /** Burnout-style blobby car shadows: cars leave the sun's shadow depth
+   *  pass entirely and a single instanced multiply-blend quad batch darkens
+   *  the ground under every car — whole-field car shadows for ONE draw. */
+  carBlobShadows: boolean;
 }
 
 /** The two quality tiers as settings patches (the overlay's preset buttons
@@ -77,8 +81,8 @@ export interface GraphicsSettings {
  *  film-look composer (N8AO/MSAA HDR/bloom), and native-DPR fill — plus a
  *  half-res shadow map and closer grass rings. */
 export const TIER_PRESETS = {
-  desktop: { ao: true, reflections: true, postfx: true, renderScale: 1, shadowSize: 3072, grassRange: 1, drawDistance: 1 },
-  phone: { ao: false, reflections: false, postfx: false, renderScale: 0.75, shadowSize: 1536, grassRange: 0.6, drawDistance: 0.6 },
+  desktop: { ao: true, reflections: true, postfx: true, renderScale: 1, shadowSize: 3072, grassRange: 1, drawDistance: 1, carBlobShadows: false },
+  phone: { ao: false, reflections: false, postfx: false, renderScale: 0.75, shadowSize: 1536, grassRange: 0.6, drawDistance: 0.6, carBlobShadows: true },
 } as const;
 
 export const DEFAULT_GRAPHICS: GraphicsSettings = {
