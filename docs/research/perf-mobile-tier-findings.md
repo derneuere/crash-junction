@@ -175,31 +175,45 @@ cheaper, the next lever is merging the panel meshes into the hull draw for
 REMOTE cars only (rivals don't deform per-panel until hit) — bigger surgery,
 not taken.
 
-## Round 4 — Burnout-style blobby car shadows (from the decomp research)
+## Round 5 — CPU pass: the O(n²) broadphase degeneration
 
-Arcade racers of the Burnout era classically kept cars out of the shadow
-depth pass entirely: every car gets a soft projected ground blob, and all
-blobs batch into a single draw with one shared texture. At racing speeds a
-soft under-car blob reads as a perfectly convincing contact shadow — the
-crisp sun-projected silhouette only ever registered when parked.
+Benchmarked the sim by manually driving `advance(1/60)` ×300 in-page with
+sub-timers monkey-patched onto the cannon-es internals (immune to the
+hidden-tab rAF):
 
-`carshadow.ts` ports the idea: one `InstancedMesh` of multiply-blended
-radial-gradient quads (white = no darkening, so the per-instance colour
-doubles as an alpha fade). Grounded cars pin the blob to their own contact
-plane (the body quaternion keeps it flush on ramps); airborne cars project to
-the height field, growing (+12%/m) and fading (out by 5 m altitude) like BP's
-height-off-ground term. Blobs skip past 90 m (sub-pixel) and past the fog
-(the car itself is hidden there).
+| Component | ms/frame (desktop) | share |
+| --- | --- | --- |
+| whole `advance` | 1.75 | 100% |
+| `world.step` (×2 substeps) | 1.66 | 95% |
+| **`broadphase.collisionPairs`** | **0.99** | **60%** |
+| `narrowphase.getContacts` | 0.045 | 3% |
+| `solver.solve` | 0.003 | — |
+| game logic (advance − step) | 0.09 | 5% |
 
-Wiring: new `carBlobShadows` graphics flag (phone preset true, desktop false,
-overlay toggle) — enabling it makes `CarLod.setHullShadows(false)` pull the
-hulls (the last remaining car casters) out of the depth pass and turns the
-batch on. The sun's shadow map still renders the world/props.
+Every presentation-tail helper (grass update, prop cull, car LOD, blob
+shadows, sea, audio frame) measured < 0.05 ms — noise.
 
-**Measured (phone tier, grid pose):** car shadow depth draws **27 → 0**; all
-car shadows now cost **exactly 1 draw** (6 blobs instanced). Chase-pose total
-154 calls / 0.45M tris. Visual check: soft contact blobs under the whole
-grid pack, flush with the road.
+**Root cause:** cannon-es `SAPBroadphase.collisionPairs` tests
+`needBroadphaseCollision` BEFORE the sorted-axis bounds `break` and
+`continue`s on rejection. A STATIC or SLEEPING body is rejected against
+everything, so its sweep never breaks and scans the entire remaining list.
+With ~490 static prop/wall/building bodies out of ~515, that's ~265k
+rejected-pair calls per frame — a stock-library O(n²) wart, not our code.
+
+**Fix (`StaticAwareSAPBroadphase`, physics.ts):** flag bodies once per sweep
+as inert (static-or-sleeping — the exact reject predicate); an inert body
+sweeps only the ascending list of non-inert bodies ahead of it. Every skipped
+pair is one the stock loop `continue`d over with no side effects, and the
+first bounds-fail against a non-inert body breaks exactly where the stock
+loop would have — **the emitted pair list is bit-identical (same pairs, same
+order), so the solver sees byte-identical inputs.** Proven by the replay
+suite passing unchanged.
+
+**Measured after:** broadphase **0.99 → 0.055 ms (18×)**; whole sim frame
+**1.75 → 0.32 ms (5.5×)**, same scene (499 bodies, 6 awake). Sim CPU is now
+~0.3 ms/frame on desktop — even at a 2–3× A13 penalty it is comfortably
+inside the 60 fps budget, which effectively eliminates "physics catch-up
+spiral" as a bottleneck candidate on the phone.
 
 ## Not done (deliberately, demo-scoped)
 - perf-reflections-plan Option A proper (THREE.Layers) — the hide-list seam
