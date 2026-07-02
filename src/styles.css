@@ -892,6 +892,11 @@ canvas {
   flex-direction: column;
   align-items: flex-end;
   gap: 7px;
+  /* cap the whole corner column at the viewport so the settings panel (a
+     flex child) can shrink + scroll on a landscape phone instead of running
+     off the bottom edge unreachable. dvh tracks iOS Safari's toolbars. */
+  max-height: calc(100vh - 28px);
+  max-height: calc(100dvh - 28px);
   font-family: Impact, Haettenschweiler, 'Arial Narrow Bold', 'Arial Black', sans-serif;
   user-select: none;
   pointer-events: none;
@@ -947,6 +952,15 @@ canvas {
   background: rgba(8, 10, 14, 0.9);
   border: 1px solid rgba(255, 160, 60, 0.4);
   box-shadow: 0 10px 40px rgba(0, 0, 0, 0.55);
+  /* the preset + quality + draw-call rows outgrew a landscape phone: as the
+     capped gfxCorner column's flex child, shrink to the space left under the
+     stats HUD + gear and scroll (same pattern as .setBody / .eventCards).
+     min-height 0 lets flexbox actually shrink below the content height. */
+  min-height: 0;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  touch-action: pan-y;
+  overscroll-behavior: contain;
 }
 .gfxHead {
   display: flex;
