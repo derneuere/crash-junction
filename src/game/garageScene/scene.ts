@@ -1,38 +1,48 @@
 import * as THREE from 'three';
-import { getVehicleModel, type PlayerCarId, type VehicleModel, setPlayerCar } from '../models';
 import {
-  GARAGE_DEFAULT_COLOR, FLOOR_Y, ORBIT_RADIUS, ORBIT_HEIGHT, ORBIT_SPEED, TARGET_Y,
+  getVehicleModel, setPlayerCar, PLAYER_CARS, type PlayerCarId, type VehicleModel,
+} from '../models';
+import {
+  GARAGE_LINEUP_COLORS, BAY_SPACING, CAR_YAW, CAM_AZIMUTH, CAM_RADIUS, CAM_HEIGHT,
+  TARGET_Y, FRAME_SHIFT, SWAY_SPEED, SWAY_AMOUNT, GLIDE_RATE,
 } from './constants';
 import { buildCar, buildMirror } from './car';
 import { buildShowroom } from './showroom';
 import { buildLights } from './lights';
 import { buildEnv } from './env';
 
+/** One parked roster car: its bay, template, current paint and GL resources. */
+interface Bay {
+  id: PlayerCarId;
+  model: VehicleModel;
+  color: number;
+  group: THREE.Group;
+  mirror: THREE.Group;
+  disposables: { dispose(): void }[];
+}
+
 export class GarageScene {
   private readonly renderer: THREE.WebGLRenderer;
   private readonly scene = new THREE.Scene();
   private readonly camera: THREE.PerspectiveCamera;
 
-  // the turntable holds the car + its mirrored copy; we rotate the camera, not
-  // the table, but keeping a group makes setCar() teardown a single removal.
-  private readonly turntable = new THREE.Group();
-  private carGroup: THREE.Group | null = null;
-  private mirrorGroup: THREE.Group | null = null;
-
-  // everything we must dispose: geometries + materials we created (the baked
-  // template geometry is owned by models.ts and only cloned, so we dispose our
-  // clones but never the source).
+  // shell resources (floor/walls/env) — live for the scene's whole life
   private readonly disposables: { dispose(): void }[] = [];
-  private readonly carDisposables: { dispose(): void }[] = []; // swapped per car
+  // the parked roster, one entry per PLAYER_CARS def, built lazily on the
+  // first setCar once the vehicle library is baked
+  private readonly bays: Bay[] = [];
+  private selected = 0;
 
-  private orbit = Math.PI * 0.22; // start angle — three-quarter front view
+  // eased camera state — glides bay-to-bay instead of cutting (the B3 move)
+  private readonly camPos = new THREE.Vector3();
+  private readonly camTarget = new THREE.Vector3();
+  private camSnapped = false;
+
+  private t = 0; // idle-sway clock (seconds, scene-local, presentation only)
   private raf = 0;
   private last = 0;
   private running = false;
   private disposed = false;
-
-  private carId: PlayerCarId | null = null;
-  private color = GARAGE_DEFAULT_COLOR;
 
   constructor(private readonly canvas: HTMLCanvasElement) {
     this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false });
@@ -43,42 +53,43 @@ export class GarageScene {
     this.sizeRendererToCanvas();
 
     this.scene.background = new THREE.Color(0x0a0c10);
-    this.scene.fog = new THREE.Fog(0x0a0c10, 11, 26);
+    this.scene.fog = new THREE.Fog(0x0a0c10, 13, 30);
 
-    this.camera = new THREE.PerspectiveCamera(42, this.aspect(), 0.1, 100);
-    this.scene.add(this.turntable);
+    this.camera = new THREE.PerspectiveCamera(40, this.aspect(), 0.1, 100);
 
-    buildShowroom(this.scene, (...items) => this.track(...items));
-    buildLights(this.scene);
+    buildShowroom(this.scene, (...items) => this.track(...items), PLAYER_CARS.length);
+    buildLights(this.scene, PLAYER_CARS.length);
     buildEnv(this.renderer, this.scene, (...items) => this.track(...items));
   }
 
   // ── public API ────────────────────────────────────────────────────────────
 
-  /** Show `carId` painted in `color` (defaults to the spawn red). Cheap to
-   *  call on every left/right cycle — swaps just the car meshes, the showroom
-   *  and lights persist. Returns true if the model was available (false only
-   *  if loadVehicleModels never ran — caller can leave the previous car up). */
-  setCar(carId: PlayerCarId, color: number = this.color): boolean {
-    this.carId = carId;
-    this.color = color;
-    // getVehicleModel reads the module-level player-car pointer; pin it so the
-    // requested body's template comes back (and restore is unnecessary — this
-    // is a presentation-only read; App re-pins setPlayerCar before any Game).
+  /** Focus the camera on `carId`'s bay (a smooth glide) and, if `color` is
+   *  given, repaint that car. Cheap on every left/right cycle — the whole
+   *  roster is parked once; cycling only moves the camera. Returns false only
+   *  if loadVehicleModels never ran (caller can leave the screen up; the next
+   *  call retries the lazy build). */
+  setCar(carId: PlayerCarId, color?: number): boolean {
+    if (!this.buildRoster()) return false;
+    const idx = this.bays.findIndex((b) => b.id === carId);
+    if (idx < 0) return false;
+    this.selected = idx;
+    // keep the module-level pin on the browsed car (presentation-only read;
+    // App re-pins setPlayerCar before any Game constructs)
     setPlayerCar(carId);
-    const model = getVehicleModel('sedan', true);
-    if (!model) return false;
-    this.swapCar(model, color);
+    const bay = this.bays[idx];
+    if (color !== undefined && color !== bay.color) this.repaint(bay, color);
+    if (!this.running) this.renderOnce();
     return true;
   }
 
-  /** Repaint the current car without rebuilding it. */
+  /** Repaint the focused car without changing the selection. */
   setColor(color: number): void {
-    this.color = color;
-    if (this.carId) this.setCar(this.carId, color);
+    const bay = this.bays[this.selected];
+    if (bay) this.setCar(bay.id, color);
   }
 
-  /** Start the rAF orbit loop (idempotent). */
+  /** Start the rAF loop (idempotent) — eases the camera and sways idly. */
   start(): void {
     if (this.running || this.disposed) return;
     this.running = true;
@@ -88,8 +99,8 @@ export class GarageScene {
       this.raf = requestAnimationFrame(tick);
       const dt = Math.min(0.05, (now - this.last) / 1000);
       this.last = now;
-      this.orbit += ORBIT_SPEED * dt;
-      this.updateCamera();
+      this.t += dt;
+      this.updateCamera(dt);
       this.renderer.render(this.scene, this.camera);
     };
     this.raf = requestAnimationFrame(tick);
@@ -102,13 +113,15 @@ export class GarageScene {
     this.raf = 0;
   }
 
-  /** Render a single frame at a fixed orbit angle. Used by the headless
+  /** Render a single frame with the sway clock pinned to `phase` and the
+   *  camera snapped onto the selected bay (no glide). Used by the headless
    *  screenshot harness (tools/garageshot) for stable, comparable captures;
    *  production uses start()'s rAF loop instead. */
-  renderPose(orbit: number): void {
+  renderPose(phase: number): void {
     if (this.disposed) return;
-    this.orbit = orbit;
-    this.updateCamera();
+    this.t = phase;
+    this.camSnapped = false; // force a snap to the exact framing
+    this.updateCamera(0);
     this.renderer.render(this.scene, this.camera);
   }
 
@@ -118,7 +131,7 @@ export class GarageScene {
     this.sizeRendererToCanvas();
     this.camera.aspect = this.aspect();
     this.camera.updateProjectionMatrix();
-    if (!this.running) this.renderer.render(this.scene, this.camera);
+    if (!this.running) this.renderOnce();
   }
 
   /** Free every GL resource and drop the context. The codebase leaks WebGL
@@ -128,49 +141,99 @@ export class GarageScene {
     if (this.disposed) return;
     this.disposed = true;
     this.stop();
-    this.teardownCar();
+    for (const bay of this.bays) this.teardownBay(bay);
+    this.bays.length = 0;
     for (const d of this.disposables) d.dispose();
     this.disposables.length = 0;
     this.renderer.dispose();
     this.renderer.forceContextLoss();
   }
 
-  // ── camera orbit ───────────────────────────────────────────────────────────
+  // ── camera ────────────────────────────────────────────────────────────────
 
-  private updateCamera(): void {
-    const x = Math.sin(this.orbit) * ORBIT_RADIUS;
-    const z = Math.cos(this.orbit) * ORBIT_RADIUS;
-    this.camera.position.set(x, ORBIT_HEIGHT, z);
-    this.camera.lookAt(0, TARGET_Y, 0);
+  /** Desired pos/target for the selected bay at the current sway phase, then
+   *  exp-damped toward it (`dt` = 0 or an unsnapped camera → hard snap). */
+  private updateCamera(dt: number): void {
+    const cx = this.selected * BAY_SPACING;
+    const az = CAM_AZIMUTH + SWAY_AMOUNT * Math.sin(this.t * SWAY_SPEED);
+    const h = CAM_HEIGHT + 0.05 * Math.sin(this.t * SWAY_SPEED * 0.77);
+    // screen-left in world space (dir × up shorthand) — shifting BOTH the
+    // camera and its target left pushes the car right of screen centre,
+    // clearing room for the bottom name/stat band (B3 framing)
+    const lx = -Math.cos(az) * FRAME_SHIFT;
+    const lz = Math.sin(az) * FRAME_SHIFT;
+    const pos = new THREE.Vector3(cx + lx + Math.sin(az) * CAM_RADIUS, h, lz + Math.cos(az) * CAM_RADIUS);
+    const target = new THREE.Vector3(cx + lx, TARGET_Y, lz);
+
+    if (!this.camSnapped || dt <= 0) {
+      this.camPos.copy(pos);
+      this.camTarget.copy(target);
+      this.camSnapped = true;
+    } else {
+      const k = 1 - Math.exp(-GLIDE_RATE * dt);
+      this.camPos.lerp(pos, k);
+      this.camTarget.lerp(target, k);
+    }
+    this.camera.position.copy(this.camPos);
+    this.camera.lookAt(this.camTarget);
   }
 
-  // ── car swap ────────────────────────────────────────────────────────────────
+  // ── roster build / repaint ───────────────────────────────────────────────
 
-  private swapCar(model: VehicleModel, color: number): void {
-    this.teardownCar();
-    const car = buildCar(model, color, (...items) => this.carDisposables.push(...items));
-    this.carGroup = car;
-    this.turntable.add(car);
-
-    // faked floor reflection: a mirrored (scaleY = -1) copy of the car sitting
-    // under the floor, dimmed by the translucent floor pane over it. Cheaper
-    // than a Reflector render-target and reads as a wet-concrete sheen.
-    const mirror = buildMirror(car, (...items) => this.carDisposables.push(...items));
-    this.mirrorGroup = mirror;
-    this.turntable.add(mirror);
-    this.updateCamera();
+  /** Park every roster car in its bay (once). False while the vehicle
+   *  library is still unbaked — nothing is half-built in that case. */
+  private buildRoster(): boolean {
+    if (this.bays.length) return true;
+    for (const [i, def] of PLAYER_CARS.entries()) {
+      setPlayerCar(def.id);
+      const model = getVehicleModel('sedan', true);
+      if (!model) return false; // library missing — first lookup fails before anything builds
+      const bay: Bay = {
+        id: def.id,
+        model,
+        color: GARAGE_LINEUP_COLORS[def.id],
+        group: new THREE.Group(), // placeholder, replaced by buildBayCar
+        mirror: new THREE.Group(),
+        disposables: [],
+      };
+      this.buildBayCar(bay, i);
+      this.bays.push(bay);
+    }
+    return true;
   }
 
-  private teardownCar(): void {
-    if (this.carGroup) this.turntable.remove(this.carGroup);
-    if (this.mirrorGroup) this.turntable.remove(this.mirrorGroup);
-    this.carGroup = null;
-    this.mirrorGroup = null;
-    for (const d of this.carDisposables) d.dispose();
-    this.carDisposables.length = 0;
+  /** (Re)build one bay's car + floor reflection at its parking spot. */
+  private buildBayCar(bay: Bay, index: number): void {
+    const car = buildCar(bay.model, bay.color, (...items) => bay.disposables.push(...items));
+    car.position.x = index * BAY_SPACING;
+    car.rotation.y = CAR_YAW; // angle-parked, nose toward the viewer's left (B3 stance)
+    const mirror = buildMirror(car, (...items) => bay.disposables.push(...items));
+    mirror.position.x = car.position.x;
+    mirror.rotation.y = car.rotation.y;
+    bay.group = car;
+    bay.mirror = mirror;
+    this.scene.add(car, mirror);
+  }
+
+  private repaint(bay: Bay, color: number): void {
+    const index = this.bays.indexOf(bay);
+    this.teardownBay(bay);
+    bay.color = color;
+    this.buildBayCar(bay, index);
+  }
+
+  private teardownBay(bay: Bay): void {
+    this.scene.remove(bay.group, bay.mirror);
+    for (const d of bay.disposables) d.dispose();
+    bay.disposables.length = 0;
   }
 
   // ── plumbing ────────────────────────────────────────────────────────────
+
+  private renderOnce(): void {
+    this.updateCamera(0);
+    this.renderer.render(this.scene, this.camera);
+  }
 
   private track(...items: { dispose(): void }[]): void {
     for (const it of items) this.disposables.push(it);
