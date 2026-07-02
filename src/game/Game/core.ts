@@ -45,6 +45,7 @@ import { buildEnvironment, makeHeightSampler } from '../environment';
 import { setSeaCamera, type Sea } from '../sea';
 import type { GrassField } from '../grass';
 import { CarLod } from '../carlod';
+import { CarBlobShadows } from '../carshadow';
 import { DEFAULT_GRAPHICS, IS_MOBILE, type GraphicsSettings } from '../graphics';
 import { loadLevelProps } from '../props';
 import { BRAKE_INTENSITY, HEADLIGHT_INTENSITY, charActor, createBarrel, createPole, createVehicle, deformActor, exhaustAnchors, popWheel, repairVehicle, shatterGlass, type LoosePart } from '../vehicles';
@@ -241,6 +242,9 @@ export class Game {
   private propCull: ((camX: number, camZ: number, maxDist: number) => void) | null = null;
   // car draw-call tiers (interior/attachments/whole-car by camera distance)
   private carLod = new CarLod();
+  // Burnout-style batched ground blobs replacing car shadow casting (phone
+  // tier): whole-field car shadows for one draw. Built lazily on first enable.
+  private carShadows: CarBlobShadows | null = null;
   // the level's authored fog band; the drawDistance quality knob scales it
   private fogBase = { near: 55, far: 150 };
 
@@ -652,6 +656,12 @@ export class Game {
     // off this.gfx.reflections (skipping its whole-scene ×6 re-render).
     if (this.propsGroup) this.propsGroup.visible = s.props;
     this.applyShadows(s.shadows);
+    // blob tier: cars leave the shadow depth pass (carLod stops the hulls
+    // casting) and the batched ground blobs take over. Lazily built — the
+    // desktop tier never pays for the mesh.
+    if (s.carBlobShadows && !this.carShadows) this.carShadows = new CarBlobShadows(this.scene);
+    this.carShadows?.setEnabled(s.carBlobShadows);
+    this.carLod.setHullShadows(!s.carBlobShadows);
     // drawDistance: scale the authored fog band in (far linearly, near gently —
     // sqrt keeps the foreground clear while the horizon closes) — the prop cull
     // in the render tail follows fog.far, so pulling the fog in both hides AND
@@ -1261,6 +1271,7 @@ export class Game {
     this.postfx.dispose();
     this.warmupRT.dispose();
     this.reflections.dispose();
+    this.carShadows?.dispose();
     this.skyRig.dispose();
     this.sunFlare.dispose();
     this.renderer.dispose();
@@ -3008,6 +3019,9 @@ export class Game {
     // view's #1 draw source (~33 draws each × 26 actors). Same pin-safe
     // render-tail contract as the prop cull above.
     this.carLod.update(this.actors, this.player, this.camera.position, (this.scene.fog as THREE.Fog).far * 1.15);
+    // blob car shadows ride the same render-tail contract (reads poses + the
+    // static height field, writes instance matrices on a render-only mesh)
+    this.carShadows?.update(this.actors, this.camera.position, this.heightAt);
     this.skyClock += af.dt; // scroll the baked cloud lookup off RENDER time (pin-safe)
     this.skyRig.setCloudTime(this.skyClock);
     // Clouds are PRERENDERED once per time-of-day into a high-res equirect
