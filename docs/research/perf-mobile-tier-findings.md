@@ -215,6 +215,62 @@ suite passing unchanged.
 inside the 60 fps budget, which effectively eliminates "physics catch-up
 spiral" as a bottleneck candidate on the phone.
 
+## Round 6 — CPU pass 2: one world-matrix pass per frame (+ round-5 verdict re-check)
+
+A "round 5 made things worse" report prompted a full re-measure. Three
+independent instruments say it didn't:
+
+- **Identical-state A/B** (`tests/broadphase-ab-probe.mjs`): monkey-patch
+  runs BOTH broadphases per `world.step` on the same live world, comparing
+  outputs. GANTRY POINT, 3,326 steps: stock 1,133.9 ms vs ours 59.6 ms
+  (**19×**), **0 pair mismatches** (the emitted pair lists stayed
+  bit-identical the whole session, quiet phase and pileups alike). Junction
+  (≤51 bodies): a wash (51.0 vs 50.0 ms).
+- **Commit sweep** (`tests/frame-census-probe.mjs`, #17→#25, both levels,
+  idle+driving): every one of the six merges holds or improves frame cost;
+  the round-5 commit is the largest single improvement (gantry driving sim
+  p50/p95 6.8/17.2 ms at #17 → 2.5/4.9 ms at #25; idle wall p50 33.3 → 16.7).
+- No level regressed at any commit; junction holds 60 fps across all six.
+
+**The actual next CPU hotspot** (`tests/cpu-profile-probe.mjs`, V8 sampling
+profile, gantry/cine, 26 s of driving + explosions): the top *JS* self-time
+was not the sim but three.js `updateMatrixWorld` — 9.2%, plus
+`multiplyMatrices` 2.3% and `traverse` 1.8% (~13% together). Root cause:
+every `renderer.render()` starts with a full-graph
+`scene.updateMatrixWorld()` when `scene.matrixWorldAutoUpdate` is on (the
+default) — recomposing every object's local matrix and re-multiplying its
+world matrix — and a cine frame issues up to ~8 such passes over the same
+unchanged transforms: 6 cube-reflection faces + the composer's scene passes
++ the main pass.
+
+**Fix (core.ts):** `scene.matrixWorldAutoUpdate = false` at construction;
+`frame()` runs ONE explicit `scene.updateMatrixWorld()` after the render
+tail's last transform write (and `warmupRenderFrame` mirrors it). The
+manual call still recurses the whole graph — the flag only disables the
+renderer's per-render automatic pass. `CubeCamera.update` self-updates its
+matrix when parentless (ours is), and the postfx quad scenes are separate
+`Scene` instances, so nothing else needed touching.
+
+**Measured after** (same probes, same machine):
+
+| gantry/cine | main | this branch |
+| --- | --- | --- |
+| cube p50 idle | 5.3 ms | 3.3 ms |
+| post p50 idle | 11.1 ms | 8.9 ms |
+| wall p95 driving | 33.3 ms | 16.8 ms |
+| `updateMatrixWorld` self time | 9.2% | 1.9% |
+
+`multiplyMatrices` left the profile's top 30 entirely. The win scales with
+render-pass count, so the cine tier (cube + composer) gains the most; the
+phone tier still saves the shadow+main double pass.
+
+**Verification:** replay suite unchanged (same 8 pass; the 3 pre-existing
+failures show identical stats and divergence steps — no new divergence);
+`tools/refshot.mjs` canonical dockyard shot pixel-diffs against main at the
+boot-to-boot noise floor (51.4% pixels ≠ at mean 1.64 levels vs a 51.2% /
+1.58 main-vs-main floor — the animated sea/clouds/traffic phase, not the
+change). tsc + vite build clean.
+
 ## Not done (deliberately, demo-scoped)
 - perf-reflections-plan Option A proper (THREE.Layers) — the hide-list seam
   delivers the same exclusion; revisit if the per-capture traverse ever shows.

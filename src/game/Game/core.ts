@@ -398,6 +398,19 @@ export class Game {
     this.renderer.toneMappingExposure = 1.05;
     container.appendChild(this.renderer.domElement);
 
+    // ONE world-matrix pass per frame: with this flag on (the default) EVERY
+    // renderer.render() call re-walks the whole graph, re-composing each
+    // matrixAutoUpdate object's local matrix and re-multiplying its world
+    // matrix — and a cine frame issues up to ~8 such passes over the same
+    // unchanged transforms (6 cube-reflection faces + the composer's scene
+    // passes + the main pass). On the ~1080-mesh dockyard that pass stack
+    // profiled at ~13% of main-thread self time (updateMatrixWorld +
+    // multiplyMatrices + traverse). Instead, frame() runs a single explicit
+    // scene.updateMatrixWorld() after the render tail's last transform write
+    // (warmupRenderFrame mirrors it). Presentation-only: matrices are pixels;
+    // the sim reads physics bodies, never three matrices.
+    this.scene.matrixWorldAutoUpdate = false;
+
     this.perf = new Perf(this.renderer, this.scene, () => ({
       tod: this.timeOfDay,
       gfx: this.cineActive() ? 'cine' : 'fast',
@@ -593,6 +606,7 @@ export class Game {
    *  it can never touch a determinism pin. */
   private warmupRenderFrame(): void {
     this.updateShadowRig();
+    this.scene.updateMatrixWorld(); // the explicit per-frame matrix pass (see constructor)
     if (this.cineActive()) {
       // warm the live cube reflection (whole scene → 6 faces) and the composer
       this.reflections.update(this.renderer, this.scene, this.camera.position, [this.sunFlare.group]);
@@ -3031,6 +3045,12 @@ export class Game {
     // RENDER-time driven — pin-safe, same contract as the sea/grass drift above.
     this.updateShadowRig();
     this.sunFlare.update(this.camera, this.sunSprite.position, af.dt, this.sunSprite.visible, () => this.flareOccluded());
+    // the frame's single authoritative matrix pass — placed after the tail's
+    // last transform write, so every render below (cube faces, composer
+    // passes, the fast-path render) reuses these matrices instead of
+    // recomputing the whole graph per pass (see the constructor note on
+    // scene.matrixWorldAutoUpdate)
+    this.scene.updateMatrixWorld();
     if (this.cineActive()) {
       this.renderFrame++;
       // PERF (perf-harbor): the live cube reflection is the single biggest
