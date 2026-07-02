@@ -14,6 +14,9 @@ export interface GrassField {
   update(dtSeconds: number, camPos?: THREE.Vector3): void;
   /** CINE-ONLY no-op kept so Game.ts's grass?.setTier(...) type-checks. */
   setTier(gfx: 'cine' | 'fast'): void;
+  /** Scale the LOD ring radii (FULL/LOD0/LOD1/CULL) — the quality tier's
+   *  grass-range knob (1 = tuned desktop rings). Clamped to [0.2, 1]. */
+  setRangeScale(s: number): void;
   /** Re-tint the blades' lit response to match the time-of-day sky. */
   setTimeOfDay(p: GrassPalette): void;
   /** Cheap live telemetry for the debug overlay. */

@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import type { GraphicsSettings } from '../game/graphics';
+import { TIER_PRESETS, type GraphicsSettings } from '../game/graphics';
 import { getGame } from './DebugOverlay/constants';
 
 interface GraphicsOverlayProps {
@@ -19,7 +19,10 @@ interface Live {
 // The dialog rows, grouped. VISUAL QUALITY toggles trade fidelity for GPU fill;
 // DRAW CALLS toggles isolate the whole-scene re-renders + the dominant object
 // set so you can see what's spending the draw-call budget.
-type Toggle = { key: keyof GraphicsSettings; label: string; hint: string };
+/** Only the boolean settings can be toggle rows (the numeric tier knobs —
+ *  renderScale/shadowSize/grassRange — ride the preset buttons instead). */
+type BoolKey = { [K in keyof GraphicsSettings]: GraphicsSettings[K] extends boolean ? K : never }[keyof GraphicsSettings];
+type Toggle = { key: BoolKey; label: string; hint: string };
 const GROUPS: { title: string; rows: Toggle[] }[] = [
   {
     title: 'VISUAL QUALITY',
@@ -28,6 +31,7 @@ const GROUPS: { title: string; rows: Toggle[] }[] = [
       { key: 'water', label: 'WATER', hint: 'Animated ocean — coast levels only' },
       { key: 'grass', label: 'GRASS', hint: 'Instanced verge grass — coast levels only' },
       { key: 'ao', label: 'AMBIENT OCCLUSION', hint: 'Screen-space AO (N8AO) — the heaviest post pass' },
+      { key: 'postfx', label: 'FILM POSTFX', hint: 'The whole film-look composer (AO, speed blur, bloom, grain) — off renders straight to the canvas, the biggest GPU cut on phones' },
     ],
   },
   {
@@ -111,6 +115,29 @@ export function GraphicsOverlay({ gfx, open, onOpen, onClose, onChange }: Graphi
               &times;
             </button>
           </div>
+          <div className="gfxGroupLabel">QUALITY PRESET</div>
+          {(['desktop', 'phone'] as const).map((tier) => {
+            const preset = TIER_PRESETS[tier];
+            const active = (Object.keys(preset) as (keyof typeof preset)[]).every((k) => gfx[k] === preset[k]);
+            return (
+              <button
+                key={tier}
+                className={`gfxToggle${active ? ' on' : ''}`}
+                onClick={(e) => {
+                  onChange({ ...preset });
+                  e.currentTarget.blur();
+                }}
+                title={
+                  tier === 'phone'
+                    ? 'Mobile tier: no cube reflection / no film postfx, 75% render scale, 1536² shadows, closer grass — auto-selected on phones'
+                    : 'Full quality: live paint reflection, film postfx, native resolution, 3072² shadows'
+                }
+              >
+                <span className="gfxToggleLabel">{tier === 'phone' ? 'PHONE' : 'DESKTOP'}</span>
+                <span className="gfxToggleState">{active ? 'ON' : ''}</span>
+              </button>
+            );
+          })}
           {GROUPS.map((group) => (
             <div key={group.title}>
               <div className="gfxGroupLabel">{group.title}</div>

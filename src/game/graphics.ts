@@ -20,6 +20,16 @@
 // composer, postfx.ts). The cheap baked vertex AO (ao.ts) rides the materials
 // and stays.
 
+/** Coarse phone/tablet detection for the default quality tier. Touch alone is
+ *  not enough (Windows touch laptops); require a mobile UA — plus the iPadOS
+ *  "Macintosh" masquerade (Mac UA with real touch points). Never read by the
+ *  sim; it only seeds DEFAULT_GRAPHICS, and every field stays user-overridable
+ *  in the graphics overlay. */
+export const IS_MOBILE =
+  typeof navigator !== 'undefined' &&
+  (/iPhone|iPad|iPod|Android|Mobile/i.test(navigator.userAgent) ||
+    (navigator.maxTouchPoints > 1 && /Macintosh/.test(navigator.userAgent)));
+
 export interface GraphicsSettings {
   /** the drifting cloud layer in the sky dome (skyenv) */
   clouds: boolean;
@@ -40,15 +50,39 @@ export interface GraphicsSettings {
   props: boolean;
   /** the top-right FPS / draw-call / triangle readout (UI-only) */
   stats: boolean;
+  // --- quality tier knobs (numbers, seeded by IS_MOBILE, overlay-adjustable) ---
+  /** the film-look composer (postfx.ts: MSAA HDR buffer, N8AO, speed blur,
+   *  bloom, vignette/grain). Off = bare renderer.render with renderer-level
+   *  ACES — the single biggest GPU-fill/bandwidth cut on phones. */
+  postfx: boolean;
+  /** multiplier on the device pixel ratio (after the 1.75 cap): 1 = native,
+   *  0.75 ≈ 44% fewer pixels shaded. Fill is the phone's scarcest resource. */
+  renderScale: number;
+  /** sun shadow-map resolution in cine play (the depth pass raster + the
+   *  per-fragment sample cost scale with it). 3072 desktop / 1536 phones. */
+  shadowSize: number;
+  /** multiplier on the grass LOD ring radii (FULL/LOD/CULL): 1 = the tuned
+   *  desktop rings, 0.6 pulls the lush band + cull-off much closer. */
+  grassRange: number;
 }
+
+/** The two quality tiers as settings patches (the overlay's preset buttons
+ *  apply one wholesale; DEFAULT_GRAPHICS seeds from the detected device).
+ *  PHONE drops the three whole-scene multipliers a mobile GPU can't afford:
+ *  the ×6 cube capture (paint falls back to the static showroom PMREM), the
+ *  film-look composer (N8AO/MSAA HDR/bloom), and native-DPR fill — plus a
+ *  half-res shadow map and closer grass rings. */
+export const TIER_PRESETS = {
+  desktop: { ao: true, reflections: true, postfx: true, renderScale: 1, shadowSize: 3072, grassRange: 1 },
+  phone: { ao: false, reflections: false, postfx: false, renderScale: 0.75, shadowSize: 1536, grassRange: 0.6 },
+} as const;
 
 export const DEFAULT_GRAPHICS: GraphicsSettings = {
   clouds: true,
   water: true,
   grass: true,
-  ao: true,
-  reflections: true,
   shadows: true,
   props: true,
   stats: true,
+  ...TIER_PRESETS[IS_MOBILE ? 'phone' : 'desktop'],
 };

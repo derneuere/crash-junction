@@ -193,11 +193,16 @@ export function buildGrass(scene: THREE.Scene, level: LevelDef): GrassField {
       console.warn('[grass] FluffyGrass assets failed to load; keeping fallback geometry', err);
     });
 
-  const cullR2 = CULL_RADIUS * CULL_RADIUS;
-  const fullR2 = FULL_RADIUS * FULL_RADIUS;
-  const lod0R2 = LOD0_RADIUS * LOD0_RADIUS;
-  const lod1R2 = LOD1_RADIUS * LOD1_RADIUS;
-  const lodSpan = Math.max(1, CULL_RADIUS - FULL_RADIUS);
+  // LOD ring radii, scalable by the quality tier (gfx.grassRange): the phone
+  // tier pulls the lush band and the cull-off much closer for the same look
+  // from the low chase cam. Presentation-only, recomputed on the rare change.
+  let cullR2 = CULL_RADIUS * CULL_RADIUS;
+  let fullR2 = FULL_RADIUS * FULL_RADIUS;
+  let lod0R2 = LOD0_RADIUS * LOD0_RADIUS;
+  let lod1R2 = LOD1_RADIUS * LOD1_RADIUS;
+  let fullRadius = FULL_RADIUS;
+  let lodSpan = Math.max(1, CULL_RADIUS - FULL_RADIUS);
+  let rangeScale = 1;
   const allocated = placed;
   let tilesDrawn = tiles.length;
 
@@ -235,7 +240,7 @@ export function buildGrass(scene: THREE.Scene, level: LevelDef): GrassField {
             t.mesh.count = t.full;
           } else {
             const d = Math.sqrt(d2);
-            const td = (d - FULL_RADIUS) / lodSpan; // 0..1
+            const td = (d - fullRadius) / lodSpan; // 0..1
             const inv = 1 - td;
             const frac = MIN_LOD_FRAC + (1 - MIN_LOD_FRAC) * inv * inv;
             t.mesh.count = Math.max(1, Math.round(t.full * frac));
@@ -252,6 +257,17 @@ export function buildGrass(scene: THREE.Scene, level: LevelDef): GrassField {
     },
     setTier(_gfx) {
       void _gfx; // CINE-ONLY no-op (always full density)
+    },
+    setRangeScale(s) {
+      const k = Math.min(1, Math.max(0.2, s));
+      if (k === rangeScale) return;
+      rangeScale = k;
+      fullRadius = FULL_RADIUS * k;
+      cullR2 = CULL_RADIUS * k * (CULL_RADIUS * k);
+      fullR2 = fullRadius * fullRadius;
+      lod0R2 = LOD0_RADIUS * k * (LOD0_RADIUS * k);
+      lod1R2 = LOD1_RADIUS * k * (LOD1_RADIUS * k);
+      lodSpan = Math.max(1, CULL_RADIUS * k - fullRadius);
     },
     setTimeOfDay(p) {
       uAmbient.value = p.ambient;
