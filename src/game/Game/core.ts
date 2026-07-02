@@ -44,6 +44,7 @@ import { GROUP_DECOR, createPhysics, type PhysicsContext } from '../physics';
 import { buildEnvironment, makeHeightSampler } from '../environment';
 import { setSeaCamera, type Sea } from '../sea';
 import type { GrassField } from '../grass';
+import { CarLod } from '../carlod';
 import { DEFAULT_GRAPHICS, IS_MOBILE, type GraphicsSettings } from '../graphics';
 import { loadLevelProps } from '../props';
 import { BRAKE_INTENSITY, HEADLIGHT_INTENSITY, charActor, createBarrel, createPole, createVehicle, deformActor, exhaustAnchors, popWheel, repairVehicle, shatterGlass, type LoosePart } from '../vehicles';
@@ -238,6 +239,8 @@ export class Game {
   // distance-cull entry point for the prop draw units (props.ts / propinstancer
   // cull list) — driven each frame from the render tail at the fog horizon.
   private propCull: ((camX: number, camZ: number, maxDist: number) => void) | null = null;
+  // car draw-call tiers (interior/attachments/whole-car by camera distance)
+  private carLod = new CarLod();
   // the level's authored fog band; the drawDistance quality knob scales it
   private fogBase = { near: 55, far: 150 };
 
@@ -3001,6 +3004,10 @@ export class Game {
     // render-time visibility flags keyed off the render camera, below the
     // sim's read-back line.
     if (this.gfx.props) this.propCull?.(this.camera.position.x, this.camera.position.z, (this.scene.fog as THREE.Fog).far * 1.15);
+    // CAR DRAW-CALL LOD (carlod.ts): profiling showed cars are the chase
+    // view's #1 draw source (~33 draws each × 26 actors). Same pin-safe
+    // render-tail contract as the prop cull above.
+    this.carLod.update(this.actors, this.player, this.camera.position, (this.scene.fog as THREE.Fog).far * 1.15);
     this.skyClock += af.dt; // scroll the baked cloud lookup off RENDER time (pin-safe)
     this.skyRig.setCloudTime(this.skyClock);
     // Clouds are PRERENDERED once per time-of-day into a high-res equirect
