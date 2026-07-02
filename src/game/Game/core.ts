@@ -44,7 +44,7 @@ import { GROUP_DECOR, createPhysics, type PhysicsContext } from '../physics';
 import { buildEnvironment, makeHeightSampler } from '../environment';
 import { setSeaCamera, type Sea } from '../sea';
 import type { GrassField } from '../grass';
-import { DEFAULT_GRAPHICS, type GraphicsSettings } from '../graphics';
+import { DEFAULT_GRAPHICS, IS_MOBILE, type GraphicsSettings } from '../graphics';
 import { loadLevelProps } from '../props';
 import { BRAKE_INTENSITY, HEADLIGHT_INTENSITY, charActor, createBarrel, createPole, createVehicle, deformActor, exhaustAnchors, popWheel, repairVehicle, shatterGlass, type LoosePart } from '../vehicles';
 import { applyCarEnvScale, applyGlassParams, glassParams, setCarEnvMap, setPlayerEnvMap, type GlassParams } from '../geometry';
@@ -372,9 +372,15 @@ export class Game {
   ) {
     this.renderer = new THREE.WebGLRenderer({ antialias: true });
     this.renderer.setSize(container.clientWidth, container.clientHeight);
-    this.renderer.setPixelRatio(Math.min(devicePixelRatio, 1.75));
+    // renderScale multiplies the capped device pixel ratio — the phone tier
+    // sheds fill (its scarcest resource) by shading fewer pixels; the canvas
+    // MSAA (antialias above) hides the resolve on a small screen. setGraphics
+    // re-applies the persisted value right after mount.
+    this.renderer.setPixelRatio(Math.min(devicePixelRatio, 1.75) * this.gfx.renderScale);
     this.renderer.shadowMap.enabled = true;
-    this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    // phones keep real-time shadows but at the cheap filter: PCFSoft's wide
+    // tap kernel is a per-lit-fragment cost the A-series GPU feels everywhere
+    this.renderer.shadowMap.type = IS_MOBILE ? THREE.PCFShadowMap : THREE.PCFSoftShadowMap;
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
     this.renderer.toneMappingExposure = 1.05;
@@ -626,11 +632,21 @@ export class Game {
     this.postfx.setAO(s.ao);
     if (this.sea) this.sea.mesh.visible = s.water;
     if (this.grass) for (const m of this.grass.meshes) m.visible = s.grass;
+    this.grass?.setRangeScale(s.grassRange);
     // draw-call diagnostics: hide the whole prop set with one group flip, and
     // toggle the shadow pass; the cube reflection is gated in the frame loop
     // off this.gfx.reflections (skipping its whole-scene ×6 re-render).
     if (this.propsGroup) this.propsGroup.visible = s.props;
     this.applyShadows(s.shadows);
+    // quality tier: render resolution (fill), shadow-map size, tone-map owner
+    // (composer vs bare renderer) and the player paint's reflection source all
+    // re-derive off the new settings. Idempotent when nothing changed.
+    const pr = Math.min(devicePixelRatio, 1.75) * s.renderScale;
+    if (Math.abs(this.renderer.getPixelRatio() - pr) > 1e-3) {
+      this.renderer.setPixelRatio(pr);
+      this.onResize(); // reallocate the canvas + composer + cloud buffers
+    }
+    this.applyRenderPath();
   }
 
   /** Enable/disable the sun's shadow depth pass (graphics setting). Off drops
@@ -790,12 +806,14 @@ export class Game {
     // the resolved tier so headless FAST gets the sparse subset; don't retune.
     this.grass?.setTier(cine ? 'cine' : 'fast');
     // with the composer, the renderer draws into an HDR buffer — ACES then
-    // lives in the chain (postfx.ts); without it, back on the renderer
-    this.renderer.toneMapping = cine ? THREE.NoToneMapping : THREE.ACESFilmicToneMapping;
+    // lives in the chain (postfx.ts); without it (headless fast, or the phone
+    // tier's postfx-off path), back on the renderer
+    this.renderer.toneMapping = this.composerActive() ? THREE.NoToneMapping : THREE.ACESFilmicToneMapping;
     // Cine shadow map dropped 4096²→3072². With the ±32 m frustum the texel
     // pitch matches the old 4096²/±38 m rig (~20 mm), so edges look identical
     // while the depth pass rasterises 44% fewer texels (9.4M vs 16.8M).
-    const size = cine ? 3072 : 2048;
+    // The phone tier halves the side again (gfx.shadowSize 1536).
+    const size = cine ? this.gfx.shadowSize : 2048;
     if (this.sun.shadow.mapSize.x !== size) {
       this.sun.shadow.mapSize.set(size, size);
       this.sun.shadow.map?.dispose();
@@ -830,11 +848,20 @@ export class Game {
     return !this.forceFast;
   }
 
+  /** The film-look composer runs only when cine AND the postfx quality flag is
+   *  on — the phone tier drops the whole chain (MSAA HDR buffer, N8AO, bloom)
+   *  and draws straight to the canvas with renderer-level ACES. */
+  private composerActive(): boolean {
+    return this.cineActive() && this.gfx.postfx;
+  }
+
   /** The player's paint reflects the live capture in cine, the showroom in
-   *  fast — re-pointed on every gfx or time-of-day change. */
+   *  fast OR when the reflections quality toggle is off (without this gate a
+   *  disabled cube would leave the paint sampling a never-written black RT) —
+   *  re-pointed on every gfx or time-of-day change. */
   private refreshPlayerEnv(): void {
     const fallback = this.envTex[this.timeOfDay] ?? this.envTex.day!;
-    setPlayerEnvMap(this.cineActive() ? this.reflections.texture : fallback);
+    setPlayerEnvMap(this.cineActive() && this.gfx.reflections ? this.reflections.texture : fallback);
   }
 
   // ---------- follow-the-player shadow rig ----------
@@ -2977,7 +3004,18 @@ export class Game {
         // The 'reflections' graphics toggle skips this whole-scene ×6 re-render
         // — by far the biggest single draw-call multiplier on dressed levels.
         const tCube = performance.now();
-        this.reflections.update(this.renderer, this.scene, p.group.position, [p.group, this.sunFlare.group]);
+        // PERF (perf-reflections-plan §2.0 + Option A intent): props and grass
+        // are ~80–90% of the capture's per-face cost, and the PMREM-blurred
+        // clearcoat can't resolve a crate or a blade anyway — hide both groups
+        // from the cube alongside the player's own bodywork. Measured: the
+        // 6-face capture drops from ~2100 draws / ~13M tris to the big-world
+        // set (ground/road/buildings/cars/sky). Presentation-only.
+        this.reflections.update(this.renderer, this.scene, p.group.position, [
+          p.group,
+          this.sunFlare.group,
+          ...(this.propsGroup ? [this.propsGroup] : []),
+          ...(this.grass?.meshes ?? []),
+        ]);
         this.perf.cubeMs = performance.now() - tCube;
       }
       // SPEED BLUR (postfx.ts / speedblur.ts): a center-sharp radial streak
@@ -3018,7 +3056,11 @@ export class Game {
         this.motionInit = true;
       }
       const tPost = performance.now();
-      this.postfx.render(af.dt);
+      // phone tier (gfx.postfx off): skip the whole composer — no HDR MSAA
+      // buffer, no N8AO, no bloom chain — and draw straight to the canvas;
+      // applyRenderPath has already handed ACES back to the renderer.
+      if (this.gfx.postfx) this.postfx.render(af.dt);
+      else this.renderer.render(this.scene, this.camera);
       this.perf.postMs = performance.now() - tPost;
     } else {
       const tPost = performance.now();

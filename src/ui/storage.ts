@@ -2,7 +2,7 @@ import type { Medal } from '../game/events';
 import type { TimeOfDay } from '../game/daynight';
 import { LEVELS, type LevelId } from '../game/levels';
 import { DEFAULT_CAR, PLAYER_CARS, type PlayerCarId } from '../game/models';
-import { DEFAULT_GRAPHICS, type GraphicsSettings } from '../game/graphics';
+import { DEFAULT_GRAPHICS, IS_MOBILE, type GraphicsSettings } from '../game/graphics';
 
 // localStorage contracts for the event picker (research doc §3.6).
 //
@@ -114,7 +114,15 @@ export function readGraphics(): GraphicsSettings {
   const raw = readJson('cj-gfx');
   if (typeof raw !== 'object' || raw === null) return { ...DEFAULT_GRAPHICS };
   const o = raw as Record<string, unknown>;
+  // one-time migration: a blob saved before the quality tiers existed carries
+  // ao/reflections=true from the old desktop-only defaults — on a phone that
+  // would boot the ×6 cube + composer right back into the framerate hole the
+  // tier exists to avoid. Stale schema on mobile ⇒ take the fresh phone
+  // defaults wholesale (any toggle the user flips after this is respected,
+  // because the re-saved blob then carries the new fields).
+  if (IS_MOBILE && typeof o.postfx !== 'boolean') return { ...DEFAULT_GRAPHICS };
   const bool = (v: unknown, d: boolean) => (typeof v === 'boolean' ? v : d);
+  const num = (v: unknown, d: number) => (typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : d);
   return {
     clouds: bool(o.clouds, DEFAULT_GRAPHICS.clouds),
     water: bool(o.water, DEFAULT_GRAPHICS.water),
@@ -124,6 +132,10 @@ export function readGraphics(): GraphicsSettings {
     shadows: bool(o.shadows, DEFAULT_GRAPHICS.shadows),
     props: bool(o.props, DEFAULT_GRAPHICS.props),
     stats: bool(o.stats, DEFAULT_GRAPHICS.stats),
+    postfx: bool(o.postfx, DEFAULT_GRAPHICS.postfx),
+    renderScale: num(o.renderScale, DEFAULT_GRAPHICS.renderScale),
+    shadowSize: num(o.shadowSize, DEFAULT_GRAPHICS.shadowSize),
+    grassRange: num(o.grassRange, DEFAULT_GRAPHICS.grassRange),
   };
 }
 
