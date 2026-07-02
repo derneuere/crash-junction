@@ -44,6 +44,7 @@ const SPEEDS = String(flag('--speeds', '8,16,28,40'))
 const TOD = flag('--tod', 'day'); // day | dusk | night
 const GFX = flag('--gfx', 'cine'); // cine | fast
 const TINT = flag('--tint', null); // optional hex, e.g. 0x3a4654 privacy
+const CAR = flag('--car', null); // roster PlayerCarId, e.g. metro (default = saved/wedge)
 const DETAIL = args.includes('--detail'); // static 4-up: intact→crack→frost→blow
 
 if (!Number.isInteger(PORT) || !SPEEDS.length) {
@@ -248,6 +249,8 @@ try {
 
   // FAST PATH (menu redesign): the menu no longer mounts a level on boot —
   // deep-link straight to junction gameplay so window.__game + the player exist.
+  // pin the roster car before any page script runs (the picker's storage key)
+  if (CAR) await page.evaluateOnNewDocument((id) => localStorage.setItem('cj-car', id), CAR);
   await page.goto(`http://localhost:${PORT}/?level=junction&launch=1`, { waitUntil: 'domcontentloaded' });
   await page.waitForFunction(() => window.__game !== undefined, { timeout: 30_000, polling: 100 });
   // the baked car models stream in async — wait for the player to carry glass

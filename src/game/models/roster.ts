@@ -2,6 +2,7 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import type { VehicleSpec, Variant } from '../types';
 import type { ModelConfig, VehicleModel } from './types';
 import { bakeModel } from './bake';
+import { buildProceduralModel, METRO } from './procgen';
 
 const CAR = (name: string): ModelConfig => ({
   url: `/models/cars/glb/${name}.glb`,
@@ -36,7 +37,7 @@ const BUS: ModelConfig = {
 // the picker writes both 'cj-car' and 'cj-engine' when one is chosen. Names
 // are invented (the research doc's trademark note: no real-brand labels).
 
-export type PlayerCarId = 'compact' | 'wedge' | 'vector' | 'prowler';
+export type PlayerCarId = 'compact' | 'wedge' | 'vector' | 'prowler' | 'metro';
 
 export interface PlayerCarDef {
   id: PlayerCarId;
@@ -52,20 +53,22 @@ export const PLAYER_CARS: readonly PlayerCarDef[] = [
   { id: 'wedge', label: 'WEDGE', flavor: 'v10', tagline: 'EXOTIC SCREAM, GLASS JAW' },
   { id: 'vector', label: 'VECTOR', flavor: 'v10', tagline: 'THE OTHER WEDGE — SAME SCREAM, NO SPOILER' },
   { id: 'prowler', label: 'PROWLER', flavor: 'v8', tagline: 'INTERCEPTOR BODY OVER A MUSCLE RUMBLE' },
+  { id: 'metro', label: 'METRO', flavor: 'stock', tagline: 'BASE MODEL, ZERO OPTIONS, ALL HEART' },
 ];
 
 /** = SportsCar2, the pre-roster player car — defaulting here means a tree
  *  with no 'cj-car' key behaves exactly like it did before the roster. */
 export const DEFAULT_CAR: PlayerCarId = 'wedge';
 
-/** GLB stem per car (public/models/cars/glb). compact/prowler bodies also
- *  drive in the traffic pool — their bakes are shared (see loadVehicleModels). */
-const PLAYER_CAR_MODELS: Record<PlayerCarId, (typeof TRAFFIC_NAMES)[number] | 'SportsCar2' | 'SportsCar'> = {
+/** GLB stem per GLB-backed car (public/models/cars/glb). compact/prowler
+ *  bodies also drive in the traffic pool — their bakes are shared (see
+ *  loadVehicleModels). Cars absent here are PROCEDURAL (models/procgen). */
+const PLAYER_CAR_MODELS = {
   compact: 'NormalCar1',
   wedge: 'SportsCar2',
   vector: 'SportsCar', // the cars pack's second wedge, unused until now
   prowler: 'Cop',
-};
+} as const satisfies Partial<Record<PlayerCarId, (typeof TRAFFIC_NAMES)[number] | 'SportsCar2' | 'SportsCar'>>;
 
 interface Library {
   sedanTraffic: VehicleModel[];
@@ -116,6 +119,8 @@ export async function loadVehicleModels(specs: Record<Variant, VehicleSpec>): Pr
   // at runtime (vehicles.ts/panels.ts clone geometry per actor), so the player
   // and a traffic clone sharing one bake is safe — and the traffic pool stays
   // byte-identical to the pre-roster build, which replay visuals depend on.
+  // METRO is generated, not loaded — a pure function of its recipe, built
+  // once here so it is exactly as deterministic as the bakes around it.
   library = {
     sedanTraffic: traffic,
     playerCars: {
@@ -123,6 +128,7 @@ export async function loadVehicleModels(specs: Record<Variant, VehicleSpec>): Pr
       wedge,
       vector,
       prowler: traffic[TRAFFIC_NAMES.indexOf('Cop')],
+      metro: buildProceduralModel(METRO, specs.sedan),
     },
     bus,
   };

@@ -41,6 +41,7 @@ const CAR_STATS: Record<PlayerCarId, { topSpeed: number; weight: number }> = {
   wedge: { topSpeed: 0.96, weight: 0.46 },
   vector: { topSpeed: 0.92, weight: 0.5 },
   prowler: { topSpeed: 0.74, weight: 0.82 },
+  metro: { topSpeed: 0.44, weight: 0.36 },
 };
 
 /** Engine-voice label shown beside the stats (matches audio/synths flavors). */
