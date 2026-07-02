@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { type VehicleModel } from '../models';
 import { panelDefs } from '../panels';
 import { SPECS } from '../vehicles';
+import { wheelGeometry } from '../geometry';
 import { FLOOR_Y } from './constants';
 import { carMats, interiorMat, wheelMat } from './materials';
 
@@ -73,33 +74,46 @@ export function buildCar(model: VehicleModel, color: number, track: Track): THRE
     group.add(inner);
   }
 
-  // wheels at the arch corners (front/rear × left/right)
-  const corners: [number, number, THREE.BufferGeometry][] = [
-    [-model.arch.x, model.arch.zFront, model.wheelL],
-    [model.arch.x, model.arch.zFront, model.wheelR],
-    [-model.arch.x, model.arch.zRear, model.wheelL],
-    [model.arch.x, model.arch.zRear, model.wheelR],
+  // wheels at the arch corners. The showroom uses the game's PROCEDURAL wheel
+  // (full rubber cylinder + hub + spokes) rather than the baked GLB wheel —
+  // the bake is a near-flat disc that reads as a naked spoke pinwheel this
+  // close up. The geometry comes from wheelGeometry's shared cache, so it is
+  // NOT tracked for disposal here.
+  const wheelGeo = wheelGeometry(SPECS.sedan.wheelRadius);
+  const corners: [number, number][] = [
+    [-model.arch.x, model.arch.zFront],
+    [model.arch.x, model.arch.zFront],
+    [-model.arch.x, model.arch.zRear],
+    [model.arch.x, model.arch.zRear],
   ];
   const wmat = wheelMat(track);
-  for (const [wx, wz, geo] of corners) {
-    const wh = new THREE.Mesh(geo, wmat);
+  for (const [wx, wz] of corners) {
+    const wh = new THREE.Mesh(wheelGeo, wmat);
     wh.position.set(wx, model.wheelY, wz);
     group.add(wh);
   }
 
-  // seat the car on the floor: the bake's group origin sits at COM height, so
-  // the wheels rest at wheelY; drop the group so wheelY meets the floor.
-  group.position.y = -model.wheelY + FLOOR_Y;
+  // seat the car on the floor: wheels hang at group-local wheelY =
+  // -(rideHeight - wheelRadius), so lifting the group by rideHeight puts the
+  // wheel CENTRES one radius above the floor — i.e. treads on the concrete.
+  // (Lifting by -wheelY alone buried the wheels to their axles.)
+  group.position.y = SPECS.sedan.rideHeight + FLOOR_Y;
   return group;
 }
 
 /** Build the faked floor reflection: a mirrored (scaleY = -1) copy of `car`
  *  sitting under the floor, dimmed by the translucent floor pane over it.
- *  Cheaper than a Reflector render-target and reads as a wet-concrete sheen. */
+ *  Cheaper than a Reflector render-target and reads as a wet-concrete sheen.
+ *  Call AFTER the car group has its final position/rotation — the mirror
+ *  copies that transform and reflects it across the y = FLOOR_Y plane. */
 export function buildMirror(car: THREE.Group, track: Track): THREE.Group {
   const mirror = car.clone(true);
   mirror.scale.y = -1;
-  mirror.position.y = FLOOR_Y * 2; // reflect across the floor plane
+  // a group point at world y = car.y + local maps to 2·FLOOR_Y − (car.y +
+  // local); with scaleY = -1 supplying the −local, the group origin must sit
+  // at 2·FLOOR_Y − car.y. (The old constant 2·FLOOR_Y floated the reflection
+  // up into the real car's wheels.)
+  mirror.position.y = FLOOR_Y * 2 - car.position.y;
   mirror.traverse((o) => {
     const m = o as THREE.Mesh;
     if (m.isMesh) {
