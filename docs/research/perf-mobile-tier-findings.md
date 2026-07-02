@@ -127,6 +127,54 @@ definitively**: if SIM dominates at low fps, the wall is cannon-es + 26
 actors (a sim-side, determinism-review change — cut traffic count or steps);
 if REN dominates, keep cutting fill/draws (renderScale 0.6, water off).
 
+## Round 3 — draw-call attribution (15–16 fps on device; "chase view draws more than top-down")
+
+Hooked `renderer.renderBufferDirect` to attribute every draw to its object +
+pass (phone tier, manual renders so the shadow pass is included). The user's
+hunch was right on both counts:
+
+| Pose | Total | Top sources |
+| --- | --- | --- |
+| chase (car height) | **546** / 1.14M tris | **cars main 173 + cars shadow 72**, prop-batched 159*, buildings 70, grass tiles 46 |
+| dockyard top-down | 255 / 0.25M tris | prop-batched 88, cars shadow 72, prop tiles 38 |
+
+The chase view draws 2× the dockyard because at car height you see the CARS
+(and street-level grass/buildings). **One car = ~33 main + ~15 shadow draws**:
+multi-material hull ≈ 4 (paint/glass/head/tail), 6 detachable panels (inside
+pivot Groups!), 4 wheels, a 2-draw INTERIOR mesh that is only ever visible
+through crash wounds, the wing — × 26 actors.
+
+\* `cj-prop-batched` invocation counts are per-geometry fallback draws in the
+SwiftShader harness; on iOS 17.4+ Safari `WEBGL_multi_draw` collapses each
+batch to ~1 real call — keep the demo iPhone's iOS current.
+
+### What shipped (`carlod.ts`, driven from the render tail like the prop cull)
+
+Per NON-player car (player always full detail):
+- **interior drawn only while damaged and < 30 m** — a pristine car fully
+  occludes its innards; the whole field is pristine at the start. Measured
+  −20 main draws at the grid pack.
+- **> 52 m: panels + wheels + small bits hidden → hull-only (~4 draws)**; the
+  hull is a complete baked body, so no holes. Hysteresis rings prevent strobe.
+- **past the fog horizon: whole car hidden** (was rasterised fog-coloured).
+- **shadow casters pruned to the hull, once, all cars incl. player** — the
+  sun blob is the hull silhouette; panel/wheel shadows never read. Measured
+  car shadow draws **97 → 27** at the grid pose.
+
+Detach safety: parts that leave the car's group (shunt-torn panels →
+looseParts debris) drop out of the LOD lists via an ancestor check, so the
+LOD never fights the debris system. Everything is visibility/castShadow flags
+in the render tail — pin-safe, replay suite untouched.
+
+### Known residual: the start-grid pack
+
+Cars within ~44 m keep panels + wheels by design (you're racing them). The
+race start therefore still pays ~15 draws/car for the pack ahead; the LOD's
+main-view win grows as the field spreads. If the pack itself ever needs to be
+cheaper, the next lever is merging the panel meshes into the hull draw for
+REMOTE cars only (rivals don't deform per-panel until hit) — bigger surgery,
+not taken.
+
 ## Not done (deliberately, demo-scoped)
 - perf-reflections-plan Option A proper (THREE.Layers) — the hide-list seam
   delivers the same exclusion; revisit if the per-capture traverse ever shows.
