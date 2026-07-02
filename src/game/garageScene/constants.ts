@@ -35,6 +35,7 @@ export const GARAGE_LINEUP_COLORS: Record<PlayerCarId, number> = {
   wedge: 0x2266dd, // electric blue
   vector: 0xf2b01e, // gold
   prowler: 0xe8e8ec, // pearl white — interceptor livery
+  metro: 0x22bb55, // racing green
 };
 
 export const FLOOR_Y = -0.02; // a hair below the wheels' contact line

@@ -74,12 +74,13 @@ export function buildCar(model: VehicleModel, color: number, track: Track): THRE
     group.add(inner);
   }
 
-  // wheels at the arch corners. The showroom uses the game's PROCEDURAL wheel
-  // (full rubber cylinder + hub + spokes) rather than the baked GLB wheel —
-  // the bake is a near-flat disc that reads as a naked spoke pinwheel this
-  // close up. The geometry comes from wheelGeometry's shared cache, so it is
-  // NOT tracked for disposal here.
-  const wheelGeo = wheelGeometry(SPECS.sedan.wheelRadius);
+  // wheels at the arch corners. Models with showroom-quality wheel templates
+  // (procgen builds parametric alloys) show their OWN wheels; for the baked
+  // GLBs the showroom substitutes the game's generic procedural wheel — the
+  // bake is a near-flat disc that reads as a naked spoke pinwheel this close
+  // up. Neither geometry is tracked for disposal here: the generic wheel is
+  // a shared cache, the model wheels are owned by the template.
+  const genericGeo = model.showroomWheels ? null : wheelGeometry(SPECS.sedan.wheelRadius);
   const corners: [number, number][] = [
     [-model.arch.x, model.arch.zFront],
     [model.arch.x, model.arch.zFront],
@@ -88,7 +89,8 @@ export function buildCar(model: VehicleModel, color: number, track: Track): THRE
   ];
   const wmat = wheelMat(track);
   for (const [wx, wz] of corners) {
-    const wh = new THREE.Mesh(wheelGeo, wmat);
+    const geo = genericGeo ?? (wx < 0 ? model.wheelL : model.wheelR);
+    const wh = new THREE.Mesh(geo, wmat);
     wh.position.set(wx, model.wheelY, wz);
     group.add(wh);
   }
