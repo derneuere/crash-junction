@@ -78,6 +78,26 @@ export class Soup {
   }
 }
 
+/** Extrude a 4-corner face along `dir`, closing all six sides — the workhorse
+ *  for lenses, trim strips, recesses and pads (both clip modules grew a local
+ *  copy of this; this is the shared one). Corners wind around the face; the
+ *  soup's awayFrom reference orients every side outward, using the prism's
+ *  own centroid, so it works for any extrusion direction. */
+export function prism(soup: Soup, face: [V3, V3, V3, V3], dir: V3, color: THREE.Color): void {
+  const back = face.map(([x, y, z]) => [x + dir[0], y + dir[1], z + dir[2]] as V3) as [V3, V3, V3, V3];
+  const ctr: V3 = [
+    (face[0][0] + face[1][0] + face[2][0] + face[3][0]) / 4 + dir[0] / 2,
+    (face[0][1] + face[1][1] + face[2][1] + face[3][1]) / 4 + dir[1] / 2,
+    (face[0][2] + face[1][2] + face[2][2] + face[3][2]) / 4 + dir[2] / 2,
+  ];
+  soup.quad(face[0], face[1], face[2], face[3], color, ctr);
+  soup.quad(back[0], back[1], back[2], back[3], color, ctr);
+  for (let i = 0; i < 4; i++) {
+    const j = (i + 1) % 4;
+    soup.quad(face[i], face[j], back[j], back[i], color, ctr);
+  }
+}
+
 /** Concatenate soups in order into one non-indexed BufferGeometry, returning
  *  the [start, end) VERTEX range each soup landed in (the VehicleModel
  *  paint/glass/head/tail range convention). */

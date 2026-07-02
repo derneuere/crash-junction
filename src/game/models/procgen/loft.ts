@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import type { CarRecipe, Station } from './recipe';
 import { withStationsAt } from './recipe';
 import { Soup, type V3 } from './soup';
+import { buildGreenhouse } from './greenhouse';
 
 // ────────────────────────────────────────────────────────────────────────────
 // The body-in-white loft. Every station (recipe.ts) becomes a closed cross-
@@ -14,9 +15,11 @@ import { Soup, type V3 } from './soup';
 // a dark liner half-tube dresses each hole from inside.
 //
 // Quad roles: greenhouse side-wall quads become GLASS where the band is
-// full-height and not a pillar; roof-band quads become GLASS on steep
-// windshield/backlight slopes. Everything else is PAINT. Glass/paint go to
-// separate soups so the assembler gets contiguous vertex ranges for free.
+// full-height and not a pillar; the explicit (B-)pillar bands render as DARK
+// TRIM. The whole top band (R_GH_TOP → roof centre: roof crown, screen
+// panels + their pillar edge strips, antenna) lives in greenhouse.ts.
+// Glass/paint/trim go to separate soups so the assembler gets contiguous
+// vertex ranges for free.
 // ────────────────────────────────────────────────────────────────────────────
 
 const SHOULDER_BEVEL = 0.06; // shoulder edge sits this far inboard of the side
@@ -25,8 +28,8 @@ const KNUCKLE_RISE = 0.09; // rocker knuckle height above the floor line
 const SIDE_TOP_DROP = 0.05; // side wall ends this far below the shoulder
 const GH_TAPER = 0.82; // greenhouse top width over its base width
 const GLASS_MIN_RISE = 0.11; // band needs this much greenhouse to be a window
-const STEEP_GLASS = 0.35; // roof SLOPE (dy/dz) that reads as a screen surface
-const PILLAR_HALF = 0.09; // half-width of a pillar's painted band
+const PILLAR_HALF = 0.06; // half-width of a (B-)pillar's dark trim band
+const PILLAR_TRIM = 0x111318; // near-black pillar trim (Astra-style B-pillar)
 
 /** Ring point layout, floor centre → roof centre up the +x side. */
 const R_FLOOR_C = 0, R_FLOOR_E = 1, R_KNUCKLE = 2, R_SIDE_TOP = 3,
@@ -67,13 +70,19 @@ function bulgeAt(cut: ArchCut, z: number): number {
   return cut.bulge * f;
 }
 
-function ringPoints(s: Station, floorY: number, tumblehome: number, cut: ArchCut): V3[] {
+function ringPoints(
+  s: Station, floorY: number, tumblehome: number, cut: ArchCut, kick = 0,
+): V3[] {
   const bx = bulgeAt(cut, s.z);
   const w = s.halfW + bx;
   const shW = s.halfW - SHOULDER_BEVEL + bx * 0.6;
   const hasGh = s.roofY > s.bodyY + 0.03;
-  const gW = hasGh ? s.halfW - SHOULDER_BEVEL - tumblehome : shW;
-  const gTopW = hasGh ? gW * GH_TAPER : shW;
+  // `kick` leans the greenhouse wall outboard at its BASE only (C-pillar
+  // thickness against the quarter-window edge); the top edge keeps the
+  // unkicked line so the roof/backlight edge stays smooth
+  const gW0 = s.halfW - SHOULDER_BEVEL - tumblehome;
+  const gW = hasGh ? Math.min(gW0 + kick, shW - 0.015) : shW;
+  const gTopW = hasGh ? Math.min(gW0 * GH_TAPER, gW) : shW;
   const sideTop = s.bodyY - SIDE_TOP_DROP;
   const arcY = archEdgeY(cut, s.z);
   // inside an arch span the knuckle rides the wheel circle (clamped under
@@ -94,26 +103,19 @@ function ringPoints(s: Station, floorY: number, tumblehome: number, cut: ArchCut
 /** Which soup a band segment's quads belong to. */
 function segmentRole(
   seg: number, a: Station, b: Station, recipe: CarRecipe,
-): 'paint' | 'glass' {
+): 'paint' | 'glass' | 'trim' {
   const { cabin } = recipe;
   const midZ = (a.z + b.z) / 2;
   if (seg === R_GH_BASE) {
     // greenhouse side wall — glass when the band is full-height cabin and
     // not a pillar (A/C pillars fail the full-height test automatically,
-    // the B pillar comes from the explicit list)
+    // the B pillar comes from the explicit list and reads as dark trim)
     const fullHeight =
       a.roofY - a.bodyY > GLASS_MIN_RISE && b.roofY - b.bodyY > GLASS_MIN_RISE;
     const inCabin = midZ > cabin.z0 && midZ < cabin.z1;
     const onPillar = cabin.pillars.some((p) => Math.abs(midZ - p) < PILLAR_HALF);
-    return fullHeight && inCabin && !onPillar ? 'glass' : 'paint';
-  }
-  if (seg === R_GH_TOP) {
-    // roof band — a steeply sloped rise/drop over the cabin is the
-    // windshield or backlight surface (slope-based so inserted arch/pillar
-    // stations subdividing a screen into thin bands can't break the test)
-    const steep = Math.abs(b.roofY - a.roofY) / Math.max(b.z - a.z, 1e-4) > STEEP_GLASS;
-    const overCabin = midZ > cabin.z0 - 0.05 && midZ < cabin.z1 + 0.05;
-    return steep && overCabin ? 'glass' : 'paint';
+    if (fullHeight && inCabin) return onPillar ? 'trim' : 'glass';
+    return 'paint';
   }
   return 'paint';
 }
@@ -142,6 +144,7 @@ export function buildLoft(
     wheelY,
     bulge: recipe.archBulge ?? 0,
   };
+  const cp = recipe.cabin.cPillar;
   const stations = withStationsAt(recipe.stations, [
     // arch spans get edge stations plus interior ones so the raised knuckle
     // traces the wheel circle as a polygonal arc
@@ -149,25 +152,32 @@ export function buildLoft(
       [-1, -0.82, -0.5, 0, 0.5, 0.82, 1].map((k) => zc + k * cut.zHalf)),
     recipe.cabin.z0, recipe.cabin.z1,
     ...recipe.cabin.pillars.flatMap((p) => [p - PILLAR_HALF, p + PILLAR_HALF]),
+    ...(cp ? [cp.z0, cp.z1] : []),
   ]);
-  const rings = stations.map((s) => ringPoints(s, recipe.floorY, recipe.tumblehome, cut));
+  const kickAt = (z: number): number =>
+    cp && z > cp.z0 - 1e-4 && z < cp.z1 + 1e-4 ? cp.kick : 0;
+  const rings = stations.map((s) =>
+    ringPoints(s, recipe.floorY, recipe.tumblehome, cut, kickAt(s.z)));
+  const pillarTrim = new THREE.Color(PILLAR_TRIM);
 
-  // ── skin the bands ──
+  // ── skin the bands (R_GH_TOP → roof centre is greenhouse.ts territory) ──
   for (let i = 0; i < stations.length - 1; i++) {
     const a = stations[i], b = stations[i + 1];
     const ra = rings[i], rb = rings[i + 1];
     const ctr: V3 = [0, (recipe.floorY + Math.max(a.roofY, b.roofY)) / 2, (a.z + b.z) / 2];
     for (let seg = 0; seg < HALF_PTS - 1; seg++) {
-      if (inArchHole(seg, a, b, cut)) continue;
+      if (seg === R_GH_TOP || inArchHole(seg, a, b, cut)) continue;
       const role = segmentRole(seg, a, b, recipe);
-      const soup = role === 'glass' ? soups.glass : soups.paint;
-      const color = role === 'glass' ? colors.glass : colors.paint;
+      const soup = role === 'glass' ? soups.glass : role === 'trim' ? soups.trim : soups.paint;
+      const color = role === 'glass' ? colors.glass : role === 'trim' ? pillarTrim : colors.paint;
       for (const m of [1, -1]) {
         const p = (v: V3): V3 => [v[0] * m, v[1], v[2]];
         soup.quad(p(ra[seg]), p(ra[seg + 1]), p(rb[seg + 1]), p(rb[seg]), color, ctr);
       }
     }
   }
+  buildGreenhouse(recipe, stations, rings, soups,
+    { paint: colors.paint, glass: colors.glass, darkTrim: pillarTrim });
 
   // ── nose / tail caps: fan-fill the end rings ──
   for (const [ring, s, dir] of [

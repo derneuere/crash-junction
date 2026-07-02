@@ -36,10 +36,13 @@ declare global {
 // ── poses: [camera offset from target, target, vertical fov] ──
 // Long lenses (small fov) keep proportions comparable to product photos.
 // The car's nose faces -z; "left side" poses match the reference shots.
+// `ortho` (half-height in metres) switches to a TRUE ORTHOGRAPHIC camera —
+// the *-o elevations are for measuring proportions, free of perspective.
 interface Pose {
   off: [number, number, number];
   tgt: [number, number, number];
   fov: number;
+  ortho?: number;
 }
 const POSES: Record<string, Pose> = {
   side: { off: [-11.5, 0.25, 0], tgt: [0, 0.55, 0], fov: 16 }, // pure left profile, nose left
@@ -51,6 +54,10 @@ const POSES: Record<string, Pose> = {
   nose: { off: [-2.6, 0.2, -4.4], tgt: [0, 0.35, -1.7], fov: 16 }, // front-clip close-up
   tail: { off: [2.5, 0.35, 4.3], tgt: [0, 0.45, 1.7], fov: 16 }, // rear-clip close-up
   wheel: { off: [-2.9, 0.0, 0], tgt: [-0.8, 0.32, -1.32], fov: 13 }, // front-left wheel
+  'side-o': { off: [-12, 0, 0], tgt: [0, 0.15, 0], fov: 16, ortho: 1.45 }, // measured elevation
+  'front-o': { off: [0, 0, -12], tgt: [0, 0.15, 0], fov: 16, ortho: 1.45 },
+  'rear-o': { off: [0, 0, 12], tgt: [0, 0.15, 0], fov: 16, ortho: 1.45 },
+  'top-o': { off: [0, 12, 0.001], tgt: [0, 0, 0], fov: 16, ortho: 2.4 }, // measured plan
 };
 
 const canvas = document.getElementById('cv') as HTMLCanvasElement;
@@ -89,6 +96,7 @@ const pmrem = new THREE.PMREMGenerator(renderer);
 scene.environment = pmrem.fromScene(new THREE.Scene(), 0.04).texture;
 
 const camera = new THREE.PerspectiveCamera(18, 1280 / 800, 0.1, 100);
+const orthoCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 100);
 
 let carGroup: THREE.Group | null = null;
 let disposables: { dispose(): void }[] = [];
@@ -112,11 +120,20 @@ function setCar(id: string, color: number = SILVER): boolean {
 function shoot(pose: string): string {
   const p = POSES[pose];
   if (!p) return '';
-  camera.fov = p.fov;
-  camera.position.set(p.tgt[0] + p.off[0], p.tgt[1] + p.off[1], p.tgt[2] + p.off[2]);
-  camera.updateProjectionMatrix();
-  camera.lookAt(p.tgt[0], p.tgt[1], p.tgt[2]);
-  renderer.render(scene, camera);
+  const cam = p.ortho ? orthoCam : camera;
+  if (p.ortho) {
+    const aspect = 1280 / 800;
+    orthoCam.top = p.ortho;
+    orthoCam.bottom = -p.ortho;
+    orthoCam.left = -p.ortho * aspect;
+    orthoCam.right = p.ortho * aspect;
+  } else {
+    camera.fov = p.fov;
+  }
+  cam.position.set(p.tgt[0] + p.off[0], p.tgt[1] + p.off[1], p.tgt[2] + p.off[2]);
+  cam.updateProjectionMatrix();
+  cam.lookAt(p.tgt[0], p.tgt[1], p.tgt[2]);
+  renderer.render(scene, cam);
   return canvas.toDataURL('image/png');
 }
 

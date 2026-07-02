@@ -1,17 +1,18 @@
 import * as THREE from 'three';
-import type { CarRecipe, Station } from './recipe';
-import type { Soup, V3 } from './soup';
+import type { CarRecipe } from './recipe';
+import { prism, type Soup, type V3 } from './soup';
+import { surfaceOf } from './surface';
 
 // ────────────────────────────────────────────────────────────────────────────
 // Front clip + mirrors — Astra-H style. The bumper is a faceted body-colour
 // wrap (columns across the nose, corners pulled back) carrying a dark lower
 // intake slot, fog-lamp recesses on the corner facets and a light plate pad;
 // the grille is a chrome moustache over a dark slot high between the lights;
-// the headlights are teardrop wedges: a chunky lens prism on the nose face
-// that sweeps back and up over the fender corner to a tip along the hood
-// edge. Mirrors are five-face teardrop housings on short stalks at the
-// A-pillar/beltline junction. Everything sits a few mm proud of the loft so
-// nothing z-fights, and buried edges let the body close the gaps.
+// the headlights are clear-lens teardrop units with modelled internals: a
+// dark housing tub, two proud corona cylinders (low/high beam) in the head
+// role, an amber indicator at the inner corner, and a dark sweep up the
+// fender carrying a narrow lens strip to the tip. Mirrors are five-face
+// teardrop housings on short stalks at the A-pillar/beltline junction.
 // The bumper mass stays inside the front-bumper carve region (z within
 // ~±0.15 of the nose face, y −0.60…−0.30) so it tears off with the fascia;
 // lights and grille stay ABOVE that band.
@@ -19,6 +20,7 @@ import type { Soup, V3 } from './soup';
 
 const CHROME = new THREE.Color(0x7f868e); // grille moustache bar (reads on light paint)
 const PLATE = new THREE.Color(0xcdd0d4); // number-plate pad
+const AMBER = new THREE.Color(0xd98a1e); // indicator element
 
 interface ClipSoups {
   paint: Soup;
@@ -34,40 +36,33 @@ interface ClipColors {
   tail: THREE.Color;
 }
 
-/** Extrude a 4-corner front face straight BACK (+z, into the body) by
- *  `depth`, closing all six sides. Corners wind bottom-in → bottom-out →
- *  top-out → top-in; the soup's awayFrom reference fixes each face outward. */
-function prism(soup: Soup, front: [V3, V3, V3, V3], depth: number, color: THREE.Color): void {
-  const back = front.map(([x, y, z]) => [x, y, z + depth] as V3) as [V3, V3, V3, V3];
-  const ctr: V3 = [
-    (front[0][0] + front[1][0] + front[2][0] + front[3][0]) / 4,
-    (front[0][1] + front[1][1] + front[2][1] + front[3][1]) / 4,
-    (front[0][2] + front[1][2] + front[2][2] + front[3][2]) / 4 + depth / 2,
-  ];
-  soup.quad(front[0], front[1], front[2], front[3], color, ctr);
-  soup.quad(back[0], back[1], back[2], back[3], color, ctr);
-  for (let i = 0; i < 4; i++) {
-    const j = (i + 1) % 4;
-    soup.quad(front[i], front[j], back[j], back[i], color, ctr);
+/** Low-poly corona: forward-facing (−z) disc cap + side wall, the round
+ *  projector element of a clear-lens headlight. `zF` is the proud front
+ *  plane; the wall runs `depth` back so the rear buries in the housing. */
+function corona(
+  soup: Soup, cx: number, cy: number, zF: number,
+  r: number, depth: number, seg: number, color: THREE.Color,
+): void {
+  const rim = (i: number, zq: number): V3 => {
+    const a = (i / seg) * Math.PI * 2;
+    return [cx + Math.cos(a) * r, cy + Math.sin(a) * r, zq];
+  };
+  const behind: V3 = [cx, cy, zF + 1]; // cap faces forward, away from this
+  const axis: V3 = [cx, cy, zF + depth / 2];
+  for (let i = 0; i < seg; i++) {
+    soup.tri([cx, cy, zF], rim(i, zF), rim(i + 1, zF), color, behind);
+    soup.quad(rim(i, zF), rim(i + 1, zF), rim(i + 1, zF + depth), rim(i, zF + depth), color, axis);
   }
 }
 
+const lerp = (p: V3, q: V3, t: number): V3 =>
+  [p[0] + (q[0] - p[0]) * t, p[1] + (q[1] - p[1]) * t, p[2] + (q[2] - p[2]) * t];
+
 export function buildFrontClip(recipe: CarRecipe, soups: ClipSoups, colors: ClipColors): void {
+  const surf = surfaceOf(recipe);
   const s0 = recipe.stations[0]; // nose face
   const s1 = recipe.stations[1]; // hood leading edge
-  const s2 = recipe.stations[2]; // hood proper
   const z = s0.z;
-
-  /** Hood/fender surface between the first three stations (piecewise linear). */
-  const seg = (zq: number): [Station, Station] => (zq <= s1.z ? [s0, s1] : [s1, s2]);
-  const topY = (zq: number): number => {
-    const [a, b] = seg(zq);
-    return a.bodyY + ((b.bodyY - a.bodyY) * (zq - a.z)) / (b.z - a.z);
-  };
-  const halfW = (zq: number): number => {
-    const [a, b] = seg(zq);
-    return a.halfW + ((b.halfW - a.halfW) * (zq - a.z)) / (b.z - a.z);
-  };
 
   // ── bumper: faceted body-colour wrap (stays in the carve band) ───────────
   const bumperSoup = recipe.parts.bumpers === 'painted' ? soups.paint : soups.trim;
@@ -101,18 +96,18 @@ export function buildFrontClip(recipe: CarRecipe, soups: ClipSoups, colors: Clip
   prism(soups.trim, [
     [-0.3, -0.545, z - 0.138], [0.3, -0.545, z - 0.138],
     [0.3, -0.465, z - 0.142], [-0.3, -0.465, z - 0.142],
-  ], 0.06, colors.trim);
+  ], [0, 0, 0.06], colors.trim);
   // number-plate pad above the slot
   prism(soups.trim, [
     [-0.18, -0.415, z - 0.145], [0.18, -0.415, z - 0.145],
     [0.18, -0.315, z - 0.128], [-0.18, -0.315, z - 0.128],
-  ], 0.05, PLATE);
+  ], [0, 0, 0.05], PLATE);
   // fog-lamp recesses on the corner facets
   for (const m of [-1, 1]) {
     prism(soups.trim, [
       [m * 0.47, -0.525, z - 0.128], [m * 0.61, -0.525, z - 0.075],
       [m * 0.61, -0.445, z - 0.075], [m * 0.47, -0.445, z - 0.128],
-    ], 0.06, colors.trim);
+    ], [0, 0, 0.06], colors.trim);
   }
 
   // ── grille: high between the lights, above the bumper band ───────────────
@@ -121,16 +116,16 @@ export function buildFrontClip(recipe: CarRecipe, soups: ClipSoups, colors: Clip
     prism(soups.trim, [
       [-0.26, -0.212, z - 0.014], [0.26, -0.212, z - 0.014],
       [0.26, -0.15, z - 0.011], [-0.26, -0.15, z - 0.011],
-    ], 0.05, colors.trim);
+    ], [0, 0, 0.05], colors.trim);
     prism(soups.trim, [
       [-0.28, -0.148, z - 0.02], [0.28, -0.148, z - 0.02],
       [0.24, -0.116, z - 0.014], [-0.24, -0.116, z - 0.014],
-    ], 0.05, CHROME);
+    ], [0, 0, 0.05], CHROME);
   } else if (recipe.parts.grille === 'chrome') {
     prism(soups.trim, [
       [-0.33, -0.22, z - 0.016], [0.33, -0.22, z - 0.016],
       [0.3, -0.12, z - 0.012], [-0.3, -0.12, z - 0.012],
-    ], 0.05, CHROME);
+    ], [0, 0, 0.05], CHROME);
   } // 'closed' = nothing, the body face is the grille (EV style)
 
   // ── headlights ────────────────────────────────────────────────────────────
@@ -142,23 +137,43 @@ export function buildFrontClip(recipe: CarRecipe, soups: ClipSoups, colors: Clip
       soups.head.box(m * s0.halfW * 0.36, s0.bodyY - 0.05, z - 0.012, 0.13, 0.12, 0.02, colors.head);
     }
   } else {
-    // 'pods' → teardrop units: wide lens prism at the bumper corner sweeping
-    // back and up over the fender edge to a tip along the hood side
+    // 'pods' → clear-lens teardrop units: dark housing tub recessed on the
+    // nose face, two round corona elements proud of it (main low beam
+    // outboard, smaller high beam inboard), amber indicator at the inner
+    // top corner; the sweep up the fender is dark base under a narrow lens
+    // strip so the whole unit still reads as one lamp.
     const zE = s1.z;
     const zG = s1.z + 0.25;
     for (const m of [-1, 1]) {
-      const A: V3 = [m * 0.27, s0.bodyY - 0.145, z - 0.015]; // front bottom inner
-      const B: V3 = [m * 0.585, s0.bodyY - 0.145, z - 0.012]; // front bottom outer
-      const C: V3 = [m * 0.27, s0.bodyY + 0.005, z - 0.012]; // front top inner
-      const D: V3 = [m * 0.6, s0.bodyY + 0.005, z - 0.008]; // front top outer
-      const E: V3 = [m * 0.52, topY(zE) + 0.02, zE]; // mid top inner (on hood)
-      const F: V3 = [m * (halfW(zE) + 0.01), topY(zE) - 0.045, zE]; // mid outer (fender)
-      const G: V3 = [m * (halfW(zG) + 0.008), topY(zG) + 0.012, zG]; // teardrop tip
+      const yB = s0.bodyY - 0.145, yT = s0.bodyY + 0.005;
+      const A: V3 = [m * 0.27, yB, z - 0.007]; // housing front, recessed vs
+      const B: V3 = [m * 0.585, yB, z - 0.004]; // the old flat lens plane
+      const C: V3 = [m * 0.27, yT, z - 0.004];
+      const D: V3 = [m * 0.6, yT, z - 0.001];
+      const E: V3 = [m * 0.52, surf.bodyY(zE) + 0.02, zE]; // mid top (hood)
+      const F: V3 = [m * (surf.halfW(zE) + 0.01), surf.bodyY(zE) - 0.045, zE]; // fender
+      const G: V3 = [m * (surf.halfW(zG) + 0.008), surf.bodyY(zG) + 0.012, zG]; // tip
       const inner: V3 = [m * 0.4, -0.3, s1.z]; // inside the nose, for winding
-      prism(soups.head, [A, B, D, C], 0.07, colors.head); // chunky front unit
-      soups.head.quad(C, D, F, E, colors.head, inner); // sweep up the corner
-      soups.head.tri(B, D, F, colors.head, inner); // outer corner skirt
-      soups.head.tri(E, F, G, colors.head, inner); // tip along the hood edge
+      prism(soups.trim, [A, B, D, C], [0, 0, 0.05], colors.trim); // housing tub
+      soups.trim.quad(C, D, F, E, colors.trim, inner); // dark sweep base
+      soups.trim.tri(B, D, F, colors.trim, inner); // outer corner skirt
+      soups.trim.tri(E, F, G, colors.trim, inner); // tip base
+      // corona elements, proud of the housing (rear walls bury in the tub)
+      corona(soups.head, m * 0.49, yB + 0.088, z - 0.036, 0.056, 0.042, 9, colors.head);
+      corona(soups.head, m * 0.362, yB + 0.078, z - 0.028, 0.038, 0.034, 8, colors.head);
+      // amber indicator wedge at the inner/upper corner (inside the tub)
+      prism(soups.trim, [
+        [m * 0.278, yB + 0.1, z - 0.016], [m * 0.345, yB + 0.104, z - 0.015],
+        [m * 0.335, yB + 0.14, z - 0.014], [m * 0.278, yB + 0.143, z - 0.014],
+      ], [0, 0, 0.03], AMBER);
+      // narrow lens strip riding the dark sweep, plus an inset glowing tip
+      const up = (p: V3): V3 => [p[0] + m * 0.004, p[1] + 0.007, p[2]];
+      soups.head.quad(
+        up(lerp(C, D, 0.45)), up(lerp(C, D, 0.9)),
+        up(lerp(E, F, 0.85)), up(lerp(E, F, 0.35)), colors.head, inner,
+      );
+      const tc = lerp(lerp(E, F, 0.5), G, 0.33); // tip centroid-ish
+      soups.head.tri(up(lerp(E, tc, 0.2)), up(lerp(F, tc, 0.2)), up(lerp(G, tc, 0.2)), colors.head, inner);
     }
   }
 }

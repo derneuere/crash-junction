@@ -12,6 +12,7 @@ import { Soup, mergeSoups } from './soup';
 import { buildLoft } from './loft';
 import { buildFrontClip, buildMirrors } from './front';
 import { buildRearClip } from './rear';
+import { buildSide } from './side';
 import { buildWheelPair } from './wheels';
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -54,6 +55,7 @@ export function buildProceduralModel(recipe: CarRecipe, spec: VehicleSpec): Vehi
   buildLoft(recipe, wheelY, soups, colors);
   buildFrontClip(recipe, soups, colors);
   buildRearClip(recipe, soups, colors);
+  buildSide(recipe, soups, colors);
   buildMirrors(recipe, soups.paint, colors.paint);
 
   // merge in role order; each soup's landing range is its role range

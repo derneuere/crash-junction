@@ -46,8 +46,13 @@ export interface CarRecipe {
    *  band boundaries. buildRecipeStations() below handles that. */
   stations: Station[];
   /** Where side glass lives: z span, belt line (glass bottom), pillar z
-   *  positions (each pillar keeps one station band as painted body). */
-  cabin: { z0: number; z1: number; beltY: number; pillars: number[] };
+   *  positions (each listed pillar band renders as dark trim — B-pillar
+   *  style). `cPillar` kicks the greenhouse wall outboard over [z0, z1] so
+   *  the C-pillar reads as its own surface against the quarter-window edge. */
+  cabin: {
+    z0: number; z1: number; beltY: number; pillars: number[];
+    cPillar?: { z0: number; z1: number; kick: number };
+  };
   /** Greenhouse inset: glass base sits this far inboard of the shoulder. */
   tumblehome: number;
   parts: {
@@ -60,6 +65,8 @@ export interface CarRecipe {
   };
   /** Fixed trim colour (bumper plastic, wells, grille). */
   trimColor: number;
+  /** Roof antenna stub position (z, on the roof centreline); omit for none. */
+  antennaZ?: number;
 }
 
 /** Insert interpolated stations at the given z values so loft bands break

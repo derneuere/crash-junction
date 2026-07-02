@@ -34,7 +34,12 @@ export const METRO: CarRecipe = {
     { z: 1.8, bodyY: 0.2, roofY: 0.2, halfW: 0.79 }, // backlight bottom / hatch knee
     { z: 1.95, bodyY: -0.15, roofY: -0.15, halfW: 0.73 }, // hatch foot → bumper cap
   ],
-  cabin: { z0: -0.5, z1: 1.74, beltY: 0.11, pillars: [0.45] },
+  cabin: {
+    z0: -0.5, z1: 1.74, beltY: 0.11, pillars: [0.45],
+    // quarter glass ends at the z=1.42 station; the C-pillar panel kicks
+    // outboard just aft of it and carries to the hatch knee
+    cPillar: { z0: 1.45, z1: 1.82, kick: 0.055 },
+  },
   tumblehome: 0.13,
   parts: {
     grille: 'bar',
@@ -44,5 +49,6 @@ export const METRO: CarRecipe = {
     exhaust: 1,
   },
   trimColor: 0x1b1e23,
+  antennaZ: 1.3,
 };
 PROC_RECIPES.metro = METRO;

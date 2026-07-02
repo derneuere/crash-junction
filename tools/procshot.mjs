@@ -15,7 +15,7 @@
 // diagnostics echoed to stdout. Needs Node 18+ and Chrome or Edge.
 
 import { spawn } from 'node:child_process';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import puppeteer from 'puppeteer-core';
@@ -32,6 +32,9 @@ const CAR = flag('--car', 'metro');
 const TAG = flag('--tag', 'shot');
 const ONLY = flag('--poses', null);
 const COLOR = flag('--color', null);
+// --ref <image>: ALSO write <tag>-<pose>-vs.png with the render stacked over
+// the reference photo at matched width — the precise-comparison view.
+const REF = flag('--ref', null);
 
 if (parseInt(process.versions.node, 10) < 18) {
   console.error(`Node ${process.versions.node} too old — use fnm exec --using=22.`);
@@ -123,6 +126,15 @@ try {
   const poses = ONLY ? ONLY.split(',').map((s) => s.trim()) : await page.evaluate(() => window.__proc.poses);
   const outDir = path.join(root, 'screenshots', 'proc');
   mkdirSync(outDir, { recursive: true });
+
+  let refUrl = null;
+  if (REF) {
+    const refPath = path.isAbsolute(REF) ? REF : path.join(root, REF);
+    const ext = path.extname(refPath).toLowerCase();
+    const mime = ext === '.webp' ? 'image/webp' : ext === '.png' ? 'image/png' : 'image/jpeg';
+    refUrl = `data:${mime};base64,${readFileSync(refPath).toString('base64')}`;
+  }
+
   for (const pose of poses) {
     const dataUrl = await page.evaluate((p) => window.__proc.shoot(p), pose);
     if (!dataUrl) {
@@ -132,6 +144,36 @@ try {
     const outFile = path.join(outDir, `${TAG}-${pose}.png`);
     writeFileSync(outFile, Buffer.from(dataUrl.slice('data:image/png;base64,'.length), 'base64'));
     console.log(`wrote ${path.relative(root, outFile)}`);
+    if (refUrl) {
+      // composite render-over-reference at matched width, in the page's 2D canvas
+      const vsUrl = await page.evaluate(async (shot, ref, label) => {
+        const load = (src) => new Promise((res, rej) => {
+          const im = new Image();
+          im.onload = () => res(im);
+          im.onerror = rej;
+          im.src = src;
+        });
+        const [a, b] = await Promise.all([load(shot), load(ref)]);
+        const W = 1280;
+        const ah = Math.round((a.height * W) / a.width);
+        const bh = Math.round((b.height * W) / b.width);
+        const cv = document.createElement('canvas');
+        cv.width = W;
+        cv.height = ah + bh + 26;
+        const g = cv.getContext('2d');
+        g.fillStyle = '#101216';
+        g.fillRect(0, 0, cv.width, cv.height);
+        g.drawImage(a, 0, 0, W, ah);
+        g.drawImage(b, 0, ah + 26, W, bh);
+        g.fillStyle = '#d8dde3';
+        g.font = '16px sans-serif';
+        g.fillText(`render · ${label}`, 8, ah + 18);
+        return cv.toDataURL('image/png');
+      }, dataUrl, refUrl, pose);
+      const vsFile = path.join(outDir, `${TAG}-${pose}-vs.png`);
+      writeFileSync(vsFile, Buffer.from(vsUrl.slice('data:image/png;base64,'.length), 'base64'));
+      console.log(`wrote ${path.relative(root, vsFile)}`);
+    }
   }
 } catch (e) {
   console.error(e.stack || e.message);
