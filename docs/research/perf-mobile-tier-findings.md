@@ -175,6 +175,46 @@ cheaper, the next lever is merging the panel meshes into the hull draw for
 REMOTE cars only (rivals don't deform per-panel until hit) — bigger surgery,
 not taken.
 
+## Round 5 — CPU pass: the O(n²) broadphase degeneration
+
+Benchmarked the sim by manually driving `advance(1/60)` ×300 in-page with
+sub-timers monkey-patched onto the cannon-es internals (immune to the
+hidden-tab rAF):
+
+| Component | ms/frame (desktop) | share |
+| --- | --- | --- |
+| whole `advance` | 1.75 | 100% |
+| `world.step` (×2 substeps) | 1.66 | 95% |
+| **`broadphase.collisionPairs`** | **0.99** | **60%** |
+| `narrowphase.getContacts` | 0.045 | 3% |
+| `solver.solve` | 0.003 | — |
+| game logic (advance − step) | 0.09 | 5% |
+
+Every presentation-tail helper (grass update, prop cull, car LOD, blob
+shadows, sea, audio frame) measured < 0.05 ms — noise.
+
+**Root cause:** cannon-es `SAPBroadphase.collisionPairs` tests
+`needBroadphaseCollision` BEFORE the sorted-axis bounds `break` and
+`continue`s on rejection. A STATIC or SLEEPING body is rejected against
+everything, so its sweep never breaks and scans the entire remaining list.
+With ~490 static prop/wall/building bodies out of ~515, that's ~265k
+rejected-pair calls per frame — a stock-library O(n²) wart, not our code.
+
+**Fix (`StaticAwareSAPBroadphase`, physics.ts):** flag bodies once per sweep
+as inert (static-or-sleeping — the exact reject predicate); an inert body
+sweeps only the ascending list of non-inert bodies ahead of it. Every skipped
+pair is one the stock loop `continue`d over with no side effects, and the
+first bounds-fail against a non-inert body breaks exactly where the stock
+loop would have — **the emitted pair list is bit-identical (same pairs, same
+order), so the solver sees byte-identical inputs.** Proven by the replay
+suite passing unchanged.
+
+**Measured after:** broadphase **0.99 → 0.055 ms (18×)**; whole sim frame
+**1.75 → 0.32 ms (5.5×)**, same scene (499 bodies, 6 awake). Sim CPU is now
+~0.3 ms/frame on desktop — even at a 2–3× A13 penalty it is comfortably
+inside the 60 fps budget, which effectively eliminates "physics catch-up
+spiral" as a bottleneck candidate on the phone.
+
 ## Not done (deliberately, demo-scoped)
 - perf-reflections-plan Option A proper (THREE.Layers) — the hide-list seam
   delivers the same exclusion; revisit if the per-capture traverse ever shows.
