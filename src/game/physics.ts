@@ -8,75 +8,6 @@ import { GRAVITY } from './constants';
  *  get the full mask back and tumble over everything. */
 export const GROUP_DECOR = 2;
 
-/**
- * cannon-es's SAPBroadphase with the static-body scan degeneration fixed.
- *
- * The stock inner loop tests `needBroadphaseCollision` BEFORE the sorted-axis
- * bounds test and `continue`s on rejection — so for a STATIC or SLEEPING body
- * (the reject is "both static-or-sleeping") the `break` that ends the sweep is
- * never reached and the loop scans the ENTIRE remaining list. Our world holds
- * ~490 static prop/wall/building bodies out of ~515, which degenerates the
- * sweep to O(n²): measured ~265k rejected-pair calls — ~1.0 ms — per frame,
- * 60% of the whole sim step.
- *
- * The fix keeps the emitted pair list BIT-IDENTICAL (same pairs, same order,
- * same early-exit points — replay determinism is proven by the replay suite):
- *  - bodies are flagged once per sweep as "inert" (static or sleeping — the
- *    exact reject predicate);
- *  - an inert body only sweeps the ascending list of NON-inert bodies ahead
- *    of it: every skipped inert-inert pair is one the stock loop `continue`d
- *    over without side effects, and the first bounds-fail against a non-inert
- *    body breaks exactly where the stock loop would have;
- *  - non-inert bodies sweep the full tail as before (their sweep already
- *    terminates quickly — every pair reaches the bounds test).
- */
-class StaticAwareSAPBroadphase extends CANNON.SAPBroadphase {
-  private inert: boolean[] = [];
-  private awakeIdx: number[] = [];
-
-  collisionPairs(world: CANNON.World, p1: CANNON.Body[], p2: CANNON.Body[]): void {
-    const bodies = this.axisList;
-    const N = bodies.length;
-    const axisIndex = this.axisIndex;
-    if (this.dirty) {
-      this.sortList();
-      this.dirty = false;
-    }
-    const inert = this.inert;
-    const awake = this.awakeIdx;
-    inert.length = N;
-    awake.length = 0;
-    for (let i = 0; i < N; i++) {
-      const b = bodies[i];
-      const isInert = (b.type & CANNON.Body.STATIC) !== 0 || b.sleepState === CANNON.Body.SLEEPING;
-      inert[i] = isInert;
-      if (!isInert) awake.push(i);
-    }
-    let a = 0; // first entry of `awake` whose index is > i (amortized O(N))
-    for (let i = 0; i !== N; i++) {
-      const bi = bodies[i];
-      while (a < awake.length && awake[a] <= i) a++;
-      if (inert[i]) {
-        // only a non-inert bj can survive the reject — visit just those, in
-        // the same ascending order the stock sweep would reach them.
-        for (let k = a; k < awake.length; k++) {
-          const bj = bodies[awake[k]];
-          if (!this.needBroadphaseCollision(bi, bj)) continue;
-          if (!CANNON.SAPBroadphase.checkBounds(bi, bj, axisIndex)) break;
-          this.intersectionTest(bi, bj, p1, p2);
-        }
-      } else {
-        for (let j = i + 1; j < N; j++) {
-          const bj = bodies[j];
-          if (!this.needBroadphaseCollision(bi, bj)) continue;
-          if (!CANNON.SAPBroadphase.checkBounds(bi, bj, axisIndex)) break;
-          this.intersectionTest(bi, bj, p1, p2);
-        }
-      }
-    }
-  }
-}
-
 export interface PhysicsContext {
   world: CANNON.World;
   matGround: CANNON.Material;
@@ -95,7 +26,7 @@ export interface PhysicsContext {
 export function createPhysics(): PhysicsContext {
   const world = new CANNON.World();
   world.gravity.set(0, GRAVITY, 0);
-  world.broadphase = new StaticAwareSAPBroadphase(world);
+  world.broadphase = new CANNON.SAPBroadphase(world);
   (world.solver as CANNON.GSSolver).iterations = 10;
   world.allowSleep = true;
   world.defaultContactMaterial.friction = 0.35;
