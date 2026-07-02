@@ -175,6 +175,32 @@ cheaper, the next lever is merging the panel meshes into the hull draw for
 REMOTE cars only (rivals don't deform per-panel until hit) — bigger surgery,
 not taken.
 
+## Round 4 — Burnout-style blobby car shadows (from the decomp research)
+
+Arcade racers of the Burnout era classically kept cars out of the shadow
+depth pass entirely: every car gets a soft projected ground blob, and all
+blobs batch into a single draw with one shared texture. At racing speeds a
+soft under-car blob reads as a perfectly convincing contact shadow — the
+crisp sun-projected silhouette only ever registered when parked.
+
+`carshadow.ts` ports the idea: one `InstancedMesh` of multiply-blended
+radial-gradient quads (white = no darkening, so the per-instance colour
+doubles as an alpha fade). Grounded cars pin the blob to their own contact
+plane (the body quaternion keeps it flush on ramps); airborne cars project to
+the height field, growing (+12%/m) and fading (out by 5 m altitude) like BP's
+height-off-ground term. Blobs skip past 90 m (sub-pixel) and past the fog
+(the car itself is hidden there).
+
+Wiring: new `carBlobShadows` graphics flag (phone preset true, desktop false,
+overlay toggle) — enabling it makes `CarLod.setHullShadows(false)` pull the
+hulls (the last remaining car casters) out of the depth pass and turns the
+batch on. The sun's shadow map still renders the world/props.
+
+**Measured (phone tier, grid pose):** car shadow depth draws **27 → 0**; all
+car shadows now cost **exactly 1 draw** (6 blobs instanced). Chase-pose total
+154 calls / 0.45M tris. Visual check: soft contact blobs under the whole
+grid pack, flush with the road.
+
 ## Not done (deliberately, demo-scoped)
 - perf-reflections-plan Option A proper (THREE.Layers) — the hide-list seam
   delivers the same exclusion; revisit if the per-capture traverse ever shows.

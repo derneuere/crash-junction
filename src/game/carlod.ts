@@ -52,6 +52,20 @@ interface CarLodState {
 
 export class CarLod {
   private states = new WeakMap<Actor, CarLodState>();
+  // every classified hull, so the blob-shadow tier can switch ALL car
+  // shadow-casting off in one call (blobs replace the depth-pass silhouette)
+  private hulls: THREE.Mesh[] = [];
+  private hullsCast = true;
+
+  /** Blob-shadow tier switch: hulls stop casting into the sun's depth pass
+   *  when the batched ground blobs take over (carshadow.ts). Applies to the
+   *  already-classified hulls and to every future classify. Presentation-only
+   *  castShadow flags, same contract as the classify-time prune. */
+  setHullShadows(cast: boolean): void {
+    if (cast === this.hullsCast) return;
+    this.hullsCast = cast;
+    for (const h of this.hulls) h.castShadow = cast;
+  }
 
   /** Classify a car's meshes once. The hull is the largest-radius
    *  shadow-casting mesh; the interior is the large non-casting one (built
@@ -76,6 +90,10 @@ export class CarLod {
       }
     }
     const state: CarLodState = { small: [], interior: [], interiorShown: true, farHidden: false, groupHidden: false };
+    if (hull) {
+      this.hulls.push(hull);
+      hull.castShadow = this.hullsCast; // blob tier may already be active
+    }
     for (const m of meshes) {
       if (m === hull) continue;
       const r = m.geometry.boundingSphere?.radius ?? 0;

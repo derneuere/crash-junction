@@ -41,6 +41,7 @@ const GROUPS: { title: string; rows: Toggle[] }[] = [
     rows: [
       { key: 'reflections', label: 'REFLECTIONS', hint: 'Player cube reflection — re-renders the whole scene ×6 every other frame' },
       { key: 'shadows', label: 'SHADOWS', hint: 'Sun shadow depth pass — one extra render of every caster' },
+      { key: 'carBlobShadows', label: 'BLOB CAR SHADOWS', hint: 'Burnout-style soft blobs under cars instead of real shadow casting — whole field for one draw call' },
       { key: 'props', label: 'PROPS', hint: 'All set-dressing props (~900 objects on gantry) — the dominant draw source' },
     ],
   },

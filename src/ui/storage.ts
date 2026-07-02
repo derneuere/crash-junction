@@ -137,6 +137,7 @@ export function readGraphics(): GraphicsSettings {
     shadowSize: num(o.shadowSize, DEFAULT_GRAPHICS.shadowSize),
     grassRange: num(o.grassRange, DEFAULT_GRAPHICS.grassRange),
     drawDistance: num(o.drawDistance, DEFAULT_GRAPHICS.drawDistance),
+    carBlobShadows: bool(o.carBlobShadows, DEFAULT_GRAPHICS.carBlobShadows),
   };
 }
 
