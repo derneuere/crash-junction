@@ -4,4 +4,4 @@
 // (docs/research/procedural-cars-plan.md).
 export type { CarRecipe, Station, WheelStyle } from './procgen/recipe';
 export { buildProceduralModel } from './procgen/assemble';
-export { METRO } from './procgen/recipes';
+export { METRO, PROC_RECIPES } from './procgen/recipes';

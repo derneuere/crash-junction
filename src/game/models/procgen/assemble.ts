@@ -10,7 +10,8 @@ import { buildInterior } from '../interior';
 import type { CarRecipe } from './recipe';
 import { Soup, mergeSoups } from './soup';
 import { buildLoft } from './loft';
-import { buildFrontClip, buildRearClip, buildMirrors } from './clips';
+import { buildFrontClip, buildMirrors } from './front';
+import { buildRearClip } from './rear';
 import { buildWheelPair } from './wheels';
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -91,6 +92,7 @@ export function buildProceduralModel(recipe: CarRecipe, spec: VehicleSpec): Vehi
     tailRanges,
     wheelL,
     wheelR,
+    showroomWheels: true, // parametric wheels — the garage should show THEM
     arch,
     wheelY,
     panelMetrics: metrics,

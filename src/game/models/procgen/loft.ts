@@ -22,10 +22,10 @@ import { Soup, type V3 } from './soup';
 const SHOULDER_BEVEL = 0.06; // shoulder edge sits this far inboard of the side
 const ROCKER_TUCK = 0.88; // floor width as a fraction of the side width
 const KNUCKLE_RISE = 0.09; // rocker knuckle height above the floor line
-const SIDE_TOP_DROP = 0.07; // side wall ends this far below the shoulder
+const SIDE_TOP_DROP = 0.05; // side wall ends this far below the shoulder
 const GH_TAPER = 0.82; // greenhouse top width over its base width
-const GLASS_MIN_RISE = 0.3; // band needs this much greenhouse to be a window
-const STEEP_GLASS = 0.1; // roof drop across a band that reads as a screen
+const GLASS_MIN_RISE = 0.11; // band needs this much greenhouse to be a window
+const STEEP_GLASS = 0.35; // roof SLOPE (dy/dz) that reads as a screen surface
 const PILLAR_HALF = 0.09; // half-width of a pillar's painted band
 
 /** Ring point layout, floor centre → roof centre up the +x side. */
@@ -33,17 +33,57 @@ const R_FLOOR_C = 0, R_FLOOR_E = 1, R_KNUCKLE = 2, R_SIDE_TOP = 3,
   R_SHOULDER = 4, R_GH_BASE = 5, R_GH_TOP = 6, R_ROOF_C = 7;
 const HALF_PTS = 8;
 
-function ringPoints(s: Station, floorY: number, tumblehome: number): V3[] {
-  const w = s.halfW;
-  const shW = w - SHOULDER_BEVEL;
+/** Everything the loft needs to shape the wheel-arch openings: the opening
+ *  follows the archR circle around each wheel centre, cut off where the
+ *  circle crosses the rocker-knuckle line (so the arc lands seamlessly on
+ *  the rocker at ±zHalf). */
+interface ArchCut {
+  zs: number[]; // wheel centre z's
+  r: number; // opening radius
+  zHalf: number; // half-span where the circle crosses knuckle height
+  wheelY: number;
+  bulge: number; // extra half-width at the wheel centre (fender bulge)
+}
+
+/** Arch-opening edge height at z, or null when z is outside every span. */
+function archEdgeY(cut: ArchCut, z: number): number | null {
+  for (const zc of cut.zs) {
+    const dz = Math.abs(z - zc);
+    if (dz < cut.zHalf - 1e-4) {
+      return cut.wheelY + Math.sqrt(Math.max(cut.r * cut.r - dz * dz, 0));
+    }
+  }
+  return null;
+}
+
+/** Fender-bulge half-width offset at z (quadratic falloff past the arch). */
+function bulgeAt(cut: ArchCut, z: number): number {
+  const reach = cut.zHalf + 0.2;
+  let f = 0;
+  for (const zc of cut.zs) {
+    const t = Math.abs(z - zc) / reach;
+    if (t < 1) f = Math.max(f, 1 - t * t);
+  }
+  return cut.bulge * f;
+}
+
+function ringPoints(s: Station, floorY: number, tumblehome: number, cut: ArchCut): V3[] {
+  const bx = bulgeAt(cut, s.z);
+  const w = s.halfW + bx;
+  const shW = s.halfW - SHOULDER_BEVEL + bx * 0.6;
   const hasGh = s.roofY > s.bodyY + 0.03;
-  const gW = hasGh ? shW - tumblehome : shW;
+  const gW = hasGh ? s.halfW - SHOULDER_BEVEL - tumblehome : shW;
   const gTopW = hasGh ? gW * GH_TAPER : shW;
+  const sideTop = s.bodyY - SIDE_TOP_DROP;
+  const arcY = archEdgeY(cut, s.z);
+  // inside an arch span the knuckle rides the wheel circle (clamped under
+  // the side-wall top) so the side wall's lower edge hugs the wheel
+  const knuckleY = arcY === null ? floorY + KNUCKLE_RISE : Math.min(arcY, sideTop - 0.02);
   const half: V3[] = [];
   half[R_FLOOR_C] = [0, floorY, s.z];
-  half[R_FLOOR_E] = [w * ROCKER_TUCK, floorY, s.z];
-  half[R_KNUCKLE] = [w, floorY + KNUCKLE_RISE, s.z];
-  half[R_SIDE_TOP] = [w, s.bodyY - SIDE_TOP_DROP, s.z];
+  half[R_FLOOR_E] = [s.halfW * ROCKER_TUCK, floorY, s.z];
+  half[R_KNUCKLE] = [w, knuckleY, s.z];
+  half[R_SIDE_TOP] = [w, sideTop, s.z];
   half[R_SHOULDER] = [shW, s.bodyY, s.z];
   half[R_GH_BASE] = hasGh ? [gW, s.bodyY + 0.01, s.z] : [shW, s.bodyY, s.z];
   half[R_GH_TOP] = hasGh ? [gTopW, s.roofY, s.z] : [shW, s.bodyY, s.z];
@@ -68,24 +108,23 @@ function segmentRole(
     return fullHeight && inCabin && !onPillar ? 'glass' : 'paint';
   }
   if (seg === R_GH_TOP) {
-    // roof band — a steep rise/drop over the cabin is the windshield or
-    // backlight surface
-    const steep = Math.abs(b.roofY - a.roofY) > STEEP_GLASS;
+    // roof band — a steeply sloped rise/drop over the cabin is the
+    // windshield or backlight surface (slope-based so inserted arch/pillar
+    // stations subdividing a screen into thin bands can't break the test)
+    const steep = Math.abs(b.roofY - a.roofY) / Math.max(b.z - a.z, 1e-4) > STEEP_GLASS;
     const overCabin = midZ > cabin.z0 - 0.05 && midZ < cabin.z1 + 0.05;
     return steep && overCabin ? 'glass' : 'paint';
   }
   return 'paint';
 }
 
-/** True when this band sits inside a wheel-well opening for `seg`. */
-function inArchHole(seg: number, a: Station, b: Station, recipe: CarRecipe): boolean {
-  if (seg !== R_FLOOR_C && seg !== R_FLOOR_E && seg !== R_KNUCKLE) return false;
+/** True when this band sits inside a wheel-well opening for `seg`. Only the
+ *  floor and rocker-bevel segs open up — the side wall above stays and its
+ *  lower edge (the arch-raised knuckle) traces the wheel circle. */
+function inArchHole(seg: number, a: Station, b: Station, cut: ArchCut): boolean {
+  if (seg !== R_FLOOR_C && seg !== R_FLOOR_E) return false;
   const midZ = (a.z + b.z) / 2;
-  const r = recipe.archR;
-  return (
-    Math.abs(midZ - recipe.wheels.zFront) < r - 1e-3 ||
-    Math.abs(midZ - recipe.wheels.zRear) < r - 1e-3
-  );
+  return cut.zs.some((zc) => Math.abs(midZ - zc) < cut.zHalf - 1e-3);
 }
 
 export function buildLoft(
@@ -94,13 +133,24 @@ export function buildLoft(
   soups: { paint: Soup; glass: Soup; trim: Soup },
   colors: { paint: THREE.Color; glass: THREE.Color; well: THREE.Color },
 ): void {
+  const knuckleY = recipe.floorY + KNUCKLE_RISE;
+  const dyK = knuckleY - wheelY;
+  const cut: ArchCut = {
+    zs: [recipe.wheels.zFront, recipe.wheels.zRear],
+    r: recipe.archR,
+    zHalf: Math.sqrt(Math.max(recipe.archR * recipe.archR - dyK * dyK, 1e-4)),
+    wheelY,
+    bulge: recipe.archBulge ?? 0,
+  };
   const stations = withStationsAt(recipe.stations, [
-    recipe.wheels.zFront - recipe.archR, recipe.wheels.zFront + recipe.archR,
-    recipe.wheels.zRear - recipe.archR, recipe.wheels.zRear + recipe.archR,
+    // arch spans get edge stations plus interior ones so the raised knuckle
+    // traces the wheel circle as a polygonal arc
+    ...cut.zs.flatMap((zc) =>
+      [-1, -0.82, -0.5, 0, 0.5, 0.82, 1].map((k) => zc + k * cut.zHalf)),
     recipe.cabin.z0, recipe.cabin.z1,
     ...recipe.cabin.pillars.flatMap((p) => [p - PILLAR_HALF, p + PILLAR_HALF]),
   ]);
-  const rings = stations.map((s) => ringPoints(s, recipe.floorY, recipe.tumblehome));
+  const rings = stations.map((s) => ringPoints(s, recipe.floorY, recipe.tumblehome, cut));
 
   // ── skin the bands ──
   for (let i = 0; i < stations.length - 1; i++) {
@@ -108,7 +158,7 @@ export function buildLoft(
     const ra = rings[i], rb = rings[i + 1];
     const ctr: V3 = [0, (recipe.floorY + Math.max(a.roofY, b.roofY)) / 2, (a.z + b.z) / 2];
     for (let seg = 0; seg < HALF_PTS - 1; seg++) {
-      if (inArchHole(seg, a, b, recipe)) continue;
+      if (inArchHole(seg, a, b, cut)) continue;
       const role = segmentRole(seg, a, b, recipe);
       const soup = role === 'glass' ? soups.glass : soups.paint;
       const color = role === 'glass' ? colors.glass : colors.paint;
@@ -137,22 +187,24 @@ export function buildLoft(
   }
 
   // ── wheel-well liners: a dark half-tube behind each arch opening ──
-  const outerX = Math.max(...stations.map((s) => s.halfW));
-  for (const zc of [recipe.wheels.zFront, recipe.wheels.zRear]) {
+  const outerX = Math.max(...stations.map((s) => s.halfW)) + cut.bulge;
+  for (const zc of cut.zs) {
     for (const m of [1, -1]) {
       buildWell(soups.trim, colors.well, m * (outerX + 0.005), m * (recipe.wheels.archX - 0.2),
-        wheelY, zc, recipe.archR);
+        wheelY, zc, recipe.archR, dyK);
     }
   }
 }
 
 /** Half-tube from the body side (xOut) to an inner wall (xIn) around the
- *  wheel centre — the visible inside of the wheel arch. */
+ *  wheel centre — the visible inside of the wheel arch. The tube starts and
+ *  ends where the opening meets the rocker line (dyK below the centre). */
 function buildWell(soup: Soup, color: THREE.Color, xOut: number, xIn: number,
-  wheelY: number, zc: number, r: number): void {
-  const SEGS = 6;
+  wheelY: number, zc: number, r: number, dyK: number): void {
+  const SEGS = 8;
+  const a0 = Math.asin(Math.max(-0.9, Math.min(0.9, dyK / r)));
   const arc = (k: number): [number, number] => {
-    const ang = Math.PI * (k / SEGS); // rear-bottom → top → front-bottom
+    const ang = a0 + (Math.PI - 2 * a0) * (k / SEGS); // rear-bottom → top → front-bottom
     return [wheelY + Math.sin(ang) * r, zc + Math.cos(ang) * r];
   };
   for (let k = 0; k < SEGS; k++) {

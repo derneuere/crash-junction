@@ -23,7 +23,7 @@ export interface Station {
   halfW: number;
 }
 
-export type WheelStyle = 'steelie' | 'five-spoke' | 'turbine' | 'deep-dish';
+export type WheelStyle = 'seven-spoke' | 'steelie' | 'five-spoke' | 'turbine' | 'deep-dish';
 export type GrilleStyle = 'bar' | 'closed' | 'chrome';
 export type LightStyle = 'pods' | 'strip' | 'quad-round';
 
@@ -35,8 +35,12 @@ export interface CarRecipe {
   floorY: number;
   /** Wheel placement → model.arch → suspension anchors (per-car identity). */
   wheels: { zFront: number; zRear: number; archX: number; style: WheelStyle };
-  /** Wheel-well opening radius around each wheel centre. */
+  /** Wheel-well opening radius around each wheel centre. The loft traces
+   *  this circle as a polygonal arc down to knuckle (rocker-top) height. */
   archR: number;
+  /** Optional subtle fender bulge: extra half-width at the wheel centres,
+   *  fading quadratically to zero just beyond each arch opening. */
+  archBulge?: number;
   /** The silhouette, nose → tail. Must include stations exactly at the
    *  arch-opening edges (zFront±archR, zRear±archR) so well holes land on
    *  band boundaries. buildRecipeStations() below handles that. */
