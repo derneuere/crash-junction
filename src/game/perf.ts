@@ -105,6 +105,8 @@ export class Perf {
   private smoothWall = 16.7;
   private smoothCalls = 0;
   private smoothTris = 0;
+  private smoothSim = 0;
+  private smoothPost = 0;
   private scratch: number[] = [];
   private lastLights = -1;
   private forceLightSample = false;
@@ -170,6 +172,11 @@ export class Perf {
     // alternate between cube and non-cube frames — see the field comment)
     this.smoothCalls += (f.calls - this.smoothCalls) * 0.1;
     this.smoothTris += (f.triangles - this.smoothTris) * 0.1;
+    // CPU-side split for the on-device HUD: sim (fixed steps + game logic) vs
+    // draw submission (cube + composer/renderer). On a phone this is the fact
+    // that settles "GPU-bound or physics-bound" without a cabled profiler.
+    this.smoothSim += (f.sim - this.smoothSim) * 0.1;
+    this.smoothPost += (f.cube + f.post - this.smoothPost) * 0.1;
 
     const work = f.sim + f.cube + f.post;
     const threshold = Math.max(SPIKE_FLOOR_MS, SPIKE_MEDIAN_RATIO * this.median);
@@ -240,11 +247,13 @@ export class Perf {
    *  completed frame's draw-call and triangle counts. No allocation — safe to
    *  poll a few times a second. (this.cur still points at the frame just ended
    *  until the next beginFrame.) */
-  live(): { fps: number; calls: number; triangles: number } {
+  live(): { fps: number; calls: number; triangles: number; simMs: number; drawMs: number } {
     return {
       fps: this.smoothWall > 0 ? Math.round(1000 / this.smoothWall) : 0,
       calls: Math.round(this.smoothCalls),
       triangles: Math.round(this.smoothTris),
+      simMs: Math.round(this.smoothSim * 10) / 10,
+      drawMs: Math.round(this.smoothPost * 10) / 10,
     };
   }
 

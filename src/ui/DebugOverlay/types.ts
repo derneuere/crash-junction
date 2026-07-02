@@ -38,7 +38,7 @@ export interface DebugGame {
   // per-blade work. See grass.ts GrassField.stats().
   grass?: { stats(): { allocated: number; tilesTotal: number; tilesDrawn: number } };
   // live render readout for the corner stats HUD (Game.perfLive()).
-  perfLive?(): { fps: number; calls: number; triangles: number };
+  perfLive?(): { fps: number; calls: number; triangles: number; simMs: number; drawMs: number };
 }
 
 export interface ReplayVerdict {

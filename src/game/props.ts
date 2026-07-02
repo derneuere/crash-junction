@@ -78,10 +78,18 @@ function loadPropScene(url: string): Promise<THREE.Group> {
 // White (0xffffff) is the identity multiplier, so untinted props need no
 // special case — they simply carry a white instance colour.
 
+/** Handle returned by loadLevelProps: the group every prop visual lives under
+ *  (one visible flip = whole set) plus the distance-cull entry point Game
+ *  drives from the render tail (presentation-only — see PropInstancer.cull). */
+export interface LevelProps {
+  group: THREE.Group;
+  cull: (camX: number, camZ: number, maxDist: number) => void;
+}
+
 /** Build every PropDef of the level: colliders synchronously (call this
  *  before the first physics step), visuals async. collider 'none' or
  *  absent = pure decor, no body. */
-export function loadLevelProps(scene: THREE.Scene, phys: PhysicsContext, level: LevelDef): THREE.Group {
+export function loadLevelProps(scene: THREE.Scene, phys: PhysicsContext, level: LevelDef): LevelProps {
   // All prop visuals live under ONE group so the graphics 'props' toggle can
   // hide the whole set with a single group.visible flip (and props that stream
   // in after the toggle inherit it). Identity transform — the batcher bakes
@@ -155,7 +163,7 @@ export function loadLevelProps(scene: THREE.Scene, phys: PhysicsContext, level: 
   // whole set here can't touch determinism.
   void Promise.all(visuals).then(() => instancer.flush());
 
-  return propsGroup;
+  return { group: propsGroup, cull: (camX, camZ, maxDist) => instancer.cull(camX, camZ, maxDist) };
 }
 
 const UP = new CANNON.Vec3(0, 1, 0);

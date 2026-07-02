@@ -144,9 +144,26 @@ interface PlainMesh {
   receiveShadow: boolean;
 }
 
+/** One distance-cullable draw unit produced by flush(): either a whole scene
+ *  object (per-tile InstancedMesh / plain singleton) or ONE instance inside a
+ *  per-material BatchedMesh (culled via setVisibleAt — the batch itself stays,
+ *  its far members stop rasterising). x/z/r is the world bounding sphere. */
+interface CullRecord {
+  obj?: THREE.Object3D;
+  batched?: THREE.BatchedMesh;
+  id?: number;
+  x: number;
+  z: number;
+  r: number;
+  visible: boolean;
+}
+
+const _cullSphere = new THREE.Sphere();
+
 export class PropInstancer {
   private items: Collected[] = [];
   private plains: PlainMesh[] = [];
+  private cullList: CullRecord[] = [];
 
   // the parent the batched draws are added to. Usually a dedicated 'cj-props'
   // Group (props.ts) rather than the scene directly, so a single group.visible
@@ -218,6 +235,7 @@ export class PropInstancer {
       mesh.receiveShadow = p.receiveShadow;
       mesh.frustumCulled = true;
       this.parent.add(mesh);
+      this.recordCullable(mesh, p.geometry, p.matrix);
     }
     this.plains.length = 0;
 
@@ -295,6 +313,8 @@ export class PropInstancer {
         // the spatial chunking) instead of drawing the level-wide batch always.
         inst.computeBoundingSphere();
         this.parent.add(inst);
+        const s = inst.boundingSphere!;
+        this.cullList.push({ obj: inst, x: s.center.x, z: s.center.z, r: s.radius, visible: true });
       }
     }
 
@@ -357,6 +377,38 @@ export class PropInstancer {
       mesh.receiveShadow = it.receiveShadow;
       mesh.frustumCulled = true;
       this.parent.add(mesh);
+      this.recordCullable(mesh, it.geometry, it.matrix);
+    }
+  }
+
+  /** Register a whole scene object for distance culling, with its world
+   *  bounding sphere derived from the (shared) geometry + baked matrix. */
+  private recordCullable(obj: THREE.Object3D, geo: THREE.BufferGeometry, matrix: THREE.Matrix4): void {
+    if (!geo.boundingSphere) geo.computeBoundingSphere();
+    if (!geo.boundingSphere) return; // empty geometry — never cull
+    _cullSphere.copy(geo.boundingSphere).applyMatrix4(matrix);
+    this.cullList.push({ obj, x: _cullSphere.center.x, z: _cullSphere.center.z, r: _cullSphere.radius, visible: true });
+  }
+
+  /** DISTANCE CULL (perf-mobile-tier): hide every prop draw unit whose world
+   *  bounds lie entirely beyond maxDist of the camera. The caller passes the
+   *  fog-derived horizon, so everything culled was already fully fog-coloured —
+   *  visually free, but it stops paying vertices/raster for it. The bounding
+   *  RADIUS rides in the test, so a 30 m crane naturally survives far longer
+   *  than a bollard. Per-tile/singleton units flip `visible`; BatchedMesh
+   *  members flip setVisibleAt. PURE PRESENTATION — render-time visibility
+   *  flags only (same contract as the grass tile cull); the sim, and so every
+   *  replay pin, never sees it. Pass Infinity to restore everything. */
+  cull(camX: number, camZ: number, maxDist: number): void {
+    for (const c of this.cullList) {
+      const dx = c.x - camX;
+      const dz = c.z - camZ;
+      const reach = maxDist + c.r;
+      const within = maxDist === Infinity || dx * dx + dz * dz <= reach * reach;
+      if (within === c.visible) continue;
+      c.visible = within;
+      if (c.batched) c.batched.setVisibleAt(c.id!, within);
+      else if (c.obj) c.obj.visible = within;
     }
   }
 
@@ -408,15 +460,26 @@ export class PropInstancer {
       const geoId = new Map<THREE.BufferGeometry, number>();
       for (const [src, norm] of normByGeo) geoId.set(src, batched.addGeometry(norm));
 
+      // per-instance cull records staged locally — committed only if the whole
+      // pack succeeds (a mid-pack throw falls back to plain meshes, which
+      // register their own records; stale batch records would double-cull).
+      const staged: CullRecord[] = [];
       for (const it of bucket) {
         const id = batched.addInstance(geoId.get(it.geometry)!);
         batched.setMatrixAt(id, it.matrix);
         // per-instance tint, exactly as InstancedMesh.setColorAt — three
         // multiplies diffuse by it. White = untinted/glass = no change.
         batched.setColorAt(id, it.color);
+        const norm = normByGeo.get(it.geometry)!;
+        if (!norm.boundingSphere) norm.computeBoundingSphere();
+        if (norm.boundingSphere) {
+          _cullSphere.copy(norm.boundingSphere).applyMatrix4(it.matrix);
+          staged.push({ batched, id, x: _cullSphere.center.x, z: _cullSphere.center.z, r: _cullSphere.radius, visible: true });
+        }
       }
       batched.computeBoundingSphere();
       this.parent.add(batched);
+      this.cullList.push(...staged);
       return true;
     } catch {
       // any throw (attribute mismatch we didn't catch, sizing, an immature

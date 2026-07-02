@@ -14,6 +14,8 @@ interface Live {
   fps: number;
   calls: number;
   triangles: number;
+  simMs: number;
+  drawMs: number;
 }
 
 // The dialog rows, grouped. VISUAL QUALITY toggles trade fidelity for GPU fill;
@@ -91,6 +93,14 @@ export function GraphicsOverlay({ gfx, open, onOpen, onClose, onChange }: Graphi
           <div className="perfRow">
             <span>TRIS</span>
             <b>{live ? fmt(live.triangles) : '—'}</b>
+          </div>
+          <div className="perfRow" title="CPU ms in the physics/sim step this frame — if this dominates on a phone, the wall is the sim, not the GPU">
+            <span>SIM</span>
+            <b>{live ? live.simMs.toFixed(1) : '—'}</b>
+          </div>
+          <div className="perfRow" title="CPU ms submitting the render (cube + composer/renderer)">
+            <span>REN</span>
+            <b>{live ? live.drawMs.toFixed(1) : '—'}</b>
           </div>
         </div>
       )}

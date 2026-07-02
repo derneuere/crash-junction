@@ -64,6 +64,10 @@ export interface GraphicsSettings {
   /** multiplier on the grass LOD ring radii (FULL/LOD/CULL): 1 = the tuned
    *  desktop rings, 0.6 pulls the lush band + cull-off much closer. */
   grassRange: number;
+  /** multiplier on the level's authored fog band; props fully past the fog
+   *  horizon are distance-culled (invisible anyway), so this is the phone's
+   *  vertex/raster budget knob — 0.6 halves the dockyard's drawn dressing. */
+  drawDistance: number;
 }
 
 /** The two quality tiers as settings patches (the overlay's preset buttons
@@ -73,8 +77,8 @@ export interface GraphicsSettings {
  *  film-look composer (N8AO/MSAA HDR/bloom), and native-DPR fill — plus a
  *  half-res shadow map and closer grass rings. */
 export const TIER_PRESETS = {
-  desktop: { ao: true, reflections: true, postfx: true, renderScale: 1, shadowSize: 3072, grassRange: 1 },
-  phone: { ao: false, reflections: false, postfx: false, renderScale: 0.75, shadowSize: 1536, grassRange: 0.6 },
+  desktop: { ao: true, reflections: true, postfx: true, renderScale: 1, shadowSize: 3072, grassRange: 1, drawDistance: 1 },
+  phone: { ao: false, reflections: false, postfx: false, renderScale: 0.75, shadowSize: 1536, grassRange: 0.6, drawDistance: 0.6 },
 } as const;
 
 export const DEFAULT_GRAPHICS: GraphicsSettings = {
