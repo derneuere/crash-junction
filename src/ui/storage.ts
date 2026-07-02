@@ -136,6 +136,7 @@ export function readGraphics(): GraphicsSettings {
     renderScale: num(o.renderScale, DEFAULT_GRAPHICS.renderScale),
     shadowSize: num(o.shadowSize, DEFAULT_GRAPHICS.shadowSize),
     grassRange: num(o.grassRange, DEFAULT_GRAPHICS.grassRange),
+    drawDistance: num(o.drawDistance, DEFAULT_GRAPHICS.drawDistance),
   };
 }
 

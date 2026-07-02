@@ -235,6 +235,11 @@ export class Game {
   // every set-dressing prop lives under this group (loadLevelProps) so the
   // 'props' toggle hides the whole ~900-object set with one visible flip.
   private propsGroup: THREE.Group | null = null;
+  // distance-cull entry point for the prop draw units (props.ts / propinstancer
+  // cull list) — driven each frame from the render tail at the fog horizon.
+  private propCull: ((camX: number, camZ: number, maxDist: number) => void) | null = null;
+  // the level's authored fog band; the drawDistance quality knob scales it
+  private fogBase = { near: 55, far: 150 };
 
   private actors: Actor[] = [];
   private byBody = new Map<number, Actor>();
@@ -491,9 +496,15 @@ export class Game {
     // get the sparse FAST subset via applyRenderPath below). Don't retune here.
     this.grass?.setTier(this.cineActive() ? 'cine' : 'fast');
     setSeaCamera(this.camera); // the sea reads the camera for fresnel/sparkle
+    // the level's authored fog is the base the drawDistance quality knob
+    // scales from (race levels pushed it out in the block above)
+    const fog0 = this.scene.fog as THREE.Fog;
+    this.fogBase = { near: fog0.near, far: fog0.far };
     // prop colliders are synchronous and must exist before the first
     // physics step (their GLB visuals stream in whenever — see props.ts)
-    this.propsGroup = loadLevelProps(this.scene, this.phys, level);
+    const levelProps = loadLevelProps(this.scene, this.phys, level);
+    this.propsGroup = levelProps.group;
+    this.propCull = levelProps.cull;
     // prop anchors double as pass-by whoosh triggers (sense-of-speed A5):
     // presentation only — static positions in, positioned one-shots out
     this.audio.setTrackside((level.props ?? []).map((p) => ({ x: p.x, y: 2, z: p.z })));
@@ -638,6 +649,14 @@ export class Game {
     // off this.gfx.reflections (skipping its whole-scene ×6 re-render).
     if (this.propsGroup) this.propsGroup.visible = s.props;
     this.applyShadows(s.shadows);
+    // drawDistance: scale the authored fog band in (far linearly, near gently —
+    // sqrt keeps the foreground clear while the horizon closes) — the prop cull
+    // in the render tail follows fog.far, so pulling the fog in both hides AND
+    // stops paying for the far dressing. Presentation-only: fog is a shader
+    // uniform, never sim state.
+    const fog = this.scene.fog as THREE.Fog;
+    fog.near = this.fogBase.near * Math.sqrt(s.drawDistance);
+    fog.far = this.fogBase.far * s.drawDistance;
     // quality tier: render resolution (fill), shadow-map size, tone-map owner
     // (composer vs bare renderer) and the player paint's reflection source all
     // re-derive off the new settings. Idempotent when nothing changed.
@@ -668,7 +687,7 @@ export class Game {
   /** Live perf readout for the corner HUD: smoothed FPS plus the last frame's
    *  draw-call and triangle counts. Presentation-only (reads renderer.info via
    *  the lag tracker), so the sim/replay never sees it. */
-  perfLive(): { fps: number; calls: number; triangles: number } {
+  perfLive(): { fps: number; calls: number; triangles: number; simMs: number; drawMs: number } {
     return this.perf.live();
   }
 
@@ -2975,6 +2994,13 @@ export class Game {
     // just the draw) when off — that's the framerate win, not only the pixels.
     if (this.gfx.water) this.sea?.update(af.dt); // animate the waves off RENDER time (pin-safe)
     if (this.gfx.grass) this.grass?.update(af.dt, this.camera.position); // sway + distance-cull off RENDER time (pin-safe)
+    // PROP DISTANCE CULL (perf-mobile-tier): drop every prop draw unit whose
+    // bounds sit past the fog horizon (fully fog-coloured = invisible anyway;
+    // ×1.15 margin + per-unit bounding radius keep tall silhouettes through
+    // the transition band). Same pin-safe contract as the grass cull above —
+    // render-time visibility flags keyed off the render camera, below the
+    // sim's read-back line.
+    if (this.gfx.props) this.propCull?.(this.camera.position.x, this.camera.position.z, (this.scene.fog as THREE.Fog).far * 1.15);
     this.skyClock += af.dt; // scroll the baked cloud lookup off RENDER time (pin-safe)
     this.skyRig.setCloudTime(this.skyClock);
     // Clouds are PRERENDERED once per time-of-day into a high-res equirect

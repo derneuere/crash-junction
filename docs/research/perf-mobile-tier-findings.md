@@ -79,6 +79,54 @@ cheaper (no HDR MSAA resolve, no N8AO, 4× fewer shadow texels, cheap PCF).
 - Visual: phone tier keeps glossy showroom paint, near-field grass, props,
   clouds, real-time shadows; desktop tier unchanged (film look + live cube).
 
+## Round 2 — on-device feedback (14 fps, worst at the dockyard)
+
+The first on-device test came back 14 fps — and crucially, the ORIGINAL 11 fps
+test already had reflections + grass off, so the cube win never applied to
+that number; postfx/renderScale/shadows alone bought +3. The dockyard being
+the worst spot pointed at the drawn dressing itself. Desktop split at the
+phone tier measured sim ≈ 3.9 ms / render-submit ≈ 13.8 ms — render-side
+still the wall (and at 14 fps the fixed-step catch-up multiplies sim ~3×,
+which self-heals as render gets cheaper).
+
+### Fog-line prop culling (all tiers) + `drawDistance` knob
+
+Key observation: anything fully past `fog.far` is rendered fog-coloured —
+rasterised but invisible. So:
+
+- `PropInstancer` now keeps a cull list of every emitted draw unit — per-tile
+  InstancedMeshes and singletons flip `visible`; **BatchedMesh members flip
+  `setVisibleAt` per instance** (the batch stays, its far members stop
+  rasterising). World bounding radius rides in the distance test, so a 30 m
+  crane survives far longer than a bollard — size-aware for free.
+- `Game.frame()` drives it at `fog.far × 1.15` each frame (render tail,
+  pin-safe, same contract as the grass tile cull).
+- New `drawDistance` graphics field scales the authored fog band (far ×k,
+  near ×√k): desktop 1, phone 0.6 → gantry race fog 90/340 → 70/204.
+
+Measured at the frozen dockyard vista pose (main pass):
+
+| Config | Calls | Tris |
+| --- | --- | --- |
+| Pre-cull baseline (probe, this morning) | 223 | 0.89M |
+| Desktop tier + fog-line cull | 298* | **0.25M** |
+| Phone tier (fog 204, cull 235 m) | 234* | **0.22M** |
+
+\* call counts not directly comparable (baseline was idle grid; these are
+mid-race with rivals in frustum) — the triangle column is the story: the
+far side of the loop was in-frustum and fully fogged, now gone. **72%
+triangle cut at the worst pose, visually free** (verified: fog silhouettes,
+no cut line).
+
+### HUD: SIM / REN ms rows
+
+`perfLive()` now reports smoothed `simMs` (fixed steps + game logic) and
+`drawMs` (cube + composer/renderer submit); the stats HUD shows them as SIM /
+REN. **On the next device test these two numbers settle CPU-vs-GPU
+definitively**: if SIM dominates at low fps, the wall is cannon-es + 26
+actors (a sim-side, determinism-review change — cut traffic count or steps);
+if REN dominates, keep cutting fill/draws (renderScale 0.6, water off).
+
 ## Not done (deliberately, demo-scoped)
 - perf-reflections-plan Option A proper (THREE.Layers) — the hide-list seam
   delivers the same exclusion; revisit if the per-capture traverse ever shows.
