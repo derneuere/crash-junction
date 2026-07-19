@@ -16,6 +16,7 @@ import { addMarkInstances } from './marks';
 import { buildCoast } from './coast';
 import { addDuneFringe } from './embankment';
 import { buildRace } from './race-build';
+import type { HeightLOD } from '../lod/heightlod';
 
 /** What buildEnvironment hands back to the frame loop: the animated sea (coast
  *  levels) and the instanced blade-grass field (coast levels). Both are
@@ -33,8 +34,10 @@ export interface Environment {
 
 /** @returns the render-driven presentation handles (coast levels populate the
  *  animated sea + instanced grass field; both null on inland levels). The
- *  frame loop drives their render-time animation — neither is in the sim hash. */
-export function buildEnvironment(scene: THREE.Scene, phys: PhysicsContext, level: LevelDef): Environment {
+ *  frame loop drives their render-time animation — neither is in the sim hash.
+ *  `lod` (optional): the height-driven screen-space LOD registry — buildings
+ *  register there (presentation only; their colliders are untouched). */
+export function buildEnvironment(scene: THREE.Scene, phys: PhysicsContext, level: LevelDef, lod?: HeightLOD): Environment {
   const race = level.mode.kind === 'race' ? level.mode.race : null;
   let sea: Sea | null = null;
   let grass: GrassField | null = null;
@@ -268,6 +271,13 @@ export function buildEnvironment(scene: THREE.Scene, phys: PhysicsContext, level
     // the sunlit upper faces keep their key light (ambient-only, see ao.ts).
     applyBakedAO(bld, 'building');
     scene.add(bld);
+    // height-LOD: towers are the tallest things in a level, so in practice
+    // they never leave level 0 inside the far plane — registering them keeps
+    // the ladder uniform (a future far-view or huge level gets them free).
+    lod?.register(bld.position, 0, Math.max(h, 11), (lvl) => {
+      bld.visible = lvl < 2;
+      bld.castShadow = lvl < 1;
+    });
     const bb = new CANNON.Body({ mass: 0, material: phys.matGround });
     bb.addShape(new CANNON.Box(new CANNON.Vec3(5.5, h / 2, 5.5)));
     bb.position.set(cx, h / 2 + 0.16, cz);

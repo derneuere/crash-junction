@@ -6,6 +6,7 @@ import type { PhysicsContext } from './physics';
 import { BUILTINS } from './builtins';
 import { applyBakedAO, aoKeyForUrl } from './ao';
 import { PropInstancer } from './propinstancer';
+import type { HeightLOD } from './lod/heightlod';
 
 // Level props: GLB set dressing (gantry cranes, containers, rocks) with
 // hand-placed box colliders. The split is the determinism contract, same as
@@ -88,8 +89,10 @@ export interface LevelProps {
 
 /** Build every PropDef of the level: colliders synchronously (call this
  *  before the first physics step), visuals async. collider 'none' or
- *  absent = pure decor, no body. */
-export function loadLevelProps(scene: THREE.Scene, phys: PhysicsContext, level: LevelDef): LevelProps {
+ *  absent = pure decor, no body. `lod` (optional) is the height-driven
+ *  screen-space LOD registry — the batcher registers every emitted draw
+ *  object there (presentation only, see lod/heightlod.ts). */
+export function loadLevelProps(scene: THREE.Scene, phys: PhysicsContext, level: LevelDef, lod?: HeightLOD): LevelProps {
   // All prop visuals live under ONE group so the graphics 'props' toggle can
   // hide the whole set with a single group.visible flip (and props that stream
   // in after the toggle inherit it). Identity transform — the batcher bakes
@@ -105,7 +108,7 @@ export function loadLevelProps(scene: THREE.Scene, phys: PhysicsContext, level: 
   // builtins, …) into per-region instanced draws. Identical scene, far fewer
   // draw calls; that win then multiplies ×6 through the live cube reflection.
   // PRESENTATION ONLY — colliders below are untouched (the determinism contract).
-  const instancer = new PropInstancer(propsGroup);
+  const instancer = new PropInstancer(propsGroup, lod);
   const visuals: Promise<unknown>[] = [];
 
   for (const def of level.props ?? []) {

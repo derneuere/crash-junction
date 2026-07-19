@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { HeightLOD, lodMetricsOf } from './lod/heightlod';
 
 // ============================================================================
 // STATIC-PROP DRAW-CALL BATCHER (perf-drawcalls)
@@ -155,7 +156,12 @@ interface CullRecord {
   x: number;
   z: number;
   r: number;
+  /** the fog-horizon verdict (cull()) */
   visible: boolean;
+  /** the height-LOD ladder verdict (lod/heightlod.ts, level < 2). The scene
+   *  flag is the AND of both verdicts (applyVisible) so the two systems
+   *  compose instead of overwriting each other's hides. */
+  lodVisible: boolean;
 }
 
 const _cullSphere = new THREE.Sphere();
@@ -171,7 +177,15 @@ export class PropInstancer {
   // toggle inherit it (a parent's visible=false hides all descendants in
   // three's render walk). Identity transform, so the baked world matrices land
   // exactly where adding to the scene would.
-  constructor(private parent: THREE.Object3D) {}
+  //
+  // `lod` (optional): the height-driven screen-space LOD registry
+  // (lod/heightlod.ts). Every emitted draw object registers there so far,
+  // small-on-screen props first stop casting shadows and then stop drawing —
+  // per-tile for the instanced runs, per-INSTANCE for the batched tail.
+  constructor(
+    private parent: THREE.Object3D,
+    private lod?: HeightLOD,
+  ) {}
 
   /** Harvest one positioned prop instance (a cloned, transformed GLB/builtin
    *  group). Reads each mesh's world matrix — the caller MUST have set the
@@ -235,7 +249,7 @@ export class PropInstancer {
       mesh.receiveShadow = p.receiveShadow;
       mesh.frustumCulled = true;
       this.parent.add(mesh);
-      this.recordCullable(mesh, p.geometry, p.matrix);
+      this.registerMeshLod(mesh, this.recordCullable(mesh, p.geometry, p.matrix), p.geometry, p.matrix, p.castShadow);
     }
     this.plains.length = 0;
 
@@ -314,7 +328,22 @@ export class PropInstancer {
         inst.computeBoundingSphere();
         this.parent.add(inst);
         const s = inst.boundingSphere!;
-        this.cullList.push({ obj: inst, x: s.center.x, z: s.center.z, r: s.radius, visible: true });
+        const rec: CullRecord = { obj: inst, x: s.center.x, z: s.center.z, r: s.radius, visible: true, lodVisible: true };
+        this.cullList.push(rec);
+        // height-LOD: the whole tile switches as one draw, judged by its
+        // TALLEST member (a tile with one crane leg keeps its bollards alive —
+        // correct, they'd ride the same draw call anyway) and by the distance
+        // to its NEAREST edge (sphere radius), never its centre.
+        if (this.lod) {
+          let size = 0;
+          for (const it of bucket) size = Math.max(size, lodMetricsOf(it.geometry, it.matrix).size);
+          const baseCast = inst.castShadow;
+          this.lod.register(s.center.clone(), s.radius, size, (lvl) => {
+            rec.lodVisible = lvl < 2;
+            this.applyVisible(rec);
+            inst.castShadow = baseCast && lvl < 1;
+          });
+        }
       }
     }
 
@@ -377,17 +406,30 @@ export class PropInstancer {
       mesh.receiveShadow = it.receiveShadow;
       mesh.frustumCulled = true;
       this.parent.add(mesh);
-      this.recordCullable(mesh, it.geometry, it.matrix);
+      this.registerMeshLod(mesh, this.recordCullable(mesh, it.geometry, it.matrix), it.geometry, it.matrix, it.castShadow);
     }
   }
 
   /** Register a whole scene object for distance culling, with its world
-   *  bounding sphere derived from the (shared) geometry + baked matrix. */
-  private recordCullable(obj: THREE.Object3D, geo: THREE.BufferGeometry, matrix: THREE.Matrix4): void {
+   *  bounding sphere derived from the (shared) geometry + baked matrix.
+   *  Returns the record so the height-LOD ladder can share it (composed
+   *  visibility), or undefined for empty geometry. */
+  private recordCullable(obj: THREE.Object3D, geo: THREE.BufferGeometry, matrix: THREE.Matrix4): CullRecord | undefined {
     if (!geo.boundingSphere) geo.computeBoundingSphere();
-    if (!geo.boundingSphere) return; // empty geometry — never cull
+    if (!geo.boundingSphere) return undefined; // empty geometry — never cull
     _cullSphere.copy(geo.boundingSphere).applyMatrix4(matrix);
-    this.cullList.push({ obj, x: _cullSphere.center.x, z: _cullSphere.center.z, r: _cullSphere.radius, visible: true });
+    const rec: CullRecord = { obj, x: _cullSphere.center.x, z: _cullSphere.center.z, r: _cullSphere.radius, visible: true, lodVisible: true };
+    this.cullList.push(rec);
+    return rec;
+  }
+
+  /** Write a record's COMPOSED visibility (fog horizon AND height-LOD) to the
+   *  scene — the single seam both systems flow through, so neither can
+   *  resurrect a unit the other has hidden. */
+  private applyVisible(c: CullRecord): void {
+    const v = c.visible && c.lodVisible;
+    if (c.batched) c.batched.setVisibleAt(c.id!, v);
+    else if (c.obj) c.obj.visible = v;
   }
 
   /** DISTANCE CULL (perf-mobile-tier): hide every prop draw unit whose world
@@ -407,9 +449,32 @@ export class PropInstancer {
       const within = maxDist === Infinity || dx * dx + dz * dz <= reach * reach;
       if (within === c.visible) continue;
       c.visible = within;
-      if (c.batched) c.batched.setVisibleAt(c.id!, within);
-      else if (c.obj) c.obj.visible = within;
+      this.applyVisible(c);
     }
+  }
+
+  /** height-LOD registration for a lone matrix-baked Mesh (the plain and
+   *  multi-material paths): full ladder — shadow off, then hidden. Visibility
+   *  routes through the shared CullRecord when one exists so the fog cull and
+   *  the ladder compose. */
+  private registerMeshLod(
+    mesh: THREE.Mesh,
+    rec: CullRecord | undefined,
+    geometry: THREE.BufferGeometry,
+    matrix: THREE.Matrix4,
+    baseCast: boolean,
+  ): void {
+    if (!this.lod) return;
+    const m = lodMetricsOf(geometry, matrix);
+    this.lod.register({ x: m.cx, y: m.cy, z: m.cz }, 0, m.size, (lvl) => {
+      mesh.castShadow = baseCast && lvl < 1;
+      if (rec) {
+        rec.lodVisible = lvl < 2;
+        this.applyVisible(rec);
+      } else {
+        mesh.visible = lvl < 2;
+      }
+    });
   }
 
   /** Pack ONE material bucket into a BatchedMesh. Returns false (emitting
@@ -463,7 +528,7 @@ export class PropInstancer {
       // per-instance cull records staged locally — committed only if the whole
       // pack succeeds (a mid-pack throw falls back to plain meshes, which
       // register their own records; stale batch records would double-cull).
-      const staged: CullRecord[] = [];
+      const staged: { rec: CullRecord; it: Collected }[] = [];
       for (const it of bucket) {
         const id = batched.addInstance(geoId.get(it.geometry)!);
         batched.setMatrixAt(id, it.matrix);
@@ -474,12 +539,32 @@ export class PropInstancer {
         if (!norm.boundingSphere) norm.computeBoundingSphere();
         if (norm.boundingSphere) {
           _cullSphere.copy(norm.boundingSphere).applyMatrix4(it.matrix);
-          staged.push({ batched, id, x: _cullSphere.center.x, z: _cullSphere.center.z, r: _cullSphere.radius, visible: true });
+          staged.push({
+            rec: { batched, id, x: _cullSphere.center.x, z: _cullSphere.center.z, r: _cullSphere.radius, visible: true, lodVisible: true },
+            it,
+          });
         }
       }
       batched.computeBoundingSphere();
       this.parent.add(batched);
-      this.cullList.push(...staged);
+      // height-LOD: PER-INSTANCE visibility inside the shared draw. Hiding an
+      // instance drops it from the multi-draw ranges — fewer vertices and less
+      // per-object work, though the one draw call per material remains. The
+      // shadow rung is skipped here (BatchedMesh has ONE castShadow for the
+      // whole batch), so batched instances go straight full→hidden. The ladder
+      // shares the fog cull's record (composed visibility), and both are
+      // committed only after the whole pack SUCCEEDED — a throw above falls
+      // the bucket back to emitPlain, which registers its own entries.
+      for (const { rec, it } of staged) {
+        this.cullList.push(rec);
+        if (this.lod) {
+          const m = lodMetricsOf(it.geometry, it.matrix);
+          this.lod.register({ x: m.cx, y: m.cy, z: m.cz }, 0, m.size, (lvl) => {
+            rec.lodVisible = lvl < 2;
+            this.applyVisible(rec);
+          });
+        }
+      }
       return true;
     } catch {
       // any throw (attribute mismatch we didn't catch, sizing, an immature
