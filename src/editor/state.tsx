@@ -13,6 +13,7 @@ import type { LevelDef } from '../game/types';
 import type { NodePath } from './schema/types';
 import { getAtPath, insertListItem, removeListItem, setAtPath } from './schema/walk';
 import { makeBlankLevel } from './defaults';
+import { applyLevelDerives } from './race';
 import { readDraft, writeDraft } from './io';
 
 const HISTORY_CAP = 64;
@@ -27,8 +28,8 @@ export interface EditorState {
   select: (path: NodePath | null) => void;
   /** Committing write: pushes the pre-change level onto the undo stack. */
   setValueAt: (path: NodePath, value: unknown) => void;
-  /** Insert a fresh item and select it. */
-  addListItem: (listPath: NodePath, item: unknown) => void;
+  /** Insert a fresh item and select it; index defaults to append. */
+  addListItem: (listPath: NodePath, item: unknown, index?: number) => void;
   removeAt: (listPath: NodePath, index: number) => void;
   /** Replace the whole level (load/new) — clears history + selection. */
   replaceLevel: (level: LevelDef, opts?: { dirty?: boolean }) => void;
@@ -55,8 +56,12 @@ export function EditorProvider({ children }: { children: ReactNode }) {
   const [selection, setSelection] = useState<NodePath | null>(null);
   const [dirty, setDirty] = useState(false);
   const [history, setHistory] = useState<{ past: LevelDef[]; future: LevelDef[] }>({ past: [], future: [] });
-  // gesture bookkeeping lives in refs — a drag must not re-render per pointermove
+  // gesture bookkeeping lives in refs — a drag must not re-render per pointermove.
+  // gestureChanged (not identity vs levelRef) decides whether to commit: with
+  // continuous pointer events React may defer the transient re-render past
+  // pointerup, so levelRef can still be stale when the gesture ends.
   const gestureBase = useRef<LevelDef | null>(null);
+  const gestureChanged = useRef(false);
   const levelRef = useRef(level);
   levelRef.current = level;
 
@@ -76,20 +81,20 @@ export function EditorProvider({ children }: { children: ReactNode }) {
   const select = useCallback((path: NodePath | null) => setSelection(path), []);
 
   const setValueAt = useCallback((path: NodePath, value: unknown) => {
-    commit(setAtPath(levelRef.current, path, value));
+    commit(applyLevelDerives(setAtPath(levelRef.current, path, value), path));
   }, [commit]);
 
-  const addListItem = useCallback((listPath: NodePath, item: unknown) => {
+  const addListItem = useCallback((listPath: NodePath, item: unknown, index?: number) => {
     const list = getAtPath(levelRef.current, listPath);
-    const index = Array.isArray(list) ? list.length : 0;
+    const at = index ?? (Array.isArray(list) ? list.length : 0);
     let base = levelRef.current;
-    if (!Array.isArray(list)) base = setAtPath(base, listPath, []); // optional list (props) may be absent
-    commit(insertListItem(base, listPath, index, item));
-    setSelection([...listPath, index]);
+    if (!Array.isArray(list)) base = setAtPath(base, listPath, []); // optional list (props/roads) may be absent
+    commit(applyLevelDerives(insertListItem(base, listPath, at, item), listPath));
+    setSelection([...listPath, at]);
   }, [commit]);
 
   const removeAt = useCallback((listPath: NodePath, index: number) => {
-    commit(removeListItem(levelRef.current, listPath, index));
+    commit(applyLevelDerives(removeListItem(levelRef.current, listPath, index), listPath));
     setSelection(null);
   }, [commit]);
 
@@ -128,16 +133,22 @@ export function EditorProvider({ children }: { children: ReactNode }) {
 
   const beginGesture = useCallback(() => {
     gestureBase.current = levelRef.current;
+    gestureChanged.current = false;
   }, []);
 
   const transientSetAt = useCallback((path: NodePath, value: unknown) => {
-    setLevel((cur) => setAtPath(cur, path, value));
+    if (gestureBase.current) gestureChanged.current = true;
+    // derives run on transients too — a waypoint drag re-derives sections
+    // live so the ribbon follows the handle
+    setLevel((cur) => applyLevelDerives(setAtPath(cur, path, value), path));
   }, []);
 
   const endGesture = useCallback(() => {
     const base = gestureBase.current;
+    const changed = gestureChanged.current;
     gestureBase.current = null;
-    if (!base || base === levelRef.current) return; // no-op drag
+    gestureChanged.current = false;
+    if (!base || !changed) return; // grab-without-move
     setHistory((h) => ({ past: [...h.past.slice(-(HISTORY_CAP - 1)), base], future: [] }));
     setDirty(true);
   }, []);

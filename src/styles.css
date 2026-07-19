@@ -2351,3 +2351,4 @@ canvas {
 .edCrumb:hover { text-decoration: underline; }
 .edCrumbSep { color: #4b5568; font-size: 11px; }
 .edItemActions { display: flex; gap: 8px; margin-top: 14px; }
+.edBtn.active { background: #2b4a68; border-color: #4f7aa8; color: #fff; }

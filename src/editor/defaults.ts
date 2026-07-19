@@ -21,7 +21,7 @@ export function makeBlankLevel(): LevelDef {
 
 export interface CategoryDef {
   /** LevelDef list key — also the root path segment. */
-  key: 'traffic' | 'poles' | 'barrels' | 'ramps' | 'buildings' | 'pickups' | 'props';
+  key: 'roads' | 'traffic' | 'poles' | 'barrels' | 'ramps' | 'buildings' | 'pickups' | 'props';
   label: string;
   /** Tree/viewport accent (CSS hex string). */
   accent: string;
@@ -29,6 +29,10 @@ export interface CategoryDef {
 }
 
 export const CATEGORIES: CategoryDef[] = [
+  {
+    key: 'roads', label: 'ROADS', accent: '#c9cfd8',
+    makeEmpty: () => ({ x: 0, z: 0, yaw: 0, length: 60, width: 14, dashes: true }),
+  },
   {
     key: 'traffic', label: 'TRAFFIC', accent: '#f2b01e',
     makeEmpty: () => ({ variant: 'sedan', color: 0xd8d8d8, x: 0, z: 20, dir: { x: 0, z: -1 }, speed: 8 }),

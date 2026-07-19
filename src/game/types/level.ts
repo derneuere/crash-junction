@@ -136,6 +136,11 @@ export interface WallStyleDef {
 export interface RaceDef {
   laps: number;
   width: number; // track ribbon width (m)
+  /** The level editor's authoring source: the hand-placed loop the editor
+   *  re-derives `sections` from (buildLoopSections, spacing 8) on every
+   *  waypoint edit. The GAME never reads it — sections stay authoritative —
+   *  it just rides along in saved JSON so a level stays editable. */
+  waypoints?: RaceWaypoint[];
   /** y is the road elevation at the section centre (0 on flat tracks) —
    *  carried by the race.ts resamplers from the waypoints' optional third
    *  component. The suspension height field, ribbon, walls and respawns
@@ -210,6 +215,21 @@ export interface DecalDef {
   y?: number;
 }
 
+/** A straight asphalt strip — the level editor's street-building unit; the
+ *  built-in crossroad is exactly two of these baked in. Pure paint like the
+ *  crossroad (the physics ground stays the flat y=0 plane), so a layout
+ *  change can never perturb a determinism pin. length runs along the strip's
+ *  local +z, yaw spins it like a car's. dashes (default true) paints the
+ *  centre dash line. */
+export interface RoadDef {
+  x: number;
+  z: number;
+  yaw: number;
+  length: number;
+  width: number;
+  dashes?: boolean;
+}
+
 export interface LevelDef {
   name: string;
   /** 'junction' = the crossroad; 'pad' = open practice asphalt;
@@ -228,6 +248,9 @@ export interface LevelDef {
   ramps: RampDef[];
   buildings: BuildingDef[];
   pickups: PickupDef[];
+  /** Editor-authored street layout, drawn on top of (or instead of) the
+   *  ground kind's baked roads. Visual only. */
+  roads?: RoadDef[];
   /** Async GLB scenery; colliders are synchronous plain-number boxes. */
   props?: PropDef[];
   /** Island silhouette + sea — replaces the auto-sized grass square. */

@@ -4,28 +4,58 @@
 // streaming/instancing machinery. Steward's overlay contract, one class:
 // entities carry a NodePath in userData; clicking picks, dragging moves on
 // the ground plane, and the selection box tracks the shared NodePath.
+//
+// Two ways to move things, both funneling through the same gesture flow
+// (onDragStart → onTransientMove stream → onDragEnd = one undo step):
+//  - grab the body and drag it on the ground plane (shift = 0.5 m snap)
+//  - the steward-style gizmo (TransformControls): MOVE arrows / ROTATE ring,
+//    W/E toggled. Rotation is yaw-locked; only headed things rotate
+//    (vehicles' dir, props' & roads' yaw). Pickups alone get the Y arrow.
 
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
-import type { LevelDef, PickupDef, PropDef, RampDef, VehicleSpawn } from '../../game/types';
+import { TransformControls } from 'three/examples/jsm/controls/TransformControls.js';
+import type { LevelDef, PickupDef, PropDef, RampDef, RoadDef, VehicleSpawn } from '../../game/types';
 import { SPECS } from '../../game/vehicles/specs';
 import type { NodePath } from '../schema/types';
 
+export type GizmoMode = 'translate' | 'rotate';
+
 export interface EditorSceneCallbacks {
   onSelect: (path: NodePath | null) => void;
-  /** Stream a transient x/z (or ramp x/zStart) move during a drag. */
-  onTransientMove: (itemPath: NodePath, patch: Record<string, number>) => void;
+  /** Stream a transient patch during a drag — flat fields (x/z/zStart/yaw)
+   *  or structured ones (dir). The Viewport routes each to the walker. */
+  onTransientMove: (itemPath: NodePath, patch: Record<string, unknown>) => void;
   onDragStart: () => void;
   onDragEnd: () => void;
 }
 
 const pathKey = (p: NodePath) => JSON.stringify(p);
+const round2 = (v: number) => Math.round(v * 100) / 100;
+
+/** The entity a (possibly leaf) selection path belongs to, or null when the
+ *  path isn't a placeable (level root, mode record, …). */
+function entityPathFor(path: NodePath): NodePath | null {
+  if (!path.length) return null;
+  if (path[0] === 'player') return ['player'];
+  if (path[0] === 'mode') {
+    if (path[1] === 'race' && path[2] === 'waypoints' && path.length >= 4) return path.slice(0, 4);
+    return null;
+  }
+  if (path.length >= 2 && typeof path[1] === 'number') return path.slice(0, 2);
+  return null;
+}
+
+/** What the gizmo may do for an entity: yaw only exists on headed things. */
+const canRotate = (root: string | number) =>
+  root === 'player' || root === 'traffic' || root === 'props' || root === 'roads';
 
 export class EditorScene {
   private renderer: THREE.WebGLRenderer;
   private scene = new THREE.Scene();
   private camera: THREE.PerspectiveCamera;
   private controls: OrbitControls;
+  private transform: TransformControls;
   private raycaster = new THREE.Raycaster();
   private pointer = new THREE.Vector2();
   private resizeObs: ResizeObserver;
@@ -36,12 +66,17 @@ export class EditorScene {
   /** Pickable entity roots, keyed by NodePath. */
   private entities = new Map<string, THREE.Object3D>();
   private selHelper: THREE.BoxHelper | null = null;
-  private selectedKey: string | null = null;
+  private selectedEntity: NodePath | null = null;
+  private gizmoMode: GizmoMode = 'translate';
+  /** The race ribbon line — swapped in place so a waypoint drag can restyle
+   *  it live without a full rebuild (rebuilds are OFF mid-drag). */
+  private ribbon: THREE.Line | null = null;
 
-  // drag state
+  // body-drag state
   private pick: { object: THREE.Object3D; path: NodePath; downX: number; downY: number } | null = null;
   private emptyDown: { x: number; y: number } | null = null;
   private dragging = false;
+  private gizmoDragging = false;
   private dragPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
   private dragOffset = new THREE.Vector3();
   private hit = new THREE.Vector3();
@@ -66,6 +101,26 @@ export class EditorScene {
     this.controls.maxPolarAngle = Math.PI / 2 - 0.04;
     this.controls.maxDistance = 400;
     this.controls.target.set(0, 0, 0);
+
+    // ---- the gizmo ----
+    this.transform = new TransformControls(this.camera, this.renderer.domElement);
+    this.transform.setSize(0.9);
+    this.scene.add(this.transform.getHelper());
+    this.transform.addEventListener('dragging-changed', (e: { value?: unknown }) => {
+      const active = !!e.value;
+      this.controls.enabled = !active;
+      if (active) {
+        this.gizmoDragging = true;
+        this.cb.onDragStart();
+      } else if (this.gizmoDragging) {
+        this.gizmoDragging = false;
+        this.cb.onDragEnd();
+      }
+    });
+    this.transform.addEventListener('objectChange', () => this.onGizmoChange());
+    // shift = snap, both modes (steward's snap toggle, held not latched)
+    addEventListener('keydown', this.onSnapKey);
+    addEventListener('keyup', this.onSnapKey);
 
     const hemi = new THREE.HemisphereLight(0xcfe4ff, 0x50584a, 1.05);
     const sun = new THREE.DirectionalLight(0xfff2df, 1.6);
@@ -103,6 +158,10 @@ export class EditorScene {
     el.removeEventListener('pointerdown', this.onPointerDown);
     el.removeEventListener('pointermove', this.onPointerMove);
     el.removeEventListener('pointerup', this.onPointerUp);
+    removeEventListener('keydown', this.onSnapKey);
+    removeEventListener('keyup', this.onSnapKey);
+    this.transform.detach();
+    this.transform.dispose();
     this.controls.dispose();
     this.disposeGroup(this.scene);
     this.renderer.dispose();
@@ -110,8 +169,19 @@ export class EditorScene {
   }
 
   isDragging(): boolean {
-    return this.dragging;
+    return this.dragging || this.gizmoDragging;
   }
+
+  setGizmoMode(mode: GizmoMode): void {
+    this.gizmoMode = mode;
+    this.configureGizmo();
+  }
+
+  private onSnapKey = (e: KeyboardEvent): void => {
+    const snap = e.shiftKey;
+    this.transform.setTranslationSnap(snap ? 0.5 : null);
+    this.transform.setRotationSnap(snap ? THREE.MathUtils.degToRad(15) : null);
+  };
 
   private resize(): void {
     const w = this.container.clientWidth;
@@ -134,10 +204,12 @@ export class EditorScene {
   // ---------- level → scene ----------
 
   setLevel(level: LevelDef): void {
+    this.transform.detach(); // never let the gizmo outlive its object
     this.scene.remove(this.world);
     this.disposeGroup(this.world);
     this.world = new THREE.Group();
     this.entities.clear();
+    this.ribbon = null;
 
     this.buildGround(level);
 
@@ -147,6 +219,7 @@ export class EditorScene {
       this.world.add(obj);
     };
 
+    (level.roads ?? []).forEach((r, i) => add(['roads', i], this.buildRoad(r)));
     add(['player'], this.buildVehicle(level.player, true));
     level.traffic.forEach((t, i) => add(['traffic', i], this.buildVehicle(t, false)));
     level.poles.forEach((p, i) => add(['poles', i], this.buildPole(p.x, p.z)));
@@ -156,23 +229,45 @@ export class EditorScene {
     level.pickups.forEach((p, i) => add(['pickups', i], this.buildPickup(p)));
     (level.props ?? []).forEach((p, i) => add(['props', i], this.buildProp(p)));
 
-    if (level.mode.kind === 'race') this.world.add(this.buildRaceRibbon(level));
+    if (level.mode.kind === 'race') {
+      this.updateRaceRibbon(level);
+      (level.mode.race.waypoints ?? []).forEach(([x, z], i) => {
+        add(['mode', 'race', 'waypoints', i], this.buildWaypoint(x, z, i === 0));
+      });
+    }
 
     this.scene.add(this.world);
     this.refreshSelection();
   }
 
   setSelection(path: NodePath | null): void {
-    this.selectedKey = path ? pathKey(path.slice(0, 2)) : null;
-    // a leaf path like ['barrels', 3, 'x'] still highlights barrel 3; single-
-    // segment paths (player) key as-is
-    if (path && path.length === 1) this.selectedKey = pathKey(path);
+    this.selectedEntity = path ? entityPathFor(path) : null;
     this.refreshSelection();
   }
 
+  /** Restyle just the ribbon from the current sections — called during a
+   *  waypoint drag, when full rebuilds are suppressed. */
+  updateRaceRibbon(level: LevelDef): void {
+    if (level.mode.kind !== 'race') return;
+    const race = level.mode.race;
+    const pts = race.sections.map((s) => new THREE.Vector3(s.x, s.y + 0.15, s.z));
+    if (pts.length) pts.push(pts[0].clone());
+    if (this.ribbon) {
+      this.ribbon.geometry.dispose();
+      this.ribbon.geometry = new THREE.BufferGeometry().setFromPoints(pts);
+      return;
+    }
+    this.ribbon = new THREE.Line(
+      new THREE.BufferGeometry().setFromPoints(pts),
+      new THREE.LineBasicMaterial({ color: 0xffffff }),
+    );
+    this.world.add(this.ribbon);
+  }
+
   private refreshSelection(): void {
-    const obj = this.selectedKey ? this.entities.get(this.selectedKey) : null;
+    const obj = this.selectedEntity ? this.entities.get(pathKey(this.selectedEntity)) : null;
     if (!obj) {
+      this.transform.detach();
       if (this.selHelper) {
         this.scene.remove(this.selHelper);
         this.selHelper.dispose();
@@ -185,6 +280,61 @@ export class EditorScene {
       this.scene.add(this.selHelper);
     } else {
       this.selHelper.setFromObject(obj);
+    }
+    this.transform.attach(obj);
+    this.configureGizmo();
+  }
+
+  /** Axis/mode policy for the current selection: yaw-locked rotation, XZ
+   *  translation (pickups add Y), rotate falls back to move for unheaded
+   *  things. */
+  private configureGizmo(): void {
+    const path = this.selectedEntity;
+    if (!path) return;
+    const root = path[0];
+    const rotatable = canRotate(root);
+    const mode: GizmoMode = this.gizmoMode === 'rotate' && rotatable ? 'rotate' : 'translate';
+    this.transform.setMode(mode);
+    if (mode === 'rotate') {
+      this.transform.showX = false;
+      this.transform.showZ = false;
+      this.transform.showY = true; // the yaw ring
+    } else {
+      this.transform.showX = true;
+      this.transform.showZ = true;
+      this.transform.showY = root === 'pickups'; // only rings float
+    }
+  }
+
+  /** Gizmo drag → the same transient patch stream as a body drag. */
+  private onGizmoChange(): void {
+    if (!this.gizmoDragging) return;
+    const obj = this.transform.object as THREE.Object3D | undefined;
+    const path = obj?.userData.path as NodePath | undefined;
+    if (!obj || !path) return;
+    this.selHelper?.setFromObject(obj);
+    const root = path[0];
+    if (this.transform.mode === 'rotate') {
+      const yaw = Math.atan2(Math.sin(obj.rotation.y), Math.cos(obj.rotation.y));
+      if (root === 'player' || root === 'traffic') {
+        this.cb.onTransientMove(path, {
+          dir: { x: Math.round(Math.sin(yaw) * 1000) / 1000, z: Math.round(Math.cos(yaw) * 1000) / 1000 },
+        });
+      } else {
+        this.cb.onTransientMove(path, { yaw: round2(yaw) });
+      }
+      return;
+    }
+    const x = round2(obj.position.x);
+    const z = round2(obj.position.z);
+    if (root === 'ramps') {
+      this.cb.onTransientMove(path, { x, zStart: z });
+    } else if (root === 'pickups') {
+      this.cb.onTransientMove(path, { x, y: Math.max(0.5, round2(obj.position.y)), z });
+    } else if (root === 'mode') {
+      this.cb.onTransientMove(path, { x, z }); // waypoint — Viewport re-tuples
+    } else {
+      this.cb.onTransientMove(path, { x, z });
     }
   }
 
@@ -218,6 +368,27 @@ export class EditorScene {
       pad.position.y = 0.005;
       this.world.add(pad);
     }
+  }
+
+  private buildRoad(r: RoadDef): THREE.Object3D {
+    const g = new THREE.Group();
+    const strip = new THREE.Mesh(new THREE.PlaneGeometry(r.width, r.length), this.mat(0x33373f));
+    strip.rotation.x = -Math.PI / 2;
+    strip.position.y = 0.006;
+    g.add(strip);
+    if (r.dashes !== false) {
+      // one long thin centre stripe reads as the dash line at editor scale
+      const stripe = new THREE.Mesh(
+        new THREE.PlaneGeometry(0.25, Math.max(0, r.length - 4)),
+        this.mat(0xd9dde2, 0.55),
+      );
+      stripe.rotation.x = -Math.PI / 2;
+      stripe.position.y = 0.012;
+      g.add(stripe);
+    }
+    g.position.set(r.x, 0, r.z);
+    g.rotation.y = r.yaw;
+    return g;
   }
 
   private buildVehicle(spawn: VehicleSpawn, isPlayer: boolean): THREE.Object3D {
@@ -309,20 +480,22 @@ export class EditorScene {
     return g;
   }
 
-  private buildRaceRibbon(level: LevelDef): THREE.Object3D {
+  private buildWaypoint(x: number, z: number, isStart: boolean): THREE.Object3D {
     const g = new THREE.Group();
-    if (level.mode.kind !== 'race') return g;
-    const pts = level.mode.race.sections.map((s) => new THREE.Vector3(s.x, s.y + 0.15, s.z));
-    if (pts.length) pts.push(pts[0].clone());
-    const line = new THREE.Line(
-      new THREE.BufferGeometry().setFromPoints(pts),
-      new THREE.LineBasicMaterial({ color: 0xffffff }),
+    const orb = new THREE.Mesh(
+      new THREE.SphereGeometry(isStart ? 1.5 : 1.1, 16, 12),
+      this.mat(isStart ? 0x59d97a : 0xc75fd9),
     );
-    g.add(line);
+    orb.position.y = 1.2;
+    g.add(orb);
+    const stem = new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.08, 1.2, 6), this.mat(0xffffff, 0.5));
+    stem.position.y = 0.6;
+    g.add(stem);
+    g.position.set(x, 0, z);
     return g;
   }
 
-  // ---------- picking + drag ----------
+  // ---------- picking + body drag ----------
 
   private setPointerFrom(e: PointerEvent): void {
     const rect = this.renderer.domElement.getBoundingClientRect();
@@ -346,6 +519,8 @@ export class EditorScene {
 
   private onPointerDown = (e: PointerEvent): void => {
     if (e.button !== 0) return;
+    // pointer over a gizmo handle — TransformControls owns this gesture
+    if (this.transform.axis || this.gizmoDragging) return;
     const picked = this.pickEntity(e);
     if (!picked) {
       // empty ground — OrbitControls owns the gesture; a motionless click
@@ -387,8 +562,8 @@ export class EditorScene {
       x = Math.round(x * 2) / 2; // snap to 0.5 m
       z = Math.round(z * 2) / 2;
     }
-    x = Math.round(x * 100) / 100;
-    z = Math.round(z * 100) / 100;
+    x = round2(x);
+    z = round2(z);
     obj.position.x = x;
     obj.position.z = z;
     this.selHelper?.setFromObject(obj);

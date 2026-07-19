@@ -63,6 +63,13 @@ export const LEVEL_SCHEMA: LevelSchema = {
           kind: 'list', item: 'pickup', addable: true, removable: true,
           itemLabel: (v, i) => { const p = v as { mult: number }; return `${i}: ×${p.mult}`; },
         },
+        roads: {
+          kind: 'list', item: 'road', addable: true, removable: true,
+          itemLabel: (v, i) => {
+            const r = v as { length: number; width: number };
+            return `${i}: ${r.length}×${r.width} m`;
+          },
+        },
         props: {
           kind: 'list', item: 'prop', addable: true, removable: true,
           itemLabel: (v, i) => {
@@ -125,6 +132,7 @@ export const LEVEL_SCHEMA: LevelSchema = {
           kind: 'list', item: 'rival', addable: true, removable: true,
           itemLabel: (v, i) => { const r = v as { skill: number }; return `${i}: skill ${r.skill}`; },
         },
+        waypoints: { kind: 'record', type: 'opaque' },
         sections: { kind: 'record', type: 'opaque' },
         shortcuts: { kind: 'record', type: 'opaque' },
         signatures: { kind: 'record', type: 'opaque' },
@@ -132,6 +140,7 @@ export const LEVEL_SCHEMA: LevelSchema = {
       },
       fieldMetadata: {
         width: { description: 'track ribbon width, m' },
+        waypoints: { hidden: true, optional: true }, // edited via the tree + viewport handles
         sections: { hidden: true },
         shortcuts: { hidden: true, optional: true },
         signatures: { hidden: true, optional: true },
@@ -155,6 +164,23 @@ export const LEVEL_SCHEMA: LevelSchema = {
 
     playerSpawn: vehicleSpawn('playerSpawn', 'Player'),
     trafficSpawn: vehicleSpawn('trafficSpawn', 'Traffic car'),
+
+    road: {
+      name: 'road',
+      label: 'Road',
+      fields: {
+        x: { kind: 'number', step: 1 },
+        z: { kind: 'number', step: 1 },
+        yaw: { kind: 'number', step: 0.1 },
+        length: { kind: 'number', step: 5, min: 6 },
+        width: { kind: 'number', step: 1, min: 4 },
+        dashes: { kind: 'bool' },
+      },
+      fieldMetadata: {
+        yaw: { description: 'radians — or grab the ROTATE gizmo' },
+        dashes: { optional: true, description: 'centre dash line (default on)' },
+      },
+    },
 
     pole: {
       name: 'pole',

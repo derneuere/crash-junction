@@ -57,6 +57,10 @@ export function buildEnvironment(scene: THREE.Scene, phys: PhysicsContext, level
     }
     for (const p of level.props ?? []) grow(p.x, p.z);
     for (const b of level.buildings) grow(b.x, b.z);
+    for (const r of level.roads ?? []) {
+      grow(r.x + r.length / 2, r.z + r.length / 2);
+      grow(r.x - r.length / 2, r.z - r.length / 2);
+    }
     const groundSize = Math.max(320, (extent + 60) * 2);
     const ground = new THREE.Mesh(
       new THREE.PlaneGeometry(groundSize, groundSize),
@@ -186,6 +190,30 @@ export function buildEnvironment(scene: THREE.Scene, phys: PhysicsContext, level
       addMark(-9.6, i * 1.25, 0.55, 2.4, Math.PI / 2);
     }
     addMarkInstances(scene, marks);
+  }
+
+  // custom street layout: editor-authored straight strips, same paint as the
+  // baked crossroad. Stacked micro-offsets inside the road slot keep
+  // overlapping strips (junctions) from z-fighting; dashes ride the decal
+  // slot. Visual only — the physics ground stays the flat plane.
+  if (level.roads?.length) {
+    const dashMarks: { x: number; z: number; w: number; l: number; yaw: number }[] = [];
+    level.roads.forEach((r, i) => {
+      const strip = new THREE.Mesh(new THREE.PlaneGeometry(r.width, r.length), roadMat);
+      strip.rotation.order = 'YXZ'; // yaw about world-up first, then lie flat
+      strip.rotation.set(-Math.PI / 2, r.yaw, 0);
+      strip.position.set(r.x, 0.0042 + (i % 8) * 0.0001, r.z);
+      strip.receiveShadow = true;
+      scene.add(strip);
+      if (r.dashes !== false) {
+        const sin = Math.sin(r.yaw);
+        const cos = Math.cos(r.yaw);
+        for (let d = -r.length / 2 + 2.2; d <= r.length / 2 - 2.2; d += 4.4) {
+          dashMarks.push({ x: r.x + sin * d, z: r.z + cos * d, w: 0.22, l: 2.0, yaw: r.yaw });
+        }
+      }
+    });
+    if (dashMarks.length) addMarkInstances(scene, dashMarks);
   }
 
   // level decals: painted lane markings on the aprons — the road-dash

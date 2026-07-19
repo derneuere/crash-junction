@@ -3,7 +3,8 @@
 // list-item actions (duplicate/delete). The mode record's discriminated
 // union gets a small bespoke arm-switcher on top of the generic form.
 
-import type { LevelDef, ModeDef } from '../game/types';
+import type { ModeDef, RaceWaypoint } from '../game/types';
+import { makeRaceLevel } from './race';
 import { LEVEL_SCHEMA } from './schema/levelSchema';
 import type { NodePath } from './schema/types';
 import { getAtPath, insertListItem, resolveRecordAtPath } from './schema/walk';
@@ -26,15 +27,18 @@ function Breadcrumb({ path }: { path: NodePath }) {
 }
 
 function ModeEditor({ mode }: { mode: ModeDef }) {
-  const { setValueAt, select } = useEditor();
+  const { level, setValueAt, select } = useEditor();
   const setKind = (kind: string) => {
     if (kind === mode.kind) return;
     if (kind === 'crash') {
       setValueAt(['mode'], { kind: 'crash', medals: { bronze: 80000, silver: 140000, gold: 200000 } });
     } else if (kind === 'practice') {
       setValueAt(['mode'], { kind: 'practice' });
+    } else if (kind === 'race') {
+      // a whole-level commit: default waypoint loop → derived sections,
+      // rivals, player on the grid, grass ground (one undo step)
+      setValueAt([], makeRaceLevel(level));
     }
-    // race is not creatable here — a circuit needs authored sections
   };
   return (
     <div>
@@ -43,7 +47,7 @@ function ModeEditor({ mode }: { mode: ModeDef }) {
         <select className="edSelect" value={mode.kind} onChange={(e) => setKind(e.target.value)}>
           <option value="crash">crash</option>
           <option value="practice">practice</option>
-          {mode.kind === 'race' && <option value="race">race</option>}
+          <option value="race">race</option>
         </select>
       </div>
       {mode.kind === 'crash' && (
@@ -57,8 +61,9 @@ function ModeEditor({ mode }: { mode: ModeDef }) {
       {mode.kind === 'race' && (
         <>
           <div className="edNote">
-            Circuit geometry (sections/shortcuts/walls) is authored in code and preserved
-            verbatim — laps, width and rivals are editable here.
+            Drag the purple WAYPOINTS to shape the circuit — the track (sections)
+            re-derives live. Shortcuts/signature zones/wall styles from code-authored
+            levels are preserved verbatim.
           </div>
           <RecordForm
             record={LEVEL_SCHEMA.registry.race}
@@ -70,6 +75,61 @@ function ModeEditor({ mode }: { mode: ModeDef }) {
         </>
       )}
       {mode.kind === 'practice' && <div className="edNote">Free driving — no stakes, no report.</div>}
+    </div>
+  );
+}
+
+/** Race waypoints are [x, z] / [x, z, y] tuples, not schema records — a
+ *  small bespoke form, like ModeEditor. Deletion stops at 3 (a loop needs
+ *  three points to derive sections). */
+function WaypointForm({ index }: { index: number }) {
+  const { level, setValueAt, removeAt } = useEditor();
+  if (level.mode.kind !== 'race') return null;
+  const wps = level.mode.race.waypoints ?? [];
+  const wp = wps[index];
+  if (!wp) return <div className="edNote">Waypoint no longer exists.</div>;
+  const path: NodePath = ['mode', 'race', 'waypoints', index];
+  const setComp = (comp: 0 | 1 | 2, v: number) => {
+    const next: number[] = [...wp];
+    if (comp === 2 && next.length < 3) next.push(0);
+    next[comp] = v;
+    if (comp === 2 && v === 0) next.length = 2; // flat again — drop the elevation
+    setValueAt(path, next as RaceWaypoint);
+  };
+  const num = (label: string, value: number, comp: 0 | 1 | 2, step = 1) => (
+    <div className="edRow">
+      <label className="edLabel">{label}</label>
+      <input
+        className="edNum"
+        type="number"
+        value={value}
+        step={step}
+        onChange={(e) => {
+          const v = Number(e.target.value);
+          if (Number.isFinite(v)) setComp(comp, v);
+        }}
+      />
+    </div>
+  );
+  return (
+    <div>
+      {num('x', wp[0], 0)}
+      {num('z', wp[1], 1)}
+      {num('elevation y', wp[2] ?? 0, 2, 0.5)}
+      <div className="edNote">
+        Drag the purple orb in the viewport to move it — the track follows.
+        {index === 0 ? ' This is the START/finish waypoint.' : ''}
+      </div>
+      <div className="edItemActions">
+        <button
+          className="edBtn danger"
+          disabled={wps.length <= 3}
+          title={wps.length <= 3 ? 'a loop needs at least 3 waypoints' : undefined}
+          onClick={() => removeAt(['mode', 'race', 'waypoints'], index)}
+        >
+          DELETE
+        </button>
+      </div>
     </div>
   );
 }
@@ -116,6 +176,16 @@ export function Inspector() {
           Click an item in the tree or the 3D view to edit it. Drag items in the
           viewport to move them.
         </div>
+      </div>
+    );
+  }
+
+  // waypoint tuples resolve to the opaque record — special-case them first
+  if (selection[0] === 'mode' && selection[2] === 'waypoints' && typeof selection[3] === 'number') {
+    return (
+      <div className="edPaneScroll">
+        <div className="edPaneTitle">WAYPOINT {selection[3]}</div>
+        <WaypointForm index={selection[3]} />
       </div>
     );
   }

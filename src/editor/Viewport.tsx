@@ -1,14 +1,18 @@
 // React wrapper around EditorScene — mounts the raw-three view once, streams
-// level/selection changes into it, and wires its pick/drag callbacks into
-// the editor context. Rebuilds are skipped mid-drag (the scene already moved
-// the mesh); the drag-end handler forces one final sync rebuild.
+// level/selection/gizmo-mode changes into it, and wires its pick/drag
+// callbacks into the editor context. Rebuilds are skipped mid-drag (the
+// scene already moved the mesh); the race ribbon alone updates live so a
+// waypoint drag reshapes the derived track; the drag-end handler forces one
+// final sync rebuild.
 
 import { useEffect, useRef } from 'react';
-import type { LevelDef } from '../game/types';
-import { EditorScene } from './viewport/EditorScene';
+import type { LevelDef, RaceWaypoint } from '../game/types';
+import { EditorScene, type GizmoMode } from './viewport/EditorScene';
+import { getAtPath } from './schema/walk';
+import type { NodePath } from './schema/types';
 import { useEditor } from './state';
 
-export function Viewport() {
+export function Viewport({ gizmoMode }: { gizmoMode: GizmoMode }) {
   const { level, selection, select, beginGesture, transientSetAt, endGesture } = useEditor();
   const containerRef = useRef<HTMLDivElement>(null);
   const sceneRef = useRef<EditorScene | null>(null);
@@ -20,7 +24,17 @@ export function Viewport() {
     if (!container) return;
     const scene = new EditorScene(container, {
       onSelect: select,
-      onTransientMove: (itemPath, patch) => {
+      onTransientMove: (itemPath: NodePath, patch) => {
+        // race waypoints are [x, z] / [x, z, y] tuples, not records — a move
+        // rewrites the tuple whole, keeping any elevation component
+        if (itemPath[0] === 'mode' && itemPath[2] === 'waypoints') {
+          const old = getAtPath(levelRef.current, itemPath) as RaceWaypoint | undefined;
+          const x = (patch.x as number) ?? old?.[0] ?? 0;
+          const z = (patch.z as number) ?? old?.[1] ?? 0;
+          const next: RaceWaypoint = old && old.length > 2 ? [x, z, old[2]!] : [x, z];
+          transientSetAt(itemPath, next);
+          return;
+        }
         for (const [field, v] of Object.entries(patch)) {
           transientSetAt([...itemPath, field], v);
         }
@@ -43,12 +57,23 @@ export function Viewport() {
 
   useEffect(() => {
     const scene = sceneRef.current;
-    if (scene && !scene.isDragging()) scene.setLevel(level);
+    if (!scene) return;
+    if (scene.isDragging()) {
+      // full rebuilds would destroy the dragged mesh — but the DERIVED race
+      // ribbon must follow a waypoint drag live
+      scene.updateRaceRibbon(level);
+    } else {
+      scene.setLevel(level);
+    }
   }, [level]);
 
   useEffect(() => {
     sceneRef.current?.setSelection(selection);
   }, [selection]);
+
+  useEffect(() => {
+    sceneRef.current?.setGizmoMode(gizmoMode);
+  }, [gizmoMode]);
 
   return <div className="edViewport" ref={containerRef} />;
 }

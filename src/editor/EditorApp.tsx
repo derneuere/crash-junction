@@ -4,9 +4,10 @@
 // Game on the working level). Mounted as its own Phase; no Game runs here.
 
 import { useEffect, useRef, useState, type ChangeEvent } from 'react';
-import type { LevelDef } from '../game/types';
-import { makeBlankLevel } from './defaults';
+import type { LevelDef, RoadDef } from '../game/types';
+import { CATEGORY_BY_KEY, makeBlankLevel } from './defaults';
 import { downloadLevel, parseLevelFile, writeDraft } from './io';
+import type { GizmoMode } from './viewport/EditorScene';
 import { Hierarchy } from './Hierarchy';
 import { Inspector } from './Inspector';
 import { Viewport } from './Viewport';
@@ -25,19 +26,33 @@ function isTyping(): boolean {
 function EditorShell({ onBack, onPlaytest }: EditorAppProps) {
   const {
     level, selection, dirty, canUndo, canRedo,
-    undo, redo, removeAt, replaceLevel, markSaved,
+    undo, redo, removeAt, setValueAt, addListItem, replaceLevel, markSaved,
   } = useEditor();
   const fileRef = useRef<HTMLInputElement>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [gizmoMode, setGizmoMode] = useState<GizmoMode>('translate');
 
-  // keyboard: undo/redo + delete-selected (never while typing in a field)
+  // keyboard: undo/redo, gizmo mode (W/E), delete-selected — never while typing
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const mod = e.ctrlKey || e.metaKey;
       if (mod && e.code === 'KeyZ' && !e.shiftKey) { e.preventDefault(); undo(); return; }
       if ((mod && e.code === 'KeyY') || (mod && e.shiftKey && e.code === 'KeyZ')) { e.preventDefault(); redo(); return; }
-      if ((e.code === 'Delete' || e.code === 'Backspace') && !isTyping()) {
-        if (selection && selection.length >= 2 && typeof selection[1] === 'number') {
+      if (isTyping()) return;
+      if (e.code === 'KeyW' && !mod) { setGizmoMode('translate'); return; }
+      if (e.code === 'KeyE' && !mod) { setGizmoMode('rotate'); return; }
+      if (e.code === 'Delete' || e.code === 'Backspace') {
+        if (!selection) return;
+        // list items live at [listKey, i]; race waypoints at ['mode','race','waypoints', i]
+        if (selection[0] === 'mode' && selection[2] === 'waypoints' && typeof selection[3] === 'number') {
+          const wps = level.mode.kind === 'race' ? level.mode.race.waypoints ?? [] : [];
+          if (wps.length > 3) {
+            e.preventDefault();
+            removeAt(['mode', 'race', 'waypoints'], selection[3]);
+          }
+          return;
+        }
+        if (selection.length >= 2 && typeof selection[1] === 'number') {
           e.preventDefault();
           removeAt([selection[0]], selection[1] as number);
         }
@@ -45,7 +60,7 @@ function EditorShell({ onBack, onPlaytest }: EditorAppProps) {
     };
     addEventListener('keydown', onKey);
     return () => removeEventListener('keydown', onKey);
-  }, [undo, redo, removeAt, selection]);
+  }, [undo, redo, removeAt, selection, level]);
 
   const loadText = (text: string) => {
     try {
@@ -101,6 +116,43 @@ function EditorShell({ onBack, onPlaytest }: EditorAppProps) {
           SAVE JSON
         </button>
         <span className="edToolGap" />
+        <button
+          className={`edBtn${gizmoMode === 'translate' ? ' active' : ''}`}
+          onClick={() => setGizmoMode('translate')}
+          title="W — gizmo moves (arrows)"
+        >
+          ✥ MOVE
+        </button>
+        <button
+          className={`edBtn${gizmoMode === 'rotate' ? ' active' : ''}`}
+          onClick={() => setGizmoMode('rotate')}
+          title="E — gizmo rotates (yaw ring; cars, props, roads)"
+        >
+          ⟳ ROTATE
+        </button>
+        <span className="edToolGap" />
+        <button
+          className="edBtn"
+          title="add a straight road strip at the origin"
+          onClick={() => addListItem(['roads'], CATEGORY_BY_KEY.roads.makeEmpty())}
+        >
+          + ROAD
+        </button>
+        <button
+          className="edBtn"
+          title="stamp two crossing road strips (a junction)"
+          onClick={() => {
+            const roads = (level.roads ?? []) as RoadDef[];
+            setValueAt(['roads'], [
+              ...roads,
+              { x: 0, z: 0, yaw: 0, length: 120, width: 14, dashes: true },
+              { x: 0, z: 0, yaw: Math.PI / 2, length: 120, width: 14, dashes: true },
+            ]);
+          }}
+        >
+          + CROSSROAD
+        </button>
+        <span className="edToolGap" />
         <button className="edBtn" disabled={!canUndo} onClick={undo} title="Ctrl+Z">↶ UNDO</button>
         <button className="edBtn" disabled={!canRedo} onClick={redo} title="Ctrl+Y">↷ REDO</button>
         <span className="edToolGap" />
@@ -123,12 +175,12 @@ function EditorShell({ onBack, onPlaytest }: EditorAppProps) {
       )}
       <div className="edPanes">
         <div className="edPane left"><Hierarchy /></div>
-        <div className="edPane center"><Viewport /></div>
+        <div className="edPane center"><Viewport gizmoMode={gizmoMode} /></div>
         <div className="edPane right"><Inspector /></div>
       </div>
       <div className="edFoot">
-        drag = move · shift-drag = snap 0.5 m · click empty = deselect · DEL = remove ·
-        drop a .json to load · orbit with left-drag on ground, wheel zooms
+        W/E = move/rotate gizmo · drag = move · shift = snap (0.5 m / 15°) · click empty = deselect ·
+        DEL = remove · drop a .json to load · orbit with left-drag on ground, wheel zooms
       </div>
     </div>
   );

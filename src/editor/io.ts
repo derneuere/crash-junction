@@ -77,6 +77,7 @@ export function parseLevelFile(text: string): LevelDef {
     else if (!Array.isArray(level[key])) throw new Error(`level.${key} must be a list`);
   }
   level.traffic.forEach((t, i) => checkSpawn(t, `traffic[${i}]`));
+  if (level.roads != null && !Array.isArray(level.roads)) throw new Error('level.roads must be a list');
   return level;
 }
 
