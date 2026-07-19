@@ -4,6 +4,7 @@ import { useMenuPad } from './useMenuPad';
 interface MainMenuProps {
   onPlay: () => void; // → EVENT SELECT
   onGarage: () => void; // → CAR SELECT (browse the roster)
+  onEditor: () => void; // → LEVEL EDITOR
   onSettings: () => void;
   onControls: () => void;
 }
@@ -19,6 +20,7 @@ interface Item {
 const ITEMS: Item[] = [
   { key: 'play', label: 'PLAY', sub: 'CHOOSE AN EVENT AND DRIVE', run: (p) => p.onPlay() },
   { key: 'garage', label: 'GARAGE', sub: 'PICK YOUR CAR', run: (p) => p.onGarage() },
+  { key: 'editor', label: 'LEVEL EDITOR', sub: 'BUILD A JUNCTION · SAVE AS JSON', run: (p) => p.onEditor() },
   { key: 'settings', label: 'SETTINGS', sub: 'TIME OF DAY · ENGINE · SOUND', run: (p) => p.onSettings() },
   { key: 'controls', label: 'CONTROLS', sub: 'KEYBOARD & CONTROLLER', run: (p) => p.onControls() },
 ];

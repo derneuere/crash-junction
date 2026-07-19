@@ -7,7 +7,7 @@ import { PLAYER_CARS, type PlayerCarId } from '../game/models';
  *  heavy Game (which loads the level + streams assets) mounts ONCE on entering
  *  GAMEPLAY (LOADING→INGAME) and unmounts on returning to the menu. That
  *  decoupling is the lag fix: switching events no longer reloads a level. */
-export type Phase = 'title' | 'main' | 'settings' | 'events' | 'carselect' | 'gameplay';
+export type Phase = 'title' | 'main' | 'settings' | 'events' | 'carselect' | 'editor' | 'gameplay';
 
 export const isTod = (v: unknown): v is TimeOfDay => v === 'day' || v === 'dusk' || v === 'night';
 

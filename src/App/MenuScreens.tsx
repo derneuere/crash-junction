@@ -49,6 +49,7 @@ export function renderMenuScreen(p: MenuScreensProps): ReactElement | null {
       <MainMenu
         onPlay={() => setPhase('events')}
         onGarage={() => setPhase('carselect')}
+        onEditor={() => setPhase('editor')}
         onSettings={() => setPhase('settings')}
         onControls={() => setPhase('settings')}
       />
