@@ -4,7 +4,7 @@ import type { EngineFlavor } from '../game/audio';
 import type { TimeOfDay } from '../game/daynight';
 import { LEVELS, type LevelId } from '../game/levels';
 import { setPlayerCar, type PlayerCarId } from '../game/models';
-import { GameState } from '../game/types';
+import { GameState, type LevelDef } from '../game/types';
 import type { ReplayFile } from '../game/replay';
 import type { GraphicsSettings } from '../game/graphics';
 import type { BoostState, CashFloatData, RaceStanding, ReportData, TakedownBanner } from '../game/events';
@@ -16,6 +16,9 @@ import { upgradeBest, writeBest, type BestMap } from '../ui/storage';
 export interface GameMountDeps {
   gameMounted: boolean;
   levelId: LevelId;
+  /** Editor playtest: mount THIS level instead of LEVELS[levelId]. Best-medal
+   *  records never write while it's set (a working level isn't an event). */
+  customLevel: LevelDef | null;
   carId: PlayerCarId;
   containerRef: RefObject<HTMLDivElement>;
   gameRef: MutableRefObject<Game | null>;
@@ -54,7 +57,7 @@ export interface GameMountDeps {
  *  replay level swap) remounts, exactly the old take boundary. */
 export function useGameMount(deps: GameMountDeps): void {
   const {
-    gameMounted, levelId, carId,
+    gameMounted, levelId, customLevel, carId,
     containerRef, gameRef, levelRef, pendingReplay, autoLaunchNext,
     todRef, engineRef, mutedRef, gfxRef, stateRef, replayingRef, runTod, perEventRef,
     setGameReady, setLoadingDone, setState, setDamage, setFlash, setTakedown,
@@ -69,7 +72,7 @@ export function useGameMount(deps: GameMountDeps): void {
     // the player's model template is sim state (it shapes the suspension) —
     // pin it before the Game constructs, never mid-take (models.ts)
     setPlayerCar(carId);
-    const game = new Game(containerRef.current!, LEVELS[levelId]);
+    const game = new Game(containerRef.current!, customLevel ?? LEVELS[levelId]);
     // gfx tier removed: the game always boots in CINE (the constructor applies
     // the render path before the first frame; ?verify=1 still forces FAST).
     game.setTimeOfDay(todRef.current);
@@ -125,6 +128,7 @@ export function useGameMount(deps: GameMountDeps): void {
       game.events.on('report', (r) => {
         setReport(r);
         if (replayingRef.current) return; // a replayed tape sets no records
+        if (customLevel) return; // an editor playtest sets no records either
         setBest((prev) => {
           const next = upgradeBest(prev, levelId, runTod.current, r.medal);
           if (next !== prev) writeBest(next);
@@ -168,5 +172,5 @@ export function useGameMount(deps: GameMountDeps): void {
       levelRef.current = null;
       game.dispose();
     };
-  }, [gameMounted, levelId, carId]);
+  }, [gameMounted, levelId, customLevel, carId]);
 }

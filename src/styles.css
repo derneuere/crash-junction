@@ -2180,3 +2180,175 @@ canvas {
   .menuFoot { bottom: 2%; font-size: 10px; }
   .backBtn { bottom: 3%; left: 3%; }
 }
+
+/* ============================= LEVEL EDITOR ============================= */
+/* The steward-style three-pane workspace: tree | viewport | inspector.
+   Utility UI in a plain sans; Impact only for the toolbar wordmark so it
+   still reads as Crash Junction. */
+
+.edRoot {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  background: #12151b;
+  color: #d7dde6;
+  font-family: 'Segoe UI', system-ui, sans-serif;
+  font-size: 13px;
+  user-select: none;
+}
+
+.edToolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: #191d25;
+  border-bottom: 1px solid #2a3140;
+  flex: 0 0 auto;
+}
+.edTitle {
+  font-family: Impact, 'Arial Narrow Bold', sans-serif;
+  font-size: 20px;
+  letter-spacing: 2px;
+  color: #ffd34d;
+  transform: skewX(-6deg);
+  margin-right: 6px;
+}
+.edToolGap { flex: 0 0 12px; border-left: 1px solid #2a3140; height: 22px; }
+.edDirty { font-size: 11px; color: #7fd08a; letter-spacing: 1px; }
+.edDirty.on { color: #ffb327; }
+
+.edBtn {
+  background: #232a36;
+  color: #d7dde6;
+  border: 1px solid #354052;
+  border-radius: 4px;
+  padding: 5px 12px;
+  font: inherit;
+  font-size: 12px;
+  letter-spacing: 1px;
+  cursor: pointer;
+}
+.edBtn:hover:not(:disabled) { background: #2d3646; }
+.edBtn:disabled { opacity: 0.35; cursor: default; }
+.edBtn.primary { background: #2b4a68; border-color: #3f6a94; }
+.edBtn.primary:hover { background: #35597c; }
+.edBtn.play { background: #2f6e46; border-color: #3f8f5c; }
+.edBtn.play:hover { background: #38814f; }
+.edBtn.danger { background: #6e2f2f; border-color: #8f3f3f; }
+.edBtn.danger:hover { background: #813838; }
+.edBtn.back { background: transparent; border-color: transparent; color: #9aa3ad; }
+
+.edLoadError {
+  background: #4a2323;
+  color: #ffb0a0;
+  padding: 6px 12px;
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+
+.edPanes { flex: 1; display: flex; min-height: 0; }
+.edPane { min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+.edPane.left { flex: 0 0 240px; background: #171b22; border-right: 1px solid #2a3140; }
+.edPane.center { flex: 1; position: relative; }
+.edPane.right { flex: 0 0 300px; background: #171b22; border-left: 1px solid #2a3140; }
+.edViewport { position: absolute; inset: 0; }
+.edViewport canvas { display: block; }
+
+.edPaneScroll { overflow-y: auto; padding: 10px; flex: 1; }
+.edPaneTitle {
+  font-size: 11px;
+  letter-spacing: 2px;
+  color: #8a93a8;
+  margin: 12px 0 6px;
+}
+.edPaneTitle:first-child { margin-top: 0; }
+.edNote { font-size: 11px; color: #8a93a8; line-height: 1.5; margin: 10px 0; }
+
+.edFoot {
+  flex: 0 0 auto;
+  padding: 5px 12px;
+  font-size: 11px;
+  color: #5d6675;
+  background: #171b22;
+  border-top: 1px solid #2a3140;
+}
+
+/* tree */
+.edTree { padding: 6px; }
+.edTreeRow {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 7px;
+  background: transparent;
+  border: 0;
+  color: #c3cad6;
+  font: inherit;
+  padding: 4px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  text-align: left;
+}
+.edTreeRow:hover { background: #222835; }
+.edTreeRow.sel { background: #2b4a68; color: #fff; }
+.edTreeRow.root .edTreeLabel { font-weight: 600; letter-spacing: 1px; }
+.edTreeRow.item { padding-left: 34px; font-size: 12px; }
+.edTreeGroup { margin-top: 2px; }
+.edTreeHead { display: flex; align-items: center; gap: 6px; padding: 3px 4px; }
+.edTreeTwist {
+  background: none; border: 0; color: #8a93a8; cursor: pointer; font-size: 11px;
+  width: 16px; padding: 0;
+}
+.edTreeDot { width: 8px; height: 8px; border-radius: 50%; flex: 0 0 auto; }
+.edTreeLabel { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.edTreeMeta { font-size: 11px; color: #77809a; }
+.edMini {
+  background: #232a36; border: 1px solid #354052; color: #c3cad6;
+  border-radius: 3px; font-size: 11px; padding: 1px 6px; cursor: pointer;
+}
+.edMini:hover { background: #2d3646; }
+.edMini.on { background: #2b4a68; color: #fff; }
+.edMini.add { color: #7fd08a; }
+
+/* inspector form */
+.edForm { display: flex; flex-direction: column; gap: 6px; }
+.edRow { display: flex; align-items: center; gap: 8px; min-height: 24px; }
+.edLabel { flex: 0 0 84px; font-size: 11px; color: #8a93a8; letter-spacing: 0.5px; }
+.edNum, .edText, .edSelect {
+  background: #10131a;
+  border: 1px solid #2a3140;
+  color: #e6ebf2;
+  border-radius: 4px;
+  padding: 4px 7px;
+  font: inherit;
+  font-size: 12px;
+  min-width: 0;
+}
+.edNum { width: 88px; }
+.edText { flex: 1; }
+.edSelect { flex: 1; }
+.edNum:focus, .edText:focus, .edSelect:focus { outline: 1px solid #3f6a94; }
+.edColorWrap { display: flex; align-items: center; gap: 6px; }
+.edColorWrap input[type='color'] {
+  width: 34px; height: 24px; padding: 0; border: 1px solid #2a3140;
+  background: #10131a; border-radius: 4px; cursor: pointer;
+}
+.edColorHex { font-size: 11px; color: #8a93a8; font-family: monospace; }
+.edDir { display: flex; flex-wrap: wrap; gap: 3px; align-items: center; }
+.edDirDeg { width: 60px; }
+.edNav {
+  background: transparent; border: 1px dashed #354052; color: #9fb4cc;
+  border-radius: 4px; padding: 3px 10px; font: inherit; font-size: 12px; cursor: pointer;
+}
+.edNav:hover { background: #222835; }
+.edCrumbs { display: flex; flex-wrap: wrap; align-items: center; gap: 2px; margin-bottom: 4px; }
+.edCrumb {
+  background: none; border: 0; color: #6f9fd0; cursor: pointer; font: inherit; font-size: 11px; padding: 1px 2px;
+}
+.edCrumb:hover { text-decoration: underline; }
+.edCrumbSep { color: #4b5568; font-size: 11px; }
+.edItemActions { display: flex; gap: 8px; margin-top: 14px; }
+.edBtn.active { background: #2b4a68; border-color: #4f7aa8; color: #fff; }

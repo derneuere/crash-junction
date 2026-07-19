@@ -15,6 +15,8 @@ import type { GraphicsSettings } from './game/graphics';
 import {
   readBest, readCar, readGraphics, readMuted, readSel, writeGraphics, writeMuted, writeSel, type BestMap,
 } from './ui/storage';
+import type { LevelDef } from './game/types';
+import { EditorApp } from './editor/EditorApp';
 import { readFastPath, type Phase } from './App/fastpath';
 import { useGameMount } from './App/useGameMount';
 import { useDeepLinks } from './App/useDeepLinks';
@@ -73,6 +75,10 @@ export default function App() {
   const [gfx, setGfxState] = useState<GraphicsSettings>(readGraphics);
   const gfxRef = useRef(gfx);
   const [gfxOpen, setGfxOpen] = useState(false);
+
+  // the editor's working level while PLAYTESTING it (null = normal events).
+  // Sim state: useGameMount keys the Game remount on it.
+  const [customLevel, setCustomLevel] = useState<LevelDef | null>(null);
 
   // FLOW: start on TITLE, unless a fast-path/replay deep-link jumps to gameplay
   const [phase, setPhaseState] = useState<Phase>(fast0.current ? 'gameplay' : 'title');
@@ -168,7 +174,7 @@ export default function App() {
   // leaving unmounts it. A level/car change while mounted (debug hot-switch /
   // replay level swap) remounts, exactly the old take boundary.
   useGameMount({
-    gameMounted, levelId, carId,
+    gameMounted, levelId, customLevel, carId,
     containerRef, gameRef, levelRef, pendingReplay, autoLaunchNext,
     todRef, engineRef, mutedRef, gfxRef, stateRef, replayingRef, runTod, perEventRef,
     setGameReady, setLoadingDone, setState, setDamage, setFlash, setTakedown,
@@ -183,9 +189,28 @@ export default function App() {
    *  leave it off so the game settles in idle. */
   const startGameplay = useCallback((autoLaunch = false) => {
     autoLaunchNext.current = autoLaunch;
+    setCustomLevel(null); // normal events never ride a leftover editor level
     setReport(null);
     setPhase('gameplay');
   }, [setPhase]);
+
+  /** LEVEL EDITOR playtest: mount the Game on the working LevelDef and drop
+   *  straight into the event. EXIT returns to the editor, not the menu. */
+  const startPlaytest = useCallback((level: LevelDef) => {
+    autoLaunchNext.current = true;
+    setCustomLevel(level);
+    setReport(null);
+    setPhase('gameplay');
+  }, [setPhase]);
+
+  const exitGameplay = useCallback(() => {
+    if (customLevel) {
+      setCustomLevel(null);
+      setPhase('editor');
+    } else {
+      setPhase('main');
+    }
+  }, [customLevel, setPhase]);
 
   /** Route a parsed report to the engine, mounting/switching the level first.
    *  Replays bypass the menu flow entirely — they jump straight to gameplay on
@@ -218,6 +243,12 @@ export default function App() {
   ) as Record<LevelId, TimeOfDay>;
 
   // ---- render the active screen ----
+  // The LEVEL EDITOR is its own full-screen phase (no Game mounted; its
+  // lightweight three.js viewport is not the engine).
+  if (phase === 'editor') {
+    return <EditorApp onBack={() => setPhase('main')} onPlaytest={startPlaytest} />;
+  }
+
   // Menu screens are lightweight React over a themed background (no Game).
   const menu = renderMenuScreen({
     phase, levelId, timeOfDay, engineSound, muted, variants, best, carId,
@@ -226,7 +257,7 @@ export default function App() {
   if (menu) return menu;
 
   // ---- GAMEPLAY: the Game is mounted; show LOADING until its world is up ----
-  const level = LEVELS[levelId];
+  const level = customLevel ?? LEVELS[levelId];
   return (
     <>
       <div id="game" ref={containerRef} />
@@ -255,7 +286,7 @@ export default function App() {
         carId={carId}
         onSelectEvent={selectEvent}
         onSelectCar={selectCar}
-        onExit={() => setPhase('main')}
+        onExit={exitGameplay}
         onOpenDebug={() => setDebugOpen(true)}
         onCashDone={(id) => setCash((list) => list.filter((c) => c.id !== id))}
       />

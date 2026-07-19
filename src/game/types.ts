@@ -11,6 +11,7 @@ export type {
   ShortcutDef,
   SignatureZoneDef,
   PropDef,
+  RoadDef,
   WallStyleDef,
   RaceDef,
   ModeDef,
