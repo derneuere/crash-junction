@@ -47,6 +47,7 @@ import type { GrassField } from '../grass';
 import { CarLod } from '../carlod';
 import { CarBlobShadows } from '../carshadow';
 import { DEFAULT_GRAPHICS, IS_MOBILE, type GraphicsSettings } from '../graphics';
+import { HeightLOD } from '../lod/heightlod';
 import { loadLevelProps } from '../props';
 import { BRAKE_INTENSITY, HEADLIGHT_INTENSITY, charActor, createBarrel, createPole, createVehicle, deformActor, exhaustAnchors, popWheel, repairVehicle, shatterGlass, type LoosePart } from '../vehicles';
 import { applyCarEnvScale, applyGlassParams, glassParams, setCarEnvMap, setPlayerEnvMap, type GlassParams } from '../geometry';
@@ -247,6 +248,11 @@ export class Game {
   private carShadows: CarBlobShadows | null = null;
   // the level's authored fog band; the drawDistance quality knob scales it
   private fogBase = { near: 55, far: 150 };
+  // height-driven screen-space LOD (lod/heightlod.ts): props + buildings
+  // register here as they build; frame() walks the ladder off RENDER time.
+  // Pure presentation (visible/castShadow flips) — pin-safe; composes with
+  // the fog-horizon prop cull through the shared CullRecords (propinstancer).
+  private propLod = new HeightLOD();
 
   private actors: Actor[] = [];
   private byBody = new Map<number, Actor>();
@@ -508,7 +514,7 @@ export class Game {
     this.levelId = ((Object.keys(LEVELS) as LevelId[]).find((id) => LEVELS[id] === level) ?? 'junction') as LevelId;
     this.heightAt = makeHeightSampler(level);
     this.phys = createPhysics();
-    const env = buildEnvironment(this.scene, this.phys, level);
+    const env = buildEnvironment(this.scene, this.phys, level, this.propLod);
     this.sea = env.sea;
     this.grass = env.grass;
     // SHARED FILE (grass agent owns grass.ts) — forced-cine touch only: the
@@ -522,7 +528,7 @@ export class Game {
     this.fogBase = { near: fog0.near, far: fog0.far };
     // prop colliders are synchronous and must exist before the first
     // physics step (their GLB visuals stream in whenever — see props.ts)
-    const levelProps = loadLevelProps(this.scene, this.phys, level);
+    const levelProps = loadLevelProps(this.scene, this.phys, level, this.propLod);
     this.propsGroup = levelProps.group;
     this.propCull = levelProps.cull;
     // prop anchors double as pass-by whoosh triggers (sense-of-speed A5):
@@ -693,6 +699,12 @@ export class Game {
       this.onResize(); // reallocate the canvas + composer + cloud buffers
     }
     this.applyRenderPath();
+  }
+
+  /** Dev/probe: the height-LOD ladder census — how many registered targets
+   *  are currently full / shadow-less / hidden (window.__game.lodStats()). */
+  lodStats(): { total: number; noShadow: number; hidden: number } {
+    return this.propLod.stats();
   }
 
   /** Enable/disable the sun's shadow depth pass (graphics setting). Off drops
@@ -3029,6 +3041,11 @@ export class Game {
     // render-time visibility flags keyed off the render camera, below the
     // sim's read-back line.
     if (this.gfx.props) this.propCull?.(this.camera.position.x, this.camera.position.z, (this.scene.fog as THREE.Fog).far * 1.15);
+    // height-LOD ladder: props/buildings whose PROJECTED height is a few px
+    // stop casting shadows, then stop drawing (see lod/heightlod.ts). Same
+    // pin-safe render-tail contract; composes with the fog cull above through
+    // the shared CullRecords (an object draws only when BOTH allow it).
+    this.propLod.update(this.camera, this.container.clientHeight);
     // CAR DRAW-CALL LOD (carlod.ts): profiling showed cars are the chase
     // view's #1 draw source (~33 draws each × 26 actors). Same pin-safe
     // render-tail contract as the prop cull above.
