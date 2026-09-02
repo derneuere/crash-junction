@@ -18,6 +18,16 @@ interface NightTag {
  *  lenses come on at dusk, but the low sun still outshines them. */
 const NIGHT_EMISSIVE_FACTOR: Record<TimeOfDay, number> = { day: 0, dusk: 0.55, night: 1 };
 
+/** The emissive level the sweep gives a tagged material at `t` — for
+ *  per-frame drivers (the player's brake lights) that layer on top of the
+ *  time-of-day baseline instead of replacing it. */
+export function nightEmissive(m: THREE.Material, t: TimeOfDay): number {
+  const tag = m.userData.night as NightTag | undefined;
+  if (!tag) return 0;
+  const day = tag.day ?? 0;
+  return day + (tag.intensity - day) * NIGHT_EMISSIVE_FACTOR[t];
+}
+
 export function applyTimeOfDay(scene: THREE.Scene, t: TimeOfDay): void {
   const f = NIGHT_EMISSIVE_FACTOR[t];
   const seen = new Set<THREE.Material>();

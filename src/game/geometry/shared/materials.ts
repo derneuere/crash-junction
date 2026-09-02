@@ -41,6 +41,18 @@ export const taillightMat = new THREE.MeshPhysicalMaterial({
 });
 taillightMat.userData.night = { intensity: 1.9 };
 
+/** Reverse lamps: a clear lens that lights white only while the car backs
+ *  up — no night baseline; Game drives the player's clone per frame. */
+export const reverseMat = new THREE.MeshPhysicalMaterial({
+  vertexColors: true,
+  roughness: 0.25,
+  metalness: 0.1,
+  clearcoat: 1,
+  clearcoatRoughness: 0.05,
+  emissive: 0xf4f6ff,
+  emissiveIntensity: 0,
+});
+
 /** Bare-chassis metal — interior platform, engine bay, trunk. */
 export const metalMat = new THREE.MeshStandardMaterial({
   vertexColors: true,
@@ -61,11 +73,12 @@ export const cabinMat = new THREE.MeshStandardMaterial({
 // the canonical material order — glass included so the day/night swap drives it
 // too. carEnv hasn't been set yet at module load, so this only records the
 // materials + their baseline env intensities, exactly as the old literal init.
-carMats.push(hullMat, glassMat, headlightMat, taillightMat, metalMat, cabinMat);
+carMats.push(hullMat, glassMat, headlightMat, taillightMat, reverseMat, metalMat, cabinMat);
 ENV_INTENSITY.set(hullMat, 0.75);
 ENV_INTENSITY.set(glassMat, 1.0);
 ENV_INTENSITY.set(headlightMat, 0.9);
 ENV_INTENSITY.set(taillightMat, 0.9);
+ENV_INTENSITY.set(reverseMat, 0.9);
 ENV_INTENSITY.set(metalMat, 0.8);
 ENV_INTENSITY.set(cabinMat, 0.25);
 
@@ -75,3 +88,4 @@ registerPlayerSwappable(hullMat, 0.9);
 registerPlayerSwappable(glassMat, 1.2);
 registerPlayerSwappable(headlightMat, 1.1);
 registerPlayerSwappable(taillightMat, 1.1);
+registerPlayerSwappable(reverseMat, 1.1);

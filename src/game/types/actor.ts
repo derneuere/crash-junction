@@ -49,6 +49,7 @@ export interface DeformablePart {
    *  groups after index surgery (the lenses wear emissive night materials). */
   head?: [number, number][];
   tail?: [number, number][];
+  reverse?: [number, number][];
   /** Vertex slot → representative slot at the same base position; built
    *  lazily on first crumple. Flat-shaded models duplicate every corner
    *  (split normals), so the deformer must weld displacement across the

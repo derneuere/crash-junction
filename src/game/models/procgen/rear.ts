@@ -2,13 +2,19 @@ import * as THREE from 'three';
 import type { CarRecipe } from './recipe';
 import { prism, type Soup, type V3 } from './soup';
 import { surfaceOf } from './surface';
+import {
+  AMBER, bezel, bounds, bowl, clipB, face, LAMP_FLOOR, LAMP_HOUSING, offsetPoly, plate, REVERSE_LENS, ribs, segment,
+  TAIL_DEEP, TAIL_DOME, TAIL_RIB, TAIL_RIB_SHADE, type LampFrame, type P2,
+} from './lampkit';
 
 // ────────────────────────────────────────────────────────────────────────────
-// Rear clip — Astra-H style. Taillight units hug the hatch-edge shoulders:
-// a near-black housing wedge carrying a red lens field (emissive tail role)
-// with an amber indicator and a white reverse element seated on dark backing
-// pads so the segments read separated, and the white upper segment tapering
-// along the hatch cutline. A garnish strip crosses under the window and a
+// Rear clip — Astra-H style. Taillight units hug the hatch-edge shoulders,
+// built from the lamp kit (lampkit.ts): one tall bevelled bezel per side
+// rising off the hatch, a dark housing floor, a red lens plate (emissive
+// tail role) carrying a red reflector bowl + bulb dome and Fresnel ribs,
+// an amber indicator and a clear reverse segment (its own emissive role,
+// lit while reversing) on dark rims, and the white upper segment tapering
+// along the hatch cutline as a ribbed clear plate. A garnish strip crosses under the window and a
 // shallow recess carries the plate. The bumper is a faceted body-colour wrap
 // (columns across the tail, corners pulled forward over the quarters, dark
 // full-width lower insert rows closing the underside) kept inside the
@@ -21,8 +27,9 @@ const WHITE_SEG = new THREE.Color(0xd8dadd); // reverse-lamp segment
 const GARNISH = new THREE.Color(0x878d95); // steel strip under the window
 const PLATE_WELL = new THREE.Color(0x33363b); // license recess shadow
 const PLATE = new THREE.Color(0xc9cccf); // the plate itself
-const HOUSING = new THREE.Color(0x141619); // taillight housing / segment rims
-const AMBER = new THREE.Color(0xd98a1e); // indicator segment
+const HOUSING = new THREE.Color(0x141619); // bumper insert rows
+const RIB_LIGHT = new THREE.Color(0xf0f2f4); // clear-plate rib slope
+const RIB_SHADE = new THREE.Color(0x8e9399); // clear-plate rib return
 const EXH_RIM = new THREE.Color(0x5a5f66); // dark-chrome exhaust tip
 const EXH_BORE = new THREE.Color(0x101216); // bore walls + inner disc
 const EXH_PIPE = new THREE.Color(0x26282c); // pipe run under the floor
@@ -32,6 +39,9 @@ interface ClipSoups {
   trim: Soup;
   head: Soup;
   tail: Soup;
+  reverse: Soup;
+  /** Lamp housings / bezels / rims — dressing, never cut into a panel. */
+  lampTrim: Soup;
 }
 
 interface ClipColors {
@@ -69,26 +79,48 @@ export function buildRearClip(recipe: CarRecipe, soups: ClipSoups, colors: ClipC
   if (recipe.parts.taillights === 'strip') {
     soups.tail.box(0, tail.bodyY - 0.07, zTail + 0.012, tail.halfW * 1.5, 0.05, 0.02, colors.tail);
   } else {
+    // local frame ON the hatch plane: b runs up the slanted hatch face, d is
+    // proud of it along its outward normal. Corners below are (|x|, y)
+    // world pairs converted onto the plane, so the layout reads like the
+    // old pads. The outline's (0.765, 0.005) corner is the unit's widest
+    // point on the tail face and is kept exactly there.
+    const ty = knee.bodyY - tail.bodyY, tz = tail.z - knee.z;
+    const tl = Math.hypot(ty, tz);
+    const vUp: V3 = [0, ty / tl, -tz / tl];
+    const nOut: V3 = [0, tz / tl, ty / tl];
+    const yRef = -0.12;
+    const P = (x: number, y: number): P2 => [x, (y - yRef) / vUp[1]];
     for (const m of [-1, 1]) {
-      // near-black housing wedge: wide at the bumper, sweeping up-outboard
-      pad(soups.trim, [[m * 0.4, -0.26], [m * 0.74, -0.26], [m * 0.75, 0.02], [m * 0.5, 0.02]], 0.012, 0.1, HOUSING);
-      // red lens field inset so the housing reads as a rim (emissive role)
-      pad(soups.tail, [[m * 0.425, -0.245], [m * 0.725, -0.245], [m * 0.735, 0.005], [m * 0.52, 0.005]], 0.026, 0.05, colors.tail);
-      // amber indicator inboard under the white segment, on a dark backing
-      pad(soups.trim, [[m * 0.53, -0.075], [m * 0.635, -0.075], [m * 0.638, -0.002], [m * 0.54, -0.002]], 0.03, 0.012, HOUSING);
-      pad(soups.trim, [[m * 0.542, -0.062], [m * 0.622, -0.062], [m * 0.625, -0.014], [m * 0.55, -0.014]], 0.037, 0.012, AMBER);
-      // white reverse element low-inboard, likewise rimmed
-      pad(soups.trim, [[m * 0.475, -0.19], [m * 0.578, -0.19], [m * 0.585, -0.112], [m * 0.49, -0.112]], 0.03, 0.012, HOUSING);
-      pad(soups.trim, [[m * 0.488, -0.177], [m * 0.565, -0.177], [m * 0.571, -0.125], [m * 0.5, -0.125]], 0.037, 0.012, WHITE_SEG);
-      // white upper segment tapering to a tip beside the hatch-glass corner,
-      // its own housing quad continuing the dark rim around the whole unit
-      pad(soups.trim, [[m * 0.485, 0.005], [m * 0.765, 0.005], [m * 0.795, 0.195], [m * 0.605, 0.195]], 0.008, 0.1, HOUSING);
-      pad(soups.trim, [[m * 0.5, 0.02], [m * 0.75, 0.02], [m * 0.775, 0.18], [m * 0.625, 0.18]], 0.018, 0.05, WHITE_SEG);
+      const f: LampFrame = { o: [0, yRef, hatchZ(yRef)], u: [m, 0, 0], v: vUp, n: nOut };
+      const outline: P2[] = [P(0.4, -0.26), P(0.74, -0.26), P(0.765, 0.005), P(0.78, 0.195), P(0.605, 0.195), P(0.5, 0.02)];
+      const LIP = 0.042, FLOOR = 0.02;
+      const lt = soups.lampTrim;
+      const inner = bezel(lt, f, outline, LIP, FLOOR, 0.012, LAMP_HOUSING);
+      face(lt, f, inner, FLOOR, LAMP_FLOOR);
+      // upper clear segment: a white ribbed plate tapering up the cutline
+      const upper = offsetPoly(clipB(inner, P(0, 0.035)[1], bounds(inner).b1), 0.003);
+      plate(lt, f, upper, FLOOR, FLOOR + 0.008, WHITE_SEG);
+      const ub = bounds(upper);
+      ribs(lt, f, ub.a0 + 0.03, ub.a1 - 0.03, ub.b0 + 0.008, ub.b1 - 0.008, 3, FLOOR + 0.008, 0.004, RIB_LIGHT, RIB_SHADE);
+      // red lens plate over the lower field, with the tail bulb's bowl
+      const red = offsetPoly(clipB(inner, bounds(inner).b0, P(0, 0.02)[1]), 0.003);
+      const c = P(0.645, -0.125);
+      const TOP = FLOOR + 0.01;
+      plate(soups.tail, f, red, FLOOR, TOP, colors.tail, { c, R: 0.058, seg: 12 });
+      bowl(soups.tail, f, c, 0.058, 12, TOP, 0.01, colors.tail, TAIL_DEEP, { h: 0.018, col: TAIL_DOME });
+      // Fresnel ribs under the bowl
+      ribs(soups.tail, f, 0.585, 0.715, P(0, -0.243)[1], P(0, -0.195)[1], 2, TOP, 0.005, TAIL_RIB, TAIL_RIB_SHADE);
+      // amber indicator (upper-inboard) and clear reverse lamp (lower-
+      // inboard), each on a dark rim so the segments read separated
+      const amber: P2[] = [P(0.515, -0.07), P(0.6, -0.07), P(0.6, -0.008), P(0.515, -0.008)];
+      segment(lt, lt, f, amber, TOP, TOP + 0.004, TOP + 0.01, 0.005, LAMP_HOUSING, AMBER);
+      const rev: P2[] = [P(0.462, -0.19), P(0.55, -0.19), P(0.55, -0.115), P(0.462, -0.115)];
+      segment(lt, soups.reverse, f, rev, TOP, TOP + 0.004, TOP + 0.01, 0.005, LAMP_HOUSING, REVERSE_LENS);
     }
   }
 
   // ── garnish strip across the hatch under the window, between the lights ─
-  pad(soups.trim, [[-0.58, 0.135], [0.58, 0.135], [0.58, 0.185], [-0.58, 0.185]], 0.014, 0.06, GARNISH);
+  pad(soups.trim, [[-0.55, 0.135], [0.55, 0.135], [0.55, 0.185], [-0.55, 0.185]], 0.014, 0.06, GARNISH);
 
   // ── license-plate recess: shallow dark inset centred on the hatch ───────
   pad(soups.trim, [[-0.27, -0.22], [0.27, -0.22], [0.27, -0.06], [-0.27, -0.06]], 0.008, 0.06, PLATE_WELL);

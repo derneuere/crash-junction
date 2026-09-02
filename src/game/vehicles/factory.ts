@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import * as CANNON from 'cannon-es';
 import { GRAVITY, SUSP_MAX_COMP, SUSP_SAG, SUSP_ZETA } from '../constants';
 import type { Actor, CollideEvent, DeformablePart, SuspensionCorner, VehicleSpec } from '../types';
-import { glassMat, headlightMat, hullMat, taillightMat, wheelGeometry, wheelMat } from '../geometry';
+import { glassMat, headlightMat, hullMat, reverseMat, taillightMat, wheelGeometry, wheelMat } from '../geometry';
 import type { VehicleModel } from '../models';
 
 export function registerDeformable(
@@ -11,6 +11,7 @@ export function registerDeformable(
   glass?: [number, number][],
   head?: [number, number][],
   tail?: [number, number][],
+  reverse?: [number, number][],
 ): void {
   const pos = mesh.geometry.attributes.position as THREE.BufferAttribute;
   const col = mesh.geometry.attributes.color as THREE.BufferAttribute;
@@ -21,6 +22,7 @@ export function registerDeformable(
     glass,
     head,
     tail,
+    reverse,
   });
 }
 
@@ -54,7 +56,7 @@ export function makeModelHull(model: VehicleModel, color: number): THREE.Mesh {
     for (let i = s; i < e; i++) col.setXYZ(i, c.r, c.g, c.b);
   }
   whitenGlass(col, model.glassRanges);
-  const mesh = new THREE.Mesh(geo, geo.groups.length ? [hullMat, glassMat, headlightMat, taillightMat] : hullMat);
+  const mesh = new THREE.Mesh(geo, geo.groups.length ? [hullMat, glassMat, headlightMat, taillightMat, reverseMat] : hullMat);
   mesh.castShadow = mesh.receiveShadow = true;
   return mesh;
 }
@@ -88,6 +90,13 @@ const modelWheelMat = new THREE.MeshStandardMaterial({ vertexColors: true, rough
 // render list recompiles the whole scene.
 export const HEADLIGHT_INTENSITY = 80; // candela (physical falloff)
 export const BRAKE_INTENSITY = 22;
+// Player lamp LENSES (the emissive hull groups, not the dynamic lights):
+// extra tail emissive while the brake input is held, reverse-lens emissive
+// while the body backs up, and the ramp both follow so a tapped pedal
+// fades instead of strobing. Render-tail state only — never sim.
+export const BRAKE_GLOW = 2.0;
+export const REVERSE_GLOW = 2.4;
+export const LAMP_RAMP = 0.08; // seconds, in and out
 
 export function makeVehicleLights(spec: VehicleSpec, group: THREE.Group): { head: THREE.SpotLight; brake: THREE.PointLight } {
   const lensY = -spec.rideHeight + 0.72; // group origin rides at COM height

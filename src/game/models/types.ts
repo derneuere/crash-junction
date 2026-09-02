@@ -19,6 +19,12 @@ export interface VehicleModel {
   glassRanges: [number, number][];
   headRanges: [number, number][]; // headlight lenses (bus: its light strip)
   tailRanges: [number, number][];
+  /** Reverse-lamp lenses — a white emissive role lit only while reversing. */
+  reverseRanges: [number, number][];
+  /** Lamp dressing (bezels, bowls, lens plates): display-only geometry
+   *  that never joins a panel cut and never measures a panel landmark, so
+   *  the panel boxes — sim state — are exactly the undressed body's. */
+  dressRanges: [number, number][];
   wheelL: THREE.BufferGeometry; // centered, radius = spec.wheelRadius
   wheelR: THREE.BufferGeometry;
   /** The same wheels at the builder's coarse density — swapped onto

@@ -37,6 +37,10 @@ const WHEEL = flag('--wheel', null);
 // --ref <image>: ALSO write <tag>-<pose>-vs.png with the render stacked over
 // the reference photo at matched width — the precise-comparison view.
 const REF = flag('--ref', null);
+// --tod night: moonlit studio with the lenses at the game's night emissive
+const TOD = flag('--tod', 'day');
+// --lamps brake,reverse: light the brake / reverse lenses (lamp-behaviour preview)
+const LAMPS = (flag('--lamps', '') || '').split(',').map((s) => s.trim());
 
 if (parseInt(process.versions.node, 10) < 18) {
   console.error(`Node ${process.versions.node} too old — use fnm exec --using=22.`);
@@ -125,6 +129,12 @@ try {
     WHEEL,
   );
   if (!ok) throw new Error(`unknown recipe id '${CAR}' (page cars: ${await page.evaluate(() => window.__proc.cars.join(','))})`);
+
+  await page.evaluate((tod, brake, reverse) => {
+    window.__proc.setLighting(tod);
+    window.__proc.setLamps(brake, reverse);
+  }, TOD === 'night' ? 'night' : 'day', LAMPS.includes('brake') ? 1 : 0, LAMPS.includes('reverse') ? 1 : 0);
+  console.log(`tris ${JSON.stringify(await page.evaluate(() => window.__proc.stats()))}`);
 
   const poses = ONLY ? ONLY.split(',').map((s) => s.trim()) : await page.evaluate(() => window.__proc.poses);
   const outDir = path.join(root, 'screenshots', 'proc');

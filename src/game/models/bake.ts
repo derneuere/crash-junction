@@ -8,6 +8,7 @@ import { measurePanelMetrics } from './metrics';
 import { cutPanelTemplates } from './cutting';
 import { buildInterior } from './interior';
 import { filterTrianglesByX, stripToPosNormal } from './mesh-utils';
+import { dressLamps } from './lampdress';
 
 const GLASS_MATS = ['windows', 'window', 'glass'];
 
@@ -18,6 +19,10 @@ interface BodyPrim {
   matName: string;
   color: THREE.Color;
   verts: number;
+  /** Per-vertex colours (lamp dressing shades its bowls); else `color`. */
+  colors?: Float32Array;
+  /** Lamp dressing rides the merge but never the size normalisation. */
+  dressing?: boolean;
 }
 
 export function bakeModel(gltf: { scene: THREE.Group }, cfg: ModelConfig, spec: VehicleSpec): VehicleModel {
@@ -59,6 +64,47 @@ export function bakeModel(gltf: { scene: THREE.Group }, cfg: ModelConfig, spec: 
   const isGlass = (p: BodyPrim) => GLASS_MATS.some((g) => p.matName.toLowerCase().includes(g));
   const isHead = (p: BodyPrim) => p.matName.toLowerCase().includes('headlight') || p.matName === 'Lights';
   const isTail = (p: BodyPrim) => p.matName.toLowerCase().includes('taillight');
+  const isReverse = (p: BodyPrim) => p.matName.toLowerCase().includes('reverse');
+
+  // the pack's own bounds drive the size normalisation below — captured
+  // BEFORE the lamp dressing joins, so bezels proud of the fascia can't
+  // rescale the body (wheel arches and panel boxes are sim state)
+  const rawBox = new THREE.Box3();
+  for (const p of bodyPrims) {
+    p.geo.computeBoundingBox();
+    rawBox.union(p.geo.boundingBox!);
+  }
+  // lamp units over the flat lamp polygons (lampdress.ts); their matNames
+  // route them through the same role classification as the pack's prims
+  const headName = (n: string) => n.toLowerCase().includes('headlight') || n === 'Lights';
+  const tailName = (n: string) => n.toLowerCase().includes('taillight');
+  // Each dressing prim is spliced in right BEHIND a pack prim of the same
+  // material slot (bezels after the paint body, bowls after the lamp prims)
+  // so it extends that prim's index run instead of opening a new material
+  // group — a group is a draw call, and the traffic pool is 20+ cars.
+  // Only the reverse lenses are a new slot (+1 group per car).
+  const dressing = dressLamps(bodyPrims, headName, tailName, !!bodyPrims[0].geo.index).map((d) => ({
+    geo: d.geo,
+    matName: d.matName,
+    color: new THREE.Color(0x141619),
+    verts: (d.geo.attributes.position as THREE.BufferAttribute).count,
+    colors: d.colors,
+    dressing: true,
+  }));
+  const takeDress = (name: string): BodyPrim[] => {
+    const i = dressing.findIndex((d) => d.matName === name);
+    return i < 0 ? [] : dressing.splice(i, 1);
+  };
+  const spliced: BodyPrim[] = [];
+  for (const p of bodyPrims) {
+    spliced.push(p);
+    if (p === biggest) spliced.push(...takeDress('LampBezel'));
+    if (isHead(p)) spliced.push(...takeDress('Headlights'));
+    if (isTail(p)) spliced.push(...takeDress('TailLights'), ...takeDress('ReverseLights'));
+  }
+  spliced.push(...dressing); // anything without a host prim
+  bodyPrims.length = 0;
+  bodyPrims.push(...spliced);
 
   // merge primitives → one deformable geometry + role vertex ranges
   const merged = mergeGeometries(bodyPrims.map((p) => p.geo), false);
@@ -69,17 +115,37 @@ export function bakeModel(gltf: { scene: THREE.Group }, cfg: ModelConfig, spec: 
   const glassRanges: [number, number][] = [];
   const headRanges: [number, number][] = [];
   const tailRanges: [number, number][] = [];
+  const reverseRanges: [number, number][] = [];
+  const dressRanges: [number, number][] = [];
+  // the pack's own body, merged alone: the panel landmarks are measured on
+  // THIS so the dressing can't move a panel box (sim state)
+  const undressed = mergeGeometries(bodyPrims.filter((p) => !p.dressing).map((p) => p.geo), false);
+  if (!undressed) throw new Error(`${cfg.url}: merge failed`);
+  // its glass ranges index ITS buffer (the dressing is spliced between the
+  // pack's prims in the merged one, so those ranges don't transfer)
+  const undressedGlass: [number, number][] = [];
+  let uCursor = 0;
+  for (const p of bodyPrims) {
+    if (p.dressing) continue;
+    if (isGlass(p)) undressedGlass.push([uCursor, uCursor + p.verts]);
+    uCursor += p.verts;
+  }
   let cursor = 0;
   for (const p of bodyPrims) {
-    for (let i = cursor; i < cursor + p.verts; i++) {
-      colors[i * 3] = p.color.r;
-      colors[i * 3 + 1] = p.color.g;
-      colors[i * 3 + 2] = p.color.b;
+    if (p.dressing) dressRanges.push([cursor, cursor + p.verts]);
+    if (p.colors) colors.set(p.colors, cursor * 3);
+    else {
+      for (let i = cursor; i < cursor + p.verts; i++) {
+        colors[i * 3] = p.color.r;
+        colors[i * 3 + 1] = p.color.g;
+        colors[i * 3 + 2] = p.color.b;
+      }
     }
     if (isPaint(p)) paintRanges.push([cursor, cursor + p.verts]);
     if (isGlass(p)) glassRanges.push([cursor, cursor + p.verts]);
     if (isHead(p)) headRanges.push([cursor, cursor + p.verts]);
     else if (isTail(p)) tailRanges.push([cursor, cursor + p.verts]);
+    else if (isReverse(p)) reverseRanges.push([cursor, cursor + p.verts]);
     cursor += p.verts;
     p.geo.dispose();
   }
@@ -158,8 +224,7 @@ export function bakeModel(gltf: { scene: THREE.Group }, cfg: ModelConfig, spec: 
 
   // normalize the body to spec dims: center xz, stretch to width/height/
   // length, then drop it so the model's wheel line lands on the game's
-  merged.computeBoundingBox();
-  const box = merged.boundingBox!;
+  const box = rawBox; // undressed bounds (see above)
   const size = box.getSize(new THREE.Vector3());
   const center = box.getCenter(new THREE.Vector3());
   const sx = spec.width / size.x;
@@ -170,6 +235,9 @@ export function bakeModel(gltf: { scene: THREE.Group }, cfg: ModelConfig, spec: 
   merged.scale(sx, sy, sz);
   merged.translate(0, wheelY - rawWheelY * sy, 0);
   merged.computeVertexNormals();
+  undressed.translate(-center.x, 0, -center.z);
+  undressed.scale(sx, sy, sz);
+  undressed.translate(0, wheelY - rawWheelY * sy, 0);
   // PS2-style paint: curved panels get smooth (creased) normals so env
   // reflections sweep across them; hard edges keep their split normals.
   // Done before the panel cuts, so the cutouts inherit the smoothing.
@@ -184,13 +252,16 @@ export function bakeModel(gltf: { scene: THREE.Group }, cfg: ModelConfig, spec: 
     zRear: (rawZRear - center.z) * sz,
   };
 
-  const metrics = measurePanelMetrics(merged, arch, spec, glassRanges);
+  const metrics = measurePanelMetrics(undressed, arch, spec, undressedGlass);
+  undressed.dispose();
   const model: VehicleModel = {
     body: merged,
     paintRanges,
     glassRanges,
     headRanges,
     tailRanges,
+    reverseRanges,
+    dressRanges,
     wheelL,
     wheelR,
     wheelCoarseL,
@@ -203,25 +274,27 @@ export function bakeModel(gltf: { scene: THREE.Group }, cfg: ModelConfig, spec: 
     // built BEFORE the panel cuts, so width probes still see the door skin
     interior: buildInterior(metrics, arch, spec, merged),
   };
-  model.panelCuts = cutPanelTemplates(model, panelDefs(spec, model));
-  applyHullGroups(merged, glassRanges, headRanges, tailRanges); // after the cuts replace the index
+  model.panelCuts = cutPanelTemplates(model, panelDefs(spec, model), dressRanges);
+  applyHullGroups(merged, glassRanges, headRanges, tailRanges, reverseRanges); // after the cuts replace the index
   return model;
 }
 
 /** Split the hull's index into material groups so one mesh can wear paint,
  *  mirror glass and light lenses at once ([hullMat, glassMat, headlightMat,
- *  taillightMat]). Must rerun after any index surgery — panel cuts, pane
+ *  taillightMat, reverseMat]). Must rerun after any index surgery — panel cuts, pane
  *  blowouts, repair reglaze — because groups address index positions. */
 export function applyHullGroups(
   geo: THREE.BufferGeometry,
   glass: [number, number][],
   head: [number, number][],
   tail: [number, number][],
+  reverse: [number, number][] = [],
 ): void {
   const idx = geo.index;
-  if (!idx || !idx.count || (!glass.length && !head.length && !tail.length)) return;
+  if (!idx || !idx.count || (!glass.length && !head.length && !tail.length && !reverse.length)) return;
   const within = (v: number, ranges: [number, number][]) => ranges.some(([s, e]) => v >= s && v < e);
-  const slot = (v: number) => (within(v, glass) ? 1 : within(v, head) ? 2 : within(v, tail) ? 3 : 0);
+  const slot = (v: number) =>
+    within(v, glass) ? 1 : within(v, head) ? 2 : within(v, tail) ? 3 : within(v, reverse) ? 4 : 0;
   geo.clearGroups();
   let runStart = 0;
   let runMat = slot(idx.getX(0));

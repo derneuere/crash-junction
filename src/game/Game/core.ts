@@ -60,9 +60,9 @@ import { CarBlobShadows } from '../carshadow';
 import { DEFAULT_GRAPHICS, IS_MOBILE, type GraphicsSettings } from '../graphics';
 import { HeightLOD } from '../lod/heightlod';
 import { loadLevelProps } from '../props';
-import { BRAKE_INTENSITY, HEADLIGHT_INTENSITY, charActor, createBarrel, createPole, createVehicle, deformActor, exhaustAnchors, popWheel, repairVehicle, shatterGlass, type LoosePart } from '../vehicles';
-import { applyCarEnvScale, applyGlassParams, glassParams, setCarEnvMap, setPlayerEnvMap, type GlassParams } from '../geometry';
-import { applyTimeOfDay, type TimeOfDay } from '../daynight';
+import { BRAKE_GLOW, BRAKE_INTENSITY, HEADLIGHT_INTENSITY, LAMP_RAMP, REVERSE_GLOW, charActor, createBarrel, createPole, createVehicle, deformActor, exhaustAnchors, popWheel, repairVehicle, shatterGlass, type LoosePart } from '../vehicles';
+import { applyCarEnvScale, applyGlassParams, glassParams, playerSwap, reverseMat, setCarEnvMap, setPlayerEnvMap, taillightMat, type GlassParams } from '../geometry';
+import { applyTimeOfDay, nightEmissive, type TimeOfDay } from '../daynight';
 import { SKY_PRESETS, SkyRig, SunFlare } from '../skyenv';
 import { PlayerReflections } from '../reflections';
 import { Postfx, speedBlurStrength } from '../postfx';
@@ -287,6 +287,11 @@ export class Game {
   private byBody = new Map<number, Actor>();
   private looseParts: LoosePart[] = [];
   private player: Actor | null = null;
+  // player lamp glow (0..1): brake lenses + brake point, reverse lenses.
+  // Render-tail presentation state — ramped in updatePlayerLamps, never
+  // read by the fixed step or the world hash.
+  private brakeGlow = 0;
+  private reverseGlow = 0;
 
   private state = GameState.Idle;
   private timeScale = 1;
@@ -2645,6 +2650,7 @@ export class Game {
         }
       }
     }
+    this.updatePlayerLamps(dt);
     // weight-transfer lean is purely visual — the physics body stays level
     // so the suspension rays and collision box are unaffected
     if (this.player && !this.player.crashed) {
@@ -2656,6 +2662,46 @@ export class Game {
       lp.mesh.position.set(lp.body.position.x, lp.body.position.y, lp.body.position.z);
       lp.mesh.quaternion.set(lp.body.quaternion.x, lp.body.quaternion.y, lp.body.quaternion.z, lp.body.quaternion.w);
     }
+  }
+
+  /** Player lamp lenses — presentation only, in the render tail. Brake
+   *  lights brighten on the brake INPUT (control.braking is the sim's own
+   *  read of the recorded keys, so a replay lights them identically) and
+   *  the reverse lenses come on once the body actually backs up along its
+   *  forward axis. Both ramp over LAMP_RAMP so a tapped pedal fades rather
+   *  than strobing. The player's hull wears the swapped material CLONES
+   *  (adoptPlayerMaterials), so only its lenses change — traffic keeps the
+   *  shared showroom lens materials and the daynight sweep alone. */
+  private updatePlayerLamps(dt: number): void {
+    const p = this.player;
+    if (!p) return;
+    const alive = !p.crashed && !p.exploded;
+    // hull forward = local −z through the body quaternion
+    const q = p.body.quaternion;
+    const fx = -2 * (q.x * q.z + q.w * q.y);
+    const fy = -2 * (q.y * q.z - q.w * q.x);
+    const fz = -(1 - 2 * (q.x * q.x + q.y * q.y));
+    const v = p.body.velocity;
+    const along = v.x * fx + v.y * fy + v.z * fz;
+    const brakeTarget = alive && this.control.braking ? 1 : 0;
+    const reverseTarget = alive && along < -0.3 ? 1 : 0;
+    const step = dt > 0 ? Math.min(1, dt / LAMP_RAMP) : 1;
+    this.brakeGlow += Math.max(-step, Math.min(step, brakeTarget - this.brakeGlow));
+    this.reverseGlow += Math.max(-step, Math.min(step, reverseTarget - this.reverseGlow));
+    const tail = playerSwap.get(taillightMat);
+    if (tail) {
+      tail.emissiveIntensity = nightEmissive(tail, this.timeOfDay) + BRAKE_GLOW * this.brakeGlow;
+      // brighter red tone-maps toward salmon; pull the emissive to a purer
+      // red as it brightens so a brake light stays RED, only hotter
+      const e = taillightMat.emissive;
+      tail.emissive.setRGB(e.r, e.g * (1 - 0.7 * this.brakeGlow), e.b * (1 - 0.7 * this.brakeGlow));
+    }
+    const rev = playerSwap.get(reverseMat);
+    if (rev) rev.emissiveIntensity = REVERSE_GLOW * this.reverseGlow;
+    // the night brake point follows the same ramp (visible only at night —
+    // syncMeshes owns visibility; intensity never churns the light list)
+    const brake = p.nightLights?.brake;
+    if (brake) brake.intensity = BRAKE_INTENSITY * this.brakeGlow;
   }
 
   // wheel meshes ride the suspension and spin with the wheel's OWN angular
