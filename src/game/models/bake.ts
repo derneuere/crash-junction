@@ -2,12 +2,12 @@ import * as THREE from 'three';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import type { VehicleSpec } from '../types';
 import { panelDefs } from '../panels';
-import { applyNormalSmoothing, buildNormalSmoothing } from '../geometry';
+import { applyNormalSmoothing, buildNormalSmoothing, buildWheelGeometry, type WheelStyle } from '../geometry';
 import type { ModelConfig, VehicleModel } from './types';
 import { measurePanelMetrics } from './metrics';
 import { cutPanelTemplates } from './cutting';
 import { buildInterior } from './interior';
-import { filterTrianglesByX, stripToPosNormal, wheelHubDetail } from './mesh-utils';
+import { filterTrianglesByX, stripToPosNormal } from './mesh-utils';
 
 const GLASS_MATS = ['windows', 'window', 'glass'];
 
@@ -142,32 +142,19 @@ export function bakeModel(gltf: { scene: THREE.Group }, cfg: ModelConfig, spec: 
   const rawX = Math.max(...wheelGeos.map((w) => Math.abs(w.x)));
   const rawWheelY = wheelGeos.reduce((s, w) => s + w.y, 0) / wheelGeos.length;
 
-  // pick one left wheel as the template (x < 0 after yaw normalization)
-  const tmpl = wheelGeos.reduce((a, b) => (b.x < a.x ? b : a));
-  tmpl.geo.computeBoundingBox();
-  const tb = tmpl.geo.boundingBox!;
-  const rawRadius = (tb.max.y - tb.min.y) / 2 || 0.3;
-  const ws = spec.wheelRadius / rawRadius;
-  let wheelL = tmpl.geo;
-  wheelL.scale(ws, ws, ws);
-  // Baked wheels are a near-flat dark disc/cap that reads as static no matter
-  // how fast it spins. Merge a contrasting hub + radial spokes onto the ±X
-  // faces (same trick as the procedural wheelGeometry) so the player's wheel
-  // roll is legible. Deterministic, presentation-only — runs once at bake.
-  // Everything is forced non-indexed so the merge succeeds regardless of the
-  // source wheel's index state (wheels are display-only, never deformed).
-  const wheelNI = wheelL.index ? wheelL.toNonIndexed() : wheelL;
-  const withHub = mergeGeometries([wheelNI, ...wheelHubDetail(spec.wheelRadius)], false);
-  if (withHub) {
-    if (wheelNI !== wheelL) wheelNI.dispose();
-    wheelL.dispose();
-    wheelL = withHub;
-  } else if (wheelNI !== wheelL) {
-    wheelNI.dispose();
-  }
-  const wheelR = wheelL.clone();
-  wheelR.rotateY(Math.PI);
-  for (const w of wheelGeos) if (w.geo !== wheelL && w.geo !== tmpl.geo) w.geo.dispose();
+  // The packs' wheels are near-flat dark discs that read as static no matter
+  // how fast they spin, so only their PLACEMENT is kept (the arch metrics
+  // above). The templates themselves come from the shared parametric builder
+  // — the same design the generated cars and the generic wheel use — at the
+  // spec's radius, so the suspension seating is exactly as before. Alloys on
+  // cars, pressed steel on the bus. Deterministic, presentation-only, once
+  // per bake.
+  for (const w of wheelGeos) w.geo.dispose();
+  const style: WheelStyle = spec.variant === 'bus' ? 'steelie' : 'five-spoke';
+  const wheelL = buildWheelGeometry(style, spec.wheelRadius, 'L');
+  const wheelR = buildWheelGeometry(style, spec.wheelRadius, 'R');
+  const wheelCoarseL = buildWheelGeometry(style, spec.wheelRadius, 'L', 'coarse');
+  const wheelCoarseR = buildWheelGeometry(style, spec.wheelRadius, 'R', 'coarse');
 
   // normalize the body to spec dims: center xz, stretch to width/height/
   // length, then drop it so the model's wheel line lands on the game's
@@ -206,6 +193,9 @@ export function bakeModel(gltf: { scene: THREE.Group }, cfg: ModelConfig, spec: 
     tailRanges,
     wheelL,
     wheelR,
+    wheelCoarseL,
+    wheelCoarseR,
+    showroomWheels: true, // parametric wheels — the garage should show THEM
     arch,
     wheelY,
     panelMetrics: metrics,

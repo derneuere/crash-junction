@@ -115,10 +115,12 @@ export function buildWheels(spec: VehicleSpec, group: THREE.Group, model?: Vehic
   ];
   for (const [wx, wz] of corners) {
     // no model: the shared generic wheel — steel rims on the heavy variants, alloys on cars
-    const geo = model
-      ? (wx < 0 ? model.wheelL : model.wheelR)
-      : wheelGeometry(spec.wheelRadius, spec.variant === 'sedan' ? 'five-spoke' : 'steelie', wx < 0 ? 'L' : 'R');
+    const side = wx < 0 ? 'L' : 'R';
+    const style = spec.variant === 'sedan' ? 'five-spoke' : 'steelie';
+    const geo = model ? (wx < 0 ? model.wheelL : model.wheelR) : wheelGeometry(spec.wheelRadius, style, side);
     const wh = new THREE.Mesh(geo, model ? modelWheelMat : wheelMat);
+    // the coarse twin carlod.ts swaps in on non-player cars past the near ring
+    wh.userData.lodGeometry = model ? (wx < 0 ? model.wheelCoarseL : model.wheelCoarseR) : wheelGeometry(spec.wheelRadius, style, side, 'coarse');
     wh.position.set(wx, -(spec.rideHeight - spec.wheelRadius), wz);
     wh.castShadow = true;
     group.add(wh);

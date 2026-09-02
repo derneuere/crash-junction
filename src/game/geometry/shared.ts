@@ -20,6 +20,6 @@ export {
 
 export { wheelMat, wheelGeometry, applyUniformColor, makeColoredBox } from './shared/wheels';
 export { buildWheelGeometry, TYRE_HALF_WIDTH } from './shared/wheelBuilder';
-export type { WheelStyle, WheelSide } from './shared/wheelBuilder';
+export type { WheelStyle, WheelSide, WheelDetail } from './shared/wheelBuilder';
 
 export { buildNormalSmoothing, applyNormalSmoothing } from './shared/normals';

@@ -1,5 +1,5 @@
 import type * as THREE from 'three';
-import { buildWheelGeometry, type WheelStyle } from '../../geometry';
+import { buildWheelGeometry, type WheelDetail, type WheelStyle } from '../../geometry';
 
 // ────────────────────────────────────────────────────────────────────────────
 // Wheel templates for the generated cars — the same contract as the baked
@@ -10,6 +10,6 @@ import { buildWheelGeometry, type WheelStyle } from '../../geometry';
 // ────────────────────────────────────────────────────────────────────────────
 
 /** Left + right wheel template pair for a style. */
-export function buildWheelPair(style: WheelStyle, r: number): { wheelL: THREE.BufferGeometry; wheelR: THREE.BufferGeometry } {
-  return { wheelL: buildWheelGeometry(style, r, 'L'), wheelR: buildWheelGeometry(style, r, 'R') };
+export function buildWheelPair(style: WheelStyle, r: number, detail: WheelDetail = 'full'): { wheelL: THREE.BufferGeometry; wheelR: THREE.BufferGeometry } {
+  return { wheelL: buildWheelGeometry(style, r, 'L', detail), wheelR: buildWheelGeometry(style, r, 'R', detail) };
 }

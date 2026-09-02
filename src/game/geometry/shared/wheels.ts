@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { buildWheelGeometry, type WheelSide, type WheelStyle } from './wheelBuilder';
+import { buildWheelGeometry, type WheelDetail, type WheelSide, type WheelStyle } from './wheelBuilder';
 
 // White base material: the dark tyre / bright rim / hub all ride in per-vertex
 // colours so the wheel's rotation is legible (a flat-dark cylinder reads as
@@ -12,14 +12,14 @@ export const wheelMat = new THREE.MeshStandardMaterial({ vertexColors: true, rou
 const wheelGeoCache = new Map<string, THREE.BufferGeometry>();
 
 /** Shared procedural road wheel for anything without a modelled wheel: the
- *  garage's baked roster, the tanker, the no-model fallback. One parametric
- *  build per (style, side, radius), cached for the life of the page — callers
- *  must NOT dispose or track it per car. */
-export function wheelGeometry(r: number, style: WheelStyle = 'five-spoke', side: WheelSide = 'L'): THREE.BufferGeometry {
-  const key = `${style}/${side}/${r}`;
+ *  tanker, the no-model fallback. One parametric build per (style, side,
+ *  radius, detail), cached for the life of the page — callers must NOT
+ *  dispose or track it per car. */
+export function wheelGeometry(r: number, style: WheelStyle = 'five-spoke', side: WheelSide = 'L', detail: WheelDetail = 'full'): THREE.BufferGeometry {
+  const key = `${style}/${side}/${r}/${detail}`;
   let g = wheelGeoCache.get(key);
   if (!g) {
-    g = buildWheelGeometry(style, r, side);
+    g = buildWheelGeometry(style, r, side, detail);
     wheelGeoCache.set(key, g);
   }
   return g;

@@ -85,6 +85,7 @@ export function buildProceduralModel(recipe: CarRecipe, spec: VehicleSpec): Vehi
     door: { ...metrics.door, z0: Math.max(metrics.door.z0, recipe.cabin.z0 - 0.12) },
   };
   const { wheelL, wheelR } = buildWheelPair(recipe.wheels.style, spec.wheelRadius);
+  const coarse = buildWheelPair(recipe.wheels.style, spec.wheelRadius, 'coarse');
 
   const model: VehicleModel = {
     body: geo,
@@ -94,6 +95,8 @@ export function buildProceduralModel(recipe: CarRecipe, spec: VehicleSpec): Vehi
     tailRanges,
     wheelL,
     wheelR,
+    wheelCoarseL: coarse.wheelL,
+    wheelCoarseR: coarse.wheelR,
     showroomWheels: true, // parametric wheels — the garage should show THEM
     arch,
     wheelY,

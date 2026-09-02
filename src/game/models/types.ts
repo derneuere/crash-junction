@@ -21,6 +21,10 @@ export interface VehicleModel {
   tailRanges: [number, number][];
   wheelL: THREE.BufferGeometry; // centered, radius = spec.wheelRadius
   wheelR: THREE.BufferGeometry;
+  /** The same wheels at the builder's coarse density — swapped onto
+   *  non-player cars past the near ring by carlod.ts (presentation only). */
+  wheelCoarseL: THREE.BufferGeometry;
+  wheelCoarseR: THREE.BufferGeometry;
   /** True when wheelL/R are showroom-quality (procgen builds parametric
    *  wheels). The garage substitutes its generic wheel otherwise — the baked
    *  GLB wheels are near-flat discs that read broken at showroom distance. */

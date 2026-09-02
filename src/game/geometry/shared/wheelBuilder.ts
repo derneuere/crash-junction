@@ -25,12 +25,17 @@ export type WheelStyle = 'seven-spoke' | 'steelie' | 'five-spoke' | 'turbine' | 
 /** Which side of the car the wheel bolts to: the alloy face points outboard
  *  (-X for the left wheel, +X for the right). */
 export type WheelSide = 'L' | 'R';
+/** Mesh density. 'full' is the player's / near-field wheel; 'coarse' is the
+ *  same design at half the circumferential segments with the tread grooves,
+ *  spoke crowns and lug nuts dropped — for traffic beyond a few car lengths
+ *  (carlod.ts swaps it in) and anything else that draws by the dozen. */
+export type WheelDetail = 'full' | 'coarse';
 
 /** Tyre half-width as a fraction of the radius — the width the wheel wells,
  *  baked hub detail and garage seating were all sized against. */
 export const TYRE_HALF_WIDTH = 0.38;
 
-const SEGS = 24; // circumferential segments of every revolved ring
+const SEGS: Record<WheelDetail, number> = { full: 24, coarse: 12 }; // circumferential segments of every revolved ring
 
 // colours (per-vertex; the material is a white MeshStandard with vertexColors)
 const SIDEWALL = new THREE.Color(0x121416);
@@ -89,6 +94,8 @@ class WheelMesh {
   private col: number[] = [];
   private idx: number[] = [];
 
+  constructor(private readonly segs: number) {}
+
   vertex(x: number, y: number, z: number, nx: number, ny: number, nz: number, c: THREE.Color): number {
     this.pos.push(x, y, z);
     this.nrm.push(nx, ny, nz);
@@ -96,12 +103,13 @@ class WheelMesh {
     return this.pos.length / 3 - 1;
   }
 
-  /** One ring of SEGS vertices at axial x / radius rho with the profile
+  /** One ring of `segs` vertices at axial x / radius rho with the profile
    *  normal (nx, nrho) swept around the axle. Returns the first index. */
   ring(x: number, rho: number, nx: number, nrho: number, c: THREE.Color): number {
     const base = this.pos.length / 3;
-    for (let k = 0; k < SEGS; k++) {
-      const a = (k / SEGS) * Math.PI * 2;
+    const n = this.segs;
+    for (let k = 0; k < n; k++) {
+      const a = (k / n) * Math.PI * 2;
       const ca = Math.cos(a), sa = Math.sin(a);
       this.vertex(x, rho * ca, rho * sa, nx, nrho * ca, nrho * sa, c);
     }
@@ -112,8 +120,9 @@ class WheelMesh {
    *  vertex normals (checked on the first quad, applied to all). */
   band(a: number, b: number): void {
     const flip = this.faceDot(a, a + 1, b + 1) < 0;
-    for (let k = 0; k < SEGS; k++) {
-      const k1 = (k + 1) % SEGS;
+    const n = this.segs;
+    for (let k = 0; k < n; k++) {
+      const k1 = (k + 1) % n;
       const i0 = a + k, i1 = a + k1, i2 = b + k1, i3 = b + k;
       if (flip) this.idx.push(i0, i2, i1, i0, i3, i2);
       else this.idx.push(i0, i1, i2, i0, i2, i3);
@@ -123,8 +132,9 @@ class WheelMesh {
   /** Triangle fan from a centre vertex to a ring. */
   fan(centre: number, ring: number): void {
     const flip = this.faceDot(centre, ring, ring + 1) < 0;
-    for (let k = 0; k < SEGS; k++) {
-      const k1 = (k + 1) % SEGS;
+    const n = this.segs;
+    for (let k = 0; k < n; k++) {
+      const k1 = (k + 1) % n;
       if (flip) this.idx.push(centre, ring + k1, ring + k);
       else this.idx.push(centre, ring + k, ring + k1);
     }
@@ -240,9 +250,10 @@ function revolve(m: WheelMesh, pts: ProfilePoint[], colors: THREE.Color[]): void
 const yz = (a: number, rad: number): [number, number] => [Math.cos(a) * rad, Math.sin(a) * rad];
 
 /** Build one wheel. The alloy face points +X; 'L' turns it to face -X. */
-export function buildWheelGeometry(style: WheelStyle, r: number, side: WheelSide): THREE.BufferGeometry {
+export function buildWheelGeometry(style: WheelStyle, r: number, side: WheelSide, detail: WheelDetail = 'full'): THREE.BufferGeometry {
   const p = STYLES[style];
-  const m = new WheelMesh();
+  const coarse = detail === 'coarse';
+  const m = new WheelMesh(SEGS[detail]);
   const hw = r * TYRE_HALF_WIDTH;
   const rimR = r * p.rimR;
   const barrelR = rimR * p.barrel;
@@ -251,7 +262,8 @@ export function buildWheelGeometry(style: WheelStyle, r: number, side: WheelSide
   const xLip = hw * 0.9; // bright lip face, just behind the bead so the rubber overlaps it
   const xTop = xLip - hw * p.dish; // spoke / dish top plane
   const xFloor = xTop - hw * 0.1; // dark window floor behind the spokes
-  const xRidge = xTop + hw * p.crown; // spoke crown ridge = hub boss top
+  const crown = coarse ? 0 : p.crown; // coarse: flat spoke tops, one facet each
+  const xRidge = xTop + hw * crown; // spoke crown ridge = hub boss top
   const bossR = rimR * p.bossR;
   const capR = bossR * p.capR;
   const capH = hw * p.capH;
@@ -273,12 +285,14 @@ export function buildWheelGeometry(style: WheelStyle, r: number, side: WheelSide
   seg(-xBead, rimR, INNER, true); // inboard dish, flat and dark
   seg(-hw, r * 0.8, SIDEWALL); // inboard sidewall bulge
   seg(-tw, r, SIDEWALL); // rounded inboard shoulder
-  seg(-g - gw, r, TREAD);
-  seg(-g, r * 0.985, GROOVE);
-  seg(-g + gw, r, GROOVE);
-  seg(g - gw, r, TREAD);
-  seg(g, r * 0.985, GROOVE);
-  seg(g + gw, r, GROOVE);
+  if (!coarse) {
+    seg(-g - gw, r, TREAD);
+    seg(-g, r * 0.985, GROOVE);
+    seg(-g + gw, r, GROOVE);
+    seg(g - gw, r, TREAD);
+    seg(g, r * 0.985, GROOVE);
+    seg(g + gw, r, GROOVE);
+  }
   seg(tw, r, TREAD);
   seg(hw * 0.93, r * 0.925, SIDEWALL); // shoulder
   seg(hw, r * 0.8, SIDEWALL); // sidewall bulge (widest point)
@@ -319,7 +333,7 @@ export function buildWheelGeometry(style: WheelStyle, r: number, side: WheelSide
       const [ly0, lz0] = yz(s0.ang - s0.half, s0.rho), [ry0, rz0] = yz(s0.ang + s0.half, s0.rho);
       const [ly1, lz1] = yz(s1.ang - s1.half, s1.rho), [ry1, rz1] = yz(s1.ang + s1.half, s1.rho);
       const [cy0, cz0] = yz(s0.ang, s0.rho), [cy1, cz1] = yz(s1.ang, s1.rho);
-      if (p.crown > 0) {
+      if (crown > 0) {
         // two facets meeting at a raised ridge so the light picks one side
         m.quad([xTop, ly0, lz0], [xTop, ly1, lz1], [xRidge, cy1, cz1], [xRidge, cy0, cz0], p.face, deep);
         m.quad([xTop, ry0, rz0], [xTop, ry1, rz1], [xRidge, cy1, cz1], [xRidge, cy0, cz0], p.face, deep);
@@ -334,7 +348,7 @@ export function buildWheelGeometry(style: WheelStyle, r: number, side: WheelSide
   }
 
   // ── lug bolts on the boss top, between the cap and the boss edge ──
-  if (p.bolts > 0) {
+  if (p.bolts > 0 && !coarse) {
     const rb = (capR + bossR) / 2;
     const s = r * 0.028; // half-size
     const h = hw * 0.035;

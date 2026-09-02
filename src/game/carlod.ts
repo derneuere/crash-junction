@@ -22,6 +22,12 @@ import type { Actor } from './types';
 //               car's innards are fully occluded at any distance, yet they
 //               cost 2 draws each; the whole 26-car field is pristine at the
 //               race start
+//   > NEAR      wheels swap to their coarse twin (factory.ts tags each wheel
+//               mesh with userData.lodGeometry): the parametric wheel is
+//               ~1.1k triangles, and four of them on every car in the field
+//               would be the biggest triangle source after the terrain, while
+//               past a few car lengths the tread grooves and lug nuts are
+//               sub-pixel anyway. Same draw count, a third of the triangles.
 //   > FAR       panels + wheels + small bits hidden -> hull-only (~4 draws)
 //   > fog line  whole group hidden (was invisible anyway)
 // and, once per car, everything except the hull stops casting shadows — the
@@ -40,9 +46,18 @@ const NEAR_SHOW = 24;
 const FAR_HIDE = 52;
 const FAR_SHOW = 44;
 
+interface WheelLod {
+  mesh: THREE.Mesh;
+  full: THREE.BufferGeometry;
+  coarse: THREE.BufferGeometry;
+}
+
 interface CarLodState {
   /** attachments safe to drop at FAR: panels, wheels, wing, small bits */
   small: THREE.Object3D[];
+  /** wheel meshes with a coarse geometry twin (see NEAR above) */
+  wheels: WheelLod[];
+  wheelsFull: boolean;
   /** the crash-wound innards mesh(es) — drawn only while damaged AND near */
   interior: THREE.Object3D[];
   interiorShown: boolean;
@@ -89,7 +104,9 @@ export class CarLod {
         hull = m;
       }
     }
-    const state: CarLodState = { small: [], interior: [], interiorShown: true, farHidden: false, groupHidden: false };
+    const state: CarLodState = {
+      small: [], wheels: [], wheelsFull: true, interior: [], interiorShown: true, farHidden: false, groupHidden: false,
+    };
     if (hull) {
       this.hulls.push(hull);
       hull.castShadow = this.hullsCast; // blob tier may already be active
@@ -99,6 +116,8 @@ export class CarLod {
       const r = m.geometry.boundingSphere?.radius ?? 0;
       if (!m.castShadow && r > 1.5) state.interior.push(m);
       else state.small.push(m);
+      const coarse = m.userData.lodGeometry as THREE.BufferGeometry | undefined;
+      if (coarse) state.wheels.push({ mesh: m, full: m.geometry, coarse });
       // shadow prune (all tiers, player too — the caller classifies it):
       // only the hull's silhouette reads in the sun blob.
       m.castShadow = false;
@@ -157,6 +176,12 @@ export class CarLod {
       if (showInterior !== st.interiorShown) {
         st.interiorShown = showInterior;
         this.setVisible(actor, st.interior, showInterior);
+      }
+      // wheel density: the full parametric wheel only within the near ring
+      const wheelsFull = st.wheelsFull ? d < NEAR_HIDE : d < NEAR_SHOW;
+      if (wheelsFull !== st.wheelsFull) {
+        st.wheelsFull = wheelsFull;
+        for (const w of st.wheels) w.mesh.geometry = wheelsFull ? w.full : w.coarse;
       }
       const farHide = d > FAR_HIDE ? true : d < FAR_SHOW ? false : st.farHidden;
       if (farHide !== st.farHidden) {
