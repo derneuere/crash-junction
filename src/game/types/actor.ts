@@ -29,6 +29,13 @@ export interface SuspensionCorner {
    *  Seeded to the static load (preload) so there is grip from the first frame
    *  before the spring has reported; 0 when the wheel is off the ground. */
   load: number;
+  /** Wreck-scrub memory (crashed cars only, suspension.ts): the road-plane
+   *  tire scrub force this corner last applied (N). A wheel that leaves the
+   *  ground keeps applying a fading copy (×WRECK_SCRUB_DECAY per step) rather
+   *  than cutting to zero, so a bouncing wreck doesn't chatter on/off the
+   *  road's grip. Zeroed on a fresh wreck. */
+  scrubX: number;
+  scrubZ: number;
 }
 
 export interface DeformablePart {
@@ -42,6 +49,7 @@ export interface DeformablePart {
    *  groups after index surgery (the lenses wear emissive night materials). */
   head?: [number, number][];
   tail?: [number, number][];
+  reverse?: [number, number][];
   /** Vertex slot → representative slot at the same base position; built
    *  lazily on first crumple. Flat-shaded models duplicate every corner
    *  (split normals), so the deformer must weld displacement across the
@@ -137,6 +145,21 @@ export interface Actor {
    *  BOTH bodies, and without this the loser's event would read its fresh
    *  shunt mode as "a sliding car hit me" and knock the winner loose too. */
   destabilizedBy: number;
+  /** Traffic freak-out (Burnout's traffic panics when it's hit and survives):
+   *  seconds of panic left, 0 = calm. Only scripted traffic reads it
+   *  (traffic.ts); set from the contact in Game.panicTraffic. */
+  panicT: number;
+  /** 0 = calm, 1 = swerve-and-brake (a light knock), 2 = spin-out (a hard
+   *  knock the car survived) — picked by how hard the hit was. */
+  panicKind: 0 | 1 | 2;
+  /** Which way the panicked driver yanks the wheel (+1 = right, −1 = left):
+   *  a coin flip from the seeded sim RNG at panic entry. */
+  panicSteer: number;
+  /** Yaw rate (rad/s) a spin-out still owes the body — banked at panic entry
+   *  (inside the contact event) and paid on the next fixed step by traffic.ts,
+   *  so the kick never inflates the impact readings of the same step's other
+   *  contact points (a knock under the wreck bar must stay under it). */
+  panicKick: number;
   popped: number;
   damageLvl: number;
   smokeT: number;

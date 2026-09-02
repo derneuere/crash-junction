@@ -1,14 +1,15 @@
 import * as CANNON from 'cannon-es';
 import {
-  DOWNFORCE,
-  DOWNFORCE_CAP,
   FIXED_DT,
   GRAVITY,
   LAND_VY_ABSORB,
   RAMP_LAUNCH_VY_MAX,
   SUSP_DROOP,
   SUSP_MAX_COMP,
-  WRECK_GRIP,
+  WRECK_SCRUB_DECAY,
+  WRECK_RIM_SAG,
+  WRECK_SCRUB_LOAD_CAP,
+  WRECK_SCRUB_SLIP,
 } from './constants';
 import { HANDLING } from './handling';
 import { GameState, type Actor } from './types';
@@ -19,8 +20,9 @@ import { GameState, type Actor } from './types';
 // the wheel anchor (clamped to [0, fmax] so hard landings can't trampoline).
 // Flipped cars get no suspension — their rays point away from the road — so
 // wrecks tumble on the chassis box. While driving, speed² downforce adds
-// grip; once crashed, downforce is off (wrecks may fly) and Coulomb friction
-// from the spring load slows upright sliding wrecks.
+// grip; once crashed, downforce is off (wrecks may fly) and each wheel still
+// on the road scrubs from its own spring load (applyWreckScrub), so an upright
+// sliding wreck settles by yawing on its tires rather than dragging as a lump.
 
 const _sUp = new CANNON.Vec3();
 const _sAnchor = new CANNON.Vec3();
@@ -91,7 +93,6 @@ export function applySuspension(actors: Actor[], state: GameState, heightAt: Hei
     const ride = a.spec.rideHeight;
     b.quaternion.vmult(Y_AXIS, _sUp); // chassis up, world space
     let grounded = 0;
-    let fSum = 0;
 
     // ---- Feature B: this step's body-frame acceleration -> weight transfer ---
     // Difference world velocity against last frame's stored sample, project onto
@@ -165,14 +166,16 @@ export function applySuspension(actors: Actor[], state: GameState, heightAt: Hei
       s.grounded = true;
       s.load = f; // the friction-circle radius for this corner's tire this step
       grounded++;
-      fSum += f;
     }
 
-    // aero downforce while driving (off once crashed, so wrecks can fly)
+    // aero downforce while driving (off once crashed, so wrecks can fly) —
+    // the textbook quadratic, coefficient + cap per variant (sedan = the old
+    // DOWNFORCE / DOWNFORCE_CAP globals; the heavies get less per speed)
     if (!a.crashed && state !== GameState.Idle && grounded >= 3) {
+      const aero = HANDLING[a.spec.variant].base;
       const v = b.velocity;
       const v2 = v.x * v.x + v.z * v.z;
-      b.force.y -= Math.min(DOWNFORCE * v2, DOWNFORCE_CAP * Math.abs(GRAVITY)) * b.mass;
+      b.force.y -= Math.min(aero.downforce * v2, aero.downforceCap * Math.abs(GRAVITY)) * b.mass;
     }
 
     // kinematic ground-follow for driven cars: the spring/damper alone can't
@@ -224,17 +227,11 @@ export function applySuspension(actors: Actor[], state: GameState, heightAt: Hei
       }
     }
 
-    // crashed cars riding on springs: tire-scrub friction from the normal load
-    if (a.crashed && fSum > 0) {
-      const v = b.velocity;
-      const vh = Math.hypot(v.x, v.z);
-      if (vh > 0.05) {
-        const fr = Math.min(WRECK_GRIP * fSum, ((vh * b.mass) / FIXED_DT) * 0.85);
-        b.force.x -= (v.x / vh) * fr;
-        b.force.z -= (v.z / vh) * fr;
-      }
-      b.angularVelocity.y *= 1 - Math.min(0.5, 1.8 * FIXED_DT); // spin-down
-    }
+    // crashed cars riding on springs: per-wheel tire scrub from each corner's
+    // own load, applied AT the wheel — a wreck settles by yawing on its tires
+    // (the sideways scrub at an off-centre corner is a torque), not by one lump
+    // of friction dragging the whole car and a scripted spin-down
+    if (a.crashed) applyWreckScrub(a, b);
 
     // Feature B: store THIS frame's incoming velocity for next frame's accel
     // difference. Captured fresh each call (not the intra-frame-mutated value —
@@ -248,5 +245,67 @@ export function applySuspension(actors: Actor[], state: GameState, heightAt: Hei
       _prevVel.set(a, store);
     }
     store.copy(b.velocity);
+  }
+}
+
+/** A crashed car's wheels keep scrubbing on the road (Burnout's crashing cars
+ *  keep reacting to the ground per wheel): each grounded corner turns its
+ *  contact slip into a Coulomb-limited force from ITS OWN spring load, split
+ *  into the wheel's rolling and sideways axes (per-variant limits,
+ *  HANDLING.collision.wreckScrub*), applied AT the wheel so an off-centre
+ *  reaction yaws the wreck into settling. A corner that leaves the ground keeps
+ *  applying a fading copy of its last force (×WRECK_SCRUB_DECAY per step)
+ *  rather than cutting to zero — a bouncing wreck keeps a fading grip on the
+ *  road. Anchors sit at COM height, so the scrub is pure yaw + linear (no roll
+ *  moment: a sliding wreck doesn't trip itself over). Deterministic. */
+function applyWreckScrub(a: Actor, b: CANNON.Body): void {
+  const col = HANDLING[a.spec!.variant].collision;
+  b.quaternion.vmult(FWD_LOCAL, _sFwd);
+  // wheel axes flattened onto the road plane — a wreck's tires scrub along the
+  // road whatever its roof is doing. A nose pointing straight up or down (a
+  // wreck on its end) has no rolling axis: only the fading memory applies.
+  const fl = Math.hypot(_sFwd.x, _sFwd.z);
+  const canScrub = fl > 0.2;
+  const fx = canScrub ? _sFwd.x / fl : 0;
+  const fz = canScrub ? _sFwd.z / fl : 0;
+  const rx = -fz; // right of forward in the road plane
+  const rz = fx;
+  const mw = b.mass / 4;
+  for (const s of a.susp) {
+    _sR.set(s.ax, 0, s.az);
+    b.quaternion.vmult(_sR, _sR); // wheel anchor offset from COM, world axes
+    if (s.grounded && canScrub && s.load > 0) {
+      b.angularVelocity.cross(_sR, _sPv);
+      _sPv.vadd(b.velocity, _sPv); // contact-point velocity
+      const vLong = _sPv.x * fx + _sPv.z * fz;
+      const vLat = _sPv.x * rx + _sPv.z * rz;
+      // the grip load is the corner's spring load, bounded near its STATIC
+      // load: a wreck rocking on its springs (the crash-entry tumble, a hard
+      // landing) spikes the spring toward fmax, and letting that spike into the
+      // scrub stopped a 20 m/s wreck in half a second — tire grip, not a brick
+      // wall. Ramps to the Coulomb limit over WRECK_SCRUB_SLIP of slip; capped
+      // so a corner's impulse can never reverse the slip it opposes in a step.
+      const load = Math.min(s.load, s.preload * WRECK_SCRUB_LOAD_CAP);
+      const kSlip = load / WRECK_SCRUB_SLIP;
+      // a corner on its RIM (the wheel torn off) or on a badly bent axle
+      // doesn't roll — it grinds, so it scrubs sideways-hard along travel too
+      const muLong = s.sag <= WRECK_RIM_SAG ? col.wreckScrubLat : col.wreckScrubLong;
+      const fLong =
+        -Math.sign(vLong) * Math.min(Math.abs(vLong) * kSlip, muLong * load, (Math.abs(vLong) * mw) / FIXED_DT);
+      const fLat =
+        -Math.sign(vLat) * Math.min(Math.abs(vLat) * kSlip, col.wreckScrubLat * load, (Math.abs(vLat) * mw) / FIXED_DT);
+      s.scrubX = fLong * fx + fLat * rx;
+      s.scrubZ = fLong * fz + fLat * rz;
+    } else {
+      s.scrubX *= WRECK_SCRUB_DECAY;
+      s.scrubZ *= WRECK_SCRUB_DECAY;
+      if (Math.abs(s.scrubX) + Math.abs(s.scrubZ) < 1) {
+        s.scrubX = 0;
+        s.scrubZ = 0;
+        continue;
+      }
+    }
+    _sF.set(s.scrubX, 0, s.scrubZ);
+    b.applyForce(_sF, _sR);
   }
 }

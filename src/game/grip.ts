@@ -1,12 +1,12 @@
 // Tire grip-curve sampler (Feature C of the physics overhaul —
 // docs/research/physics-overhaul-spec.md). This is the CJ port of BP's
-// `TireGripCurve::GetCoefficient(slip)` (RaceCarPhysics_findings.md §6): a
+// Burnout's tire grip curve: a
 // sign-symmetric, rise-then-fall (Pacejka-like) coefficient curve. BP packs each
 // curve as one Vector4 `{peakSlipRatio, floorSlipRatio, peakCoeff, fallCoeff}`
 // and bundles THREE per tyre — longitudinal, lateral, and a separate, flatter
 // `mDriftLatGripCurve`. That dedicated drift-lateral curve is "the mechanical
 // basis for Burnout's switch from grippy cornering to a looser drift handling
-// model" (findings §6). We mirror exactly that: one generic sampler + two
+// model". We mirror exactly that: one generic sampler + two
 // curve-builders (normal lateral, drift lateral) that read the per-variant
 // coefficients from HANDLING[variant].grip.
 //
@@ -18,7 +18,7 @@
 import type { HandlingAttribs } from './handling';
 
 /** One rise-then-fall grip curve. Mirrors BP's TireGripCurve Vector4 lanes
- *  `{peakSlipRatio, floorSlipRatio, peakCoeff, fallCoeff}` (findings §6). */
+ *  `{peakSlipRatio, floorSlipRatio, peakCoeff, fallCoeff}`. */
 export interface GripCurve {
   /** Slip at which the coefficient reaches its peak (the rise region's top). */
   peakSlip: number;
@@ -32,7 +32,7 @@ export interface GripCurve {
 
 /** Smoothstep on a value already normalised to 0..1 (3t²−2t³). Cheap stand-in
  *  for BP's per-region cubic-Hermite/rational evaluator (the exact polynomial is
- *  inferred, not algebraically pinned — findings §6 — so smoothstep is a
+ *  inferred, not algebraically pinned — so smoothstep is a
  *  faithful, monotone, C¹ choice). */
 const smooth = (t: number): number => {
   const u = t < 0 ? 0 : t > 1 ? 1 : t;

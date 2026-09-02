@@ -18,6 +18,7 @@ import { SPECS } from '../src/game/vehicles';
 import { buildProceduralModel, PROC_RECIPES } from '../src/game/models/procgen';
 import { buildCar } from '../src/game/garageScene/car';
 import { FLOOR_Y } from '../src/game/garageScene/constants';
+import type { WheelStyle } from '../src/game/geometry';
 
 const SILVER = 0xc9ccd2; // judge shape in the references' own silver
 
@@ -27,8 +28,14 @@ declare global {
       ready: boolean;
       cars: string[];
       poses: string[];
-      setCar: (id: string, color?: number) => boolean;
+      setCar: (id: string, color?: number, wheel?: string) => boolean;
       shoot: (pose: string) => string;
+      /** Studio lighting: 'day' (default) or 'night' (lamps lit). */
+      setLighting: (mode: 'day' | 'night') => void;
+      /** Lamp state preview: brake / reverse lenses lit (0..1). */
+      setLamps: (brake: number, reverse: number) => void;
+      /** Triangle census of the mounted car (hull + panels + wheels). */
+      stats: () => { hull: number; panels: number; wheels: number; total: number };
     };
   }
 }
@@ -72,7 +79,8 @@ const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x33373d);
 
 // bright, even studio: strong hemi + soft key/fill/rim, a light grey floor
-scene.add(new THREE.HemisphereLight(0xdfe4ea, 0x3d4046, 1.0));
+const hemi = new THREE.HemisphereLight(0xdfe4ea, 0x3d4046, 1.0);
+scene.add(hemi);
 const key = new THREE.DirectionalLight(0xffffff, 2.0);
 key.position.set(-6, 8, -7);
 scene.add(key);
@@ -99,11 +107,14 @@ const camera = new THREE.PerspectiveCamera(18, 1280 / 800, 0.1, 100);
 const orthoCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 100);
 
 let carGroup: THREE.Group | null = null;
+let curModel: ReturnType<typeof buildProceduralModel> | null = null;
 let disposables: { dispose(): void }[] = [];
 
-function setCar(id: string, color: number = SILVER): boolean {
-  const recipe = PROC_RECIPES[id];
-  if (!recipe) return false;
+function setCar(id: string, color: number = SILVER, wheel?: string): boolean {
+  const base = PROC_RECIPES[id];
+  if (!base) return false;
+  // --wheel: swap the recipe's wheel style (the wheel builder's own iteration loop)
+  const recipe = wheel ? { ...base, wheels: { ...base.wheels, style: wheel as WheelStyle } } : base;
   if (carGroup) scene.remove(carGroup);
   for (const d of disposables) d.dispose();
   disposables = [];
@@ -114,6 +125,8 @@ function setCar(id: string, color: number = SILVER): boolean {
   if (model.interior) disposables.push(model.interior);
   for (const cut of model.panelCuts) if (cut) disposables.push(cut.geo);
   scene.add(carGroup);
+  curModel = model;
+  applyLamps();
   return true;
 }
 
@@ -137,6 +150,63 @@ function shoot(pose: string): string {
   return canvas.toDataURL('image/png');
 }
 
+// ── lighting + lamp preview ──
+// The garage materials carry a faint showroom lens glow; night drops the
+// studio to a moonlit level and runs the lenses at the game's night
+// emissive, and setLamps layers the brake / reverse glow on top — the
+// same numbers Game.updatePlayerLamps drives in the live world.
+const HEAD_NIGHT = 2.6, TAIL_NIGHT = 1.9, BRAKE_GLOW = 2.0, REVERSE_GLOW = 2.4;
+let lighting: 'day' | 'night' = 'day';
+let lampBrake = 0, lampReverse = 0;
+function hullMats(): THREE.MeshStandardMaterial[] | null {
+  let mats: THREE.MeshStandardMaterial[] | null = null;
+  carGroup?.traverse((o) => {
+    const m = o as THREE.Mesh;
+    if (m.isMesh && Array.isArray(m.material) && m.material.length >= 5) mats = m.material as THREE.MeshStandardMaterial[];
+  });
+  return mats;
+}
+function applyLamps(): void {
+  const mats = hullMats();
+  if (!mats) return;
+  const night = lighting === 'night';
+  mats[2].emissiveIntensity = night ? HEAD_NIGHT : 0.35;
+  mats[3].emissiveIntensity = (night ? TAIL_NIGHT : 0.4) + BRAKE_GLOW * lampBrake;
+  mats[3].emissive.setRGB(1, 0.165 * (1 - 0.7 * lampBrake), 0.086 * (1 - 0.7 * lampBrake)); // stays red as it brightens
+  mats[4].emissiveIntensity = REVERSE_GLOW * lampReverse;
+}
+function setLighting(mode: 'day' | 'night'): void {
+  lighting = mode;
+  const night = mode === 'night';
+  (scene.background as THREE.Color).setHex(night ? 0x0b0e14 : 0x33373d);
+  hemi.intensity = night ? 0.12 : 1.0;
+  key.intensity = night ? 0.18 : 2.0;
+  fill.intensity = night ? 0.06 : 0.8;
+  rim.intensity = night ? 0.1 : 1.0;
+  applyLamps();
+}
+function setLamps(brake: number, reverse: number): void {
+  lampBrake = brake;
+  lampReverse = reverse;
+  applyLamps();
+}
+function stats(): { hull: number; panels: number; wheels: number; total: number } {
+  // hull = the multi-material mesh; wheels = the model's own wheel templates;
+  // everything else (re-attached panel cuts, interior) counts as panels
+  const out = { hull: 0, panels: 0, wheels: 0, total: 0 };
+  carGroup?.traverse((o) => {
+    const m = o as THREE.Mesh;
+    if (!m.isMesh) return;
+    const g = m.geometry as THREE.BufferGeometry;
+    const tris = (g.index ? g.index.count : g.attributes.position.count) / 3;
+    if (Array.isArray(m.material)) out.hull += tris;
+    else if (curModel && (g === curModel.wheelL || g === curModel.wheelR)) out.wheels += tris;
+    else out.panels += tris;
+    out.total += tris;
+  });
+  return out;
+}
+
 setCar(Object.keys(PROC_RECIPES)[0] ?? 'metro');
 window.__proc = {
   ready: true,
@@ -144,4 +214,7 @@ window.__proc = {
   poses: Object.keys(POSES),
   setCar,
   shoot,
+  setLighting,
+  setLamps,
+  stats,
 };

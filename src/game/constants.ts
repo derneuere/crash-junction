@@ -82,7 +82,33 @@ export const LIVE_CAR_CONTACT_VY = 1.5; // m/s
 // to blips; this is the absolute roof — the proving-ground test ramps top
 // out at √(4·11.5·2.8) ≈ 11.3.
 export const RAMP_LAUNCH_VY_MAX = 12; // m/s
-export const WRECK_GRIP = 0.85; // Coulomb friction of wrecks rolling on suspension
+
+// ---- wrecks sliding on their wheels (suspension.ts, crashed cars only) ----
+// A crashed car keeps reacting to the road through each wheel that's still
+// touching it: per-corner tire scrub from that corner's OWN spring load,
+// applied AT the wheel, so an off-centre ground reaction yaws the wreck into
+// settling instead of one lump of friction dragging the whole car to a stop
+// (Burnout's crashing cars scrub per wheel). The Coulomb limits per wheel axis
+// are per-variant (HANDLING.collision.wreckScrub{Lat,Long}).
+// WRECK_SCRUB_SLIP — contact slip speed (m/s) at which a corner's scrub force
+// reaches its Coulomb limit; below it the force ramps down linearly so a wreck
+// coming to rest settles instead of buzzing.
+export const WRECK_SCRUB_SLIP = 1.2;
+// WRECK_SCRUB_LOAD_CAP — a corner's grip load is its spring load bounded to this
+// multiple of its STATIC load: a wreck rocking on its springs (crash-entry
+// tumble, a hard landing) spikes the spring toward fmax, and that spike must
+// not become a brick-wall scrub — it stopped a 20 m/s wreck in half a second.
+export const WRECK_SCRUB_LOAD_CAP = 1.25;
+// WRECK_RIM_SAG — a wheel torn off a wreck leaves a RIM: the corner keeps its
+// spring at this sag (spring force scale; 0.6 sits the corner ~4 cm lower —
+// the chassis box still clears the road) instead of losing it. Without it a
+// wreck that shed two wheels dropped its box onto the ground and stopped dead
+// from 20 m/s in three steps — on rims it keeps sliding and scrubbing.
+export const WRECK_RIM_SAG = 0.6;
+// WRECK_SCRUB_DECAY — per-step retention of a corner's remembered scrub force
+// once that wheel leaves the ground: a bouncing wreck keeps a fading grip on
+// the road rather than an on/off one.
+export const WRECK_SCRUB_DECAY = 0.95;
 
 // ---- explosions ----
 export const EXPLOSION_RADIUS_BASE = 9; // m
@@ -199,6 +225,34 @@ export const SHUNT_WRECK_THRESHOLD = 0.55;
 // wall path). Smoothly extends the existing wall-while-sliding wreck: the more
 // loaded up the slide is, the gentler the barrier touch that finishes it.
 export const SHUNT_FRAGILE_WALL_RELIEF = 1.5; // m/s off the closing bar at load 1
+
+// ---- sustained shunt push (Game.applyShuntKick / stepShuntPushes) ----
+// Burnout's shunt isn't only the contact impulse: the victim also gets a
+// SUSTAINED sideways push over the next fraction of a second, toward a target
+// lateral speed and proportional to the remaining deficit — so a slam feels like
+// being CARRIED toward the wall, not tapped once. It self-terminates when the
+// deficit blows past the quit threshold (the car is being held back — a wall or
+// another car is in the way — so the push gives up) or when its life runs out.
+// SHUNT_PUSH_FRAC — the extra lateral Δv the push aims to add, as a fraction of
+// the one-shot kick's Δv. Scaled by how sideways the contact was (a square
+// rear-end punt gets ~none of it).
+export const SHUNT_PUSH_FRAC = 0.35;
+export const SHUNT_PUSH_LIFE = 0.45; // s the push stays live
+export const SHUNT_PUSH_RATE = 7; // 1/s — how fast the deficit closes (~96 % within the life)
+export const SHUNT_PUSH_QUIT = 1.3; // deficit / initial extra above which the push quits
+export const SHUNT_PUSH_MIN_LATERAL = 0.3; // |lateral share| of the push normal below which no push queues
+
+// ---- traffic freak-out (traffic.ts; Burnout's traffic panics when it's hit) ----
+// A traffic car that takes a knock it survives doesn't shrug it off — the
+// driver panics. A light knock is a swerve-and-brake; a hard one (over half
+// the wreck bar) is a spin-out: wheel yanked to a coin-flip side, feet off
+// everything, then hard on the brakes. Both time out back to lane-holding.
+export const TRAFFIC_PANIC_MIN = 1.6; // m/s of impact below which traffic just twitches
+export const TRAFFIC_PANIC_FULL = 4; // impact that reads as full severity (= the junction wreck bar)
+export const TRAFFIC_PANIC_SPIN_SEVERITY = 0.65; // severity above which the panic is a spin-out (a 2.6 m/s knock)
+export const TRAFFIC_SPIN_OUT_SECS = 4.0; // a spin-out's timeout
+export const TRAFFIC_SWERVE_SECS = 2.0; // a swerve's timeout at full severity
+export const TRAFFIC_SPIN_KICK = 2.4; // yaw rate (rad/s) kicked into a spinning-out car at full severity
 
 // ---- airborne / jump attitude (BP AttribSys medians → CJ per-frame model) ----
 // All derived from steward's sweep of 48 retail VEH_*_AT.BIN attribute vaults.

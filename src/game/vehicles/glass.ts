@@ -193,7 +193,7 @@ export function shatterGlass(actor: Actor, worldPoint: THREE.Vector3, radius: nu
         keep.push(a, b, c);
       }
       geo.setIndex(keep);
-      applyHullGroups(geo, part.glass, part.head ?? [], part.tail ?? []); // groups address the index
+      applyHullGroups(geo, part.glass, part.head ?? [], part.tail ?? [], part.reverse ?? []); // groups address the index
     }
   }
   return broken;

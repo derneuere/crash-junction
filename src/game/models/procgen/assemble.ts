@@ -41,7 +41,9 @@ export function buildProceduralModel(recipe: CarRecipe, spec: VehicleSpec): Vehi
     glass: new Soup(),
     head: new Soup(),
     tail: new Soup(),
+    reverse: new Soup(),
     trim: new Soup(),
+    lampTrim: new Soup(), // bezels, housings, sweeps — dressing, like the lenses
   };
   const colors = {
     paint: new THREE.Color(BASE_PAINT),
@@ -59,12 +61,16 @@ export function buildProceduralModel(recipe: CarRecipe, spec: VehicleSpec): Vehi
   buildMirrors(recipe, soups.paint, colors.paint);
 
   // merge in role order; each soup's landing range is its role range
-  const { geo, ranges } = mergeSoups([soups.paint, soups.glass, soups.head, soups.tail, soups.trim]);
-  const [paintR, glassR, headR, tailR] = ranges;
+  const { geo, ranges } = mergeSoups([soups.paint, soups.glass, soups.head, soups.tail, soups.reverse, soups.trim, soups.lampTrim]);
+  const [paintR, glassR, headR, tailR, reverseR, , lampTrimR] = ranges;
   const paintRanges: [number, number][] = [paintR];
   const glassRanges: [number, number][] = [glassR];
   const headRanges: [number, number][] = [headR];
   const tailRanges: [number, number][] = [tailR];
+  const reverseRanges: [number, number][] = [reverseR];
+  // every lamp part is dressing: lenses and their trim stay out of the
+  // panel cuts (a torn bonnet must not take a headlight bezel with it)
+  const dressRanges: [number, number][] = [headR, tailR, reverseR, lampTrimR];
 
   // PS2-style paint: curved panels smooth so reflections sweep, hard edges
   // keep their split normals — same pass, same order as the bake
@@ -85,6 +91,7 @@ export function buildProceduralModel(recipe: CarRecipe, spec: VehicleSpec): Vehi
     door: { ...metrics.door, z0: Math.max(metrics.door.z0, recipe.cabin.z0 - 0.12) },
   };
   const { wheelL, wheelR } = buildWheelPair(recipe.wheels.style, spec.wheelRadius);
+  const coarse = buildWheelPair(recipe.wheels.style, spec.wheelRadius, 'coarse');
 
   const model: VehicleModel = {
     body: geo,
@@ -92,8 +99,12 @@ export function buildProceduralModel(recipe: CarRecipe, spec: VehicleSpec): Vehi
     glassRanges,
     headRanges,
     tailRanges,
+    reverseRanges,
+    dressRanges,
     wheelL,
     wheelR,
+    wheelCoarseL: coarse.wheelL,
+    wheelCoarseR: coarse.wheelR,
     showroomWheels: true, // parametric wheels — the garage should show THEM
     arch,
     wheelY,
@@ -102,7 +113,7 @@ export function buildProceduralModel(recipe: CarRecipe, spec: VehicleSpec): Vehi
     // built BEFORE the panel cuts, so width probes still see the door skin
     interior: buildInterior(interiorMetrics, arch, spec, geo),
   };
-  model.panelCuts = cutPanelTemplates(model, panelDefs(spec, model));
-  applyHullGroups(geo, glassRanges, headRanges, tailRanges); // after the cuts replace the index
+  model.panelCuts = cutPanelTemplates(model, panelDefs(spec, model), dressRanges);
+  applyHullGroups(geo, glassRanges, headRanges, tailRanges, reverseRanges); // after the cuts replace the index
   return model;
 }

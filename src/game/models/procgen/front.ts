@@ -2,16 +2,19 @@ import * as THREE from 'three';
 import type { CarRecipe } from './recipe';
 import { prism, type Soup, type V3 } from './soup';
 import { surfaceOf } from './surface';
+import { fpt, headlightUnit, LAMP_LIP, type LampFrame, type P2 } from './lampkit';
 
 // ────────────────────────────────────────────────────────────────────────────
 // Front clip + mirrors — Astra-H style. The bumper is a faceted body-colour
 // wrap (columns across the nose, corners pulled back) carrying a dark lower
 // intake slot, fog-lamp recesses on the corner facets and a light plate pad;
 // the grille is a chrome moustache over a dark slot high between the lights;
-// the headlights are clear-lens teardrop units with modelled internals: a
-// dark housing tub, two proud corona cylinders (low/high beam) in the head
-// role, an amber indicator at the inner corner, and a dark sweep up the
-// fender carrying a narrow lens strip to the tip. Mirrors are five-face
+// the headlights are teardrop units built from the lamp kit (lampkit.ts):
+// a bevelled bezel rising off the nose face, a dark housing floor, a big
+// low-beam reflector bowl outboard and a smaller high-beam bowl inboard
+// (both head-role, so they glow at night) each with a projector dome, an
+// amber indicator strip at the inner end, and a dark sweep up the fender
+// carrying a narrow lens strip to the tip. Mirrors are five-face
 // teardrop housings on short stalks at the A-pillar/beltline junction.
 // The bumper mass stays inside the front-bumper carve region (z within
 // ~±0.15 of the nose face, y −0.60…−0.30) so it tears off with the fascia;
@@ -20,13 +23,14 @@ import { surfaceOf } from './surface';
 
 const CHROME = new THREE.Color(0x7f868e); // grille moustache bar (reads on light paint)
 const PLATE = new THREE.Color(0xcdd0d4); // number-plate pad
-const AMBER = new THREE.Color(0xd98a1e); // indicator element
 
 interface ClipSoups {
   paint: Soup;
   trim: Soup;
   head: Soup;
   tail: Soup;
+  /** Lamp housings / bezels / sweeps — dressing, never cut into a panel. */
+  lampTrim: Soup;
 }
 
 interface ClipColors {
@@ -34,25 +38,6 @@ interface ClipColors {
   trim: THREE.Color;
   head: THREE.Color;
   tail: THREE.Color;
-}
-
-/** Low-poly corona: forward-facing (−z) disc cap + side wall, the round
- *  projector element of a clear-lens headlight. `zF` is the proud front
- *  plane; the wall runs `depth` back so the rear buries in the housing. */
-function corona(
-  soup: Soup, cx: number, cy: number, zF: number,
-  r: number, depth: number, seg: number, color: THREE.Color,
-): void {
-  const rim = (i: number, zq: number): V3 => {
-    const a = (i / seg) * Math.PI * 2;
-    return [cx + Math.cos(a) * r, cy + Math.sin(a) * r, zq];
-  };
-  const behind: V3 = [cx, cy, zF + 1]; // cap faces forward, away from this
-  const axis: V3 = [cx, cy, zF + depth / 2];
-  for (let i = 0; i < seg; i++) {
-    soup.tri([cx, cy, zF], rim(i, zF), rim(i + 1, zF), color, behind);
-    soup.quad(rim(i, zF), rim(i + 1, zF), rim(i + 1, zF + depth), rim(i, zF + depth), color, axis);
-  }
 }
 
 const lerp = (p: V3, q: V3, t: number): V3 =>
@@ -137,35 +122,29 @@ export function buildFrontClip(recipe: CarRecipe, soups: ClipSoups, colors: Clip
       soups.head.box(m * s0.halfW * 0.36, s0.bodyY - 0.05, z - 0.012, 0.13, 0.12, 0.02, colors.head);
     }
   } else {
-    // 'pods' → clear-lens teardrop units: dark housing tub recessed on the
-    // nose face, two round corona elements proud of it (main low beam
-    // outboard, smaller high beam inboard), amber indicator at the inner
-    // top corner; the sweep up the fender is dark base under a narrow lens
-    // strip so the whole unit still reads as one lamp.
+    // 'pods' → teardrop lamp units on the nose face. The outline (A B D C)
+    // is the unit's footprint: the bezel rises off the face inside it and
+    // the bowls sit in the housing behind the bezel; the sweep up the
+    // fender continues the unit's top edge from the lip.
     const zE = s1.z;
     const zG = s1.z + 0.25;
     for (const m of [-1, 1]) {
       const yB = s0.bodyY - 0.145, yT = s0.bodyY + 0.005;
-      const A: V3 = [m * 0.27, yB, z - 0.007]; // housing front, recessed vs
-      const B: V3 = [m * 0.585, yB, z - 0.004]; // the old flat lens plane
-      const C: V3 = [m * 0.27, yT, z - 0.004];
-      const D: V3 = [m * 0.6, yT, z - 0.001];
+      // local frame on the nose face: a outboard, b up, d proud (−z)
+      const f: LampFrame = { o: [0, 0, z], u: [m, 0, 0], v: [0, 1, 0], n: [0, 0, -1] };
+      const outline: P2[] = [[0.27, yB], [0.585, yB], [0.6, yT], [0.27, yT]];
+      headlightUnit({ head: soups.head, trim: soups.lampTrim }, f, outline, 12);
+      // the dark sweep up the fender starts at the unit's top lip
+      const C = fpt(f, 0.27, yT, LAMP_LIP);
+      const D = fpt(f, 0.6, yT, LAMP_LIP);
+      const B = fpt(f, 0.585, yB, LAMP_LIP);
       const E: V3 = [m * 0.52, surf.bodyY(zE) + 0.02, zE]; // mid top (hood)
       const F: V3 = [m * (surf.halfW(zE) + 0.01), surf.bodyY(zE) - 0.045, zE]; // fender
       const G: V3 = [m * (surf.halfW(zG) + 0.008), surf.bodyY(zG) + 0.012, zG]; // tip
       const inner: V3 = [m * 0.4, -0.3, s1.z]; // inside the nose, for winding
-      prism(soups.trim, [A, B, D, C], [0, 0, 0.05], colors.trim); // housing tub
-      soups.trim.quad(C, D, F, E, colors.trim, inner); // dark sweep base
-      soups.trim.tri(B, D, F, colors.trim, inner); // outer corner skirt
-      soups.trim.tri(E, F, G, colors.trim, inner); // tip base
-      // corona elements, proud of the housing (rear walls bury in the tub)
-      corona(soups.head, m * 0.49, yB + 0.088, z - 0.036, 0.056, 0.042, 9, colors.head);
-      corona(soups.head, m * 0.362, yB + 0.078, z - 0.028, 0.038, 0.034, 8, colors.head);
-      // amber indicator wedge at the inner/upper corner (inside the tub)
-      prism(soups.trim, [
-        [m * 0.278, yB + 0.1, z - 0.016], [m * 0.345, yB + 0.104, z - 0.015],
-        [m * 0.335, yB + 0.14, z - 0.014], [m * 0.278, yB + 0.143, z - 0.014],
-      ], [0, 0, 0.03], AMBER);
+      soups.lampTrim.quad(C, D, F, E, colors.trim, inner); // dark sweep base
+      soups.lampTrim.tri(B, D, F, colors.trim, inner); // outer corner skirt
+      soups.lampTrim.tri(E, F, G, colors.trim, inner); // tip base
       // narrow lens strip riding the dark sweep, plus an inset glowing tip
       const up = (p: V3): V3 => [p[0] + m * 0.004, p[1] + 0.007, p[2]];
       soups.head.quad(

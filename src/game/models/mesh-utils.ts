@@ -1,39 +1,4 @@
 import * as THREE from 'three';
-import { applyUniformColor } from '../geometry';
-
-/** Contrasting hub disc + 5 radial spokes on each ±X face of a baked road
- *  wheel (centered at origin, axle along X, radius `r` in the Y/Z plane), so
- *  the wheel's rotation is legible instead of reading as a static dark disc.
- *  Parts are non-indexed with position/normal/color to match the stripped
- *  baked wheel for mergeGeometries. Mirrors the procedural wheelGeometry. */
-export function wheelHubDetail(r: number): THREE.BufferGeometry[] {
-  const parts: THREE.BufferGeometry[] = [];
-  const hubR = r * 0.5;
-  // a touch outside the tyre's outer faces; tyre half-width ~ r*0.38 in shared.ts
-  const faceX = r * 0.38 + 0.006;
-  for (const sx of [faceX, -faceX]) {
-    const disc = new THREE.CircleGeometry(hubR, 12).toNonIndexed();
-    disc.rotateY(sx > 0 ? Math.PI / 2 : -Math.PI / 2); // face ±X
-    disc.translate(sx, 0, 0);
-    stripToPosNormal(disc);
-    applyUniformColor(disc, 0x8f9399);
-    parts.push(disc);
-
-    const spokeLen = r - hubR * 0.6;
-    const spokeMid = (hubR * 0.6 + r) / 2;
-    for (let s = 0; s < 5; s++) {
-      const ang = (s / 5) * Math.PI * 2;
-      const spoke = new THREE.BoxGeometry(r * 0.06, spokeLen, r * 0.1, 1, 1, 1).toNonIndexed();
-      spoke.translate(0, spokeMid, 0);
-      spoke.rotateX(ang); // spread radially in the Y/Z face plane
-      spoke.translate(sx, 0, 0);
-      stripToPosNormal(spoke);
-      applyUniformColor(spoke, 0x5a5d63);
-      parts.push(spoke);
-    }
-  }
-  return parts;
-}
 
 /** Drop UVs/colors/tangents so primitives merge; we rebuild color ourselves. */
 export function stripToPosNormal(g: THREE.BufferGeometry): THREE.BufferGeometry {

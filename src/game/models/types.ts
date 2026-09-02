@@ -19,8 +19,18 @@ export interface VehicleModel {
   glassRanges: [number, number][];
   headRanges: [number, number][]; // headlight lenses (bus: its light strip)
   tailRanges: [number, number][];
+  /** Reverse-lamp lenses — a white emissive role lit only while reversing. */
+  reverseRanges: [number, number][];
+  /** Lamp dressing (bezels, bowls, lens plates): display-only geometry
+   *  that never joins a panel cut and never measures a panel landmark, so
+   *  the panel boxes — sim state — are exactly the undressed body's. */
+  dressRanges: [number, number][];
   wheelL: THREE.BufferGeometry; // centered, radius = spec.wheelRadius
   wheelR: THREE.BufferGeometry;
+  /** The same wheels at the builder's coarse density — swapped onto
+   *  non-player cars past the near ring by carlod.ts (presentation only). */
+  wheelCoarseL: THREE.BufferGeometry;
+  wheelCoarseR: THREE.BufferGeometry;
   /** True when wheelL/R are showroom-quality (procgen builds parametric
    *  wheels). The garage substitutes its generic wheel otherwise — the baked
    *  GLB wheels are near-flat discs that read broken at showroom distance. */

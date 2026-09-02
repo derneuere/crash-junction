@@ -148,7 +148,7 @@ export function repairVehicle(actor: Actor): void {
     col.needsUpdate = true;
     if (part.baseIndex) {
       geo.setIndex(new THREE.BufferAttribute(part.baseIndex.slice(), 1)); // reglaze
-      if (part.glass) applyHullGroups(geo, part.glass, part.head ?? [], part.tail ?? []);
+      if (part.glass) applyHullGroups(geo, part.glass, part.head ?? [], part.tail ?? [], part.reverse ?? []);
     }
     part.glassStage?.fill(0); // panes are virgin again after a body-shop pass
     // never-deformed parts still carry pristine normals — derive the

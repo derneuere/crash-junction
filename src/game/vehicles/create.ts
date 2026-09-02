@@ -25,7 +25,7 @@ export function createVehicle(
   if (model) {
     const hull = makeModelHull(model, spawn.color);
     group.add(hull);
-    registerDeformable(hull, deformables, model.glassRanges, model.headRanges, model.tailRanges);
+    registerDeformable(hull, deformables, model.glassRanges, model.headRanges, model.tailRanges, model.reverseRanges);
     if (model.interior) {
       // stripped-chassis innards — wounds show these, not daylight
       const inner = new THREE.Mesh(model.interior.clone(), [metalMat, cabinMat]);

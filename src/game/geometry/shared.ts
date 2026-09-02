@@ -4,7 +4,7 @@
 
 export { GLASS, smoothstep } from './shared/math';
 
-export { hullMat, headlightMat, taillightMat, metalMat, cabinMat } from './shared/materials';
+export { hullMat, headlightMat, taillightMat, reverseMat, metalMat, cabinMat } from './shared/materials';
 
 export { glassMat, glassParams, applyGlassParams } from './shared/glass';
 export type { GlassParams } from './shared/glass';
@@ -16,8 +16,11 @@ export {
   registerPlayerSwappable,
   adoptPlayerMaterials,
   setPlayerEnvMap,
+  playerSwap,
 } from './shared/registry';
 
 export { wheelMat, wheelGeometry, applyUniformColor, makeColoredBox } from './shared/wheels';
+export { buildWheelGeometry, TYRE_HALF_WIDTH } from './shared/wheelBuilder';
+export type { WheelStyle, WheelSide, WheelDetail } from './shared/wheelBuilder';
 
 export { buildNormalSmoothing, applyNormalSmoothing } from './shared/normals';

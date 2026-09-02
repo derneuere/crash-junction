@@ -20,6 +20,17 @@ import {
   SHUNT_KICK_SPEED_GATE,
   SHUNT_MASS_RATIO_CLAMP,
   SHUNT_YAW_MAX,
+  SHUNT_PUSH_FRAC,
+  SHUNT_PUSH_LIFE,
+  SHUNT_PUSH_MIN_LATERAL,
+  SHUNT_PUSH_QUIT,
+  SHUNT_PUSH_RATE,
+  TRAFFIC_PANIC_FULL,
+  TRAFFIC_PANIC_MIN,
+  TRAFFIC_PANIC_SPIN_SEVERITY,
+  TRAFFIC_SPIN_KICK,
+  TRAFFIC_SPIN_OUT_SECS,
+  TRAFFIC_SWERVE_SECS,
   SLOWMO,
   SLOWMO_HOLD,
   SUSP_MAX_COMP,
@@ -49,9 +60,9 @@ import { CarBlobShadows } from '../carshadow';
 import { DEFAULT_GRAPHICS, IS_MOBILE, type GraphicsSettings } from '../graphics';
 import { HeightLOD } from '../lod/heightlod';
 import { loadLevelProps } from '../props';
-import { BRAKE_INTENSITY, HEADLIGHT_INTENSITY, charActor, createBarrel, createPole, createVehicle, deformActor, exhaustAnchors, popWheel, repairVehicle, shatterGlass, type LoosePart } from '../vehicles';
-import { applyCarEnvScale, applyGlassParams, glassParams, setCarEnvMap, setPlayerEnvMap, type GlassParams } from '../geometry';
-import { applyTimeOfDay, type TimeOfDay } from '../daynight';
+import { BRAKE_GLOW, BRAKE_INTENSITY, HEADLIGHT_INTENSITY, LAMP_RAMP, REVERSE_GLOW, charActor, createBarrel, createPole, createVehicle, deformActor, exhaustAnchors, popWheel, repairVehicle, shatterGlass, type LoosePart } from '../vehicles';
+import { applyCarEnvScale, applyGlassParams, glassParams, playerSwap, reverseMat, setCarEnvMap, setPlayerEnvMap, taillightMat, type GlassParams } from '../geometry';
+import { applyTimeOfDay, nightEmissive, type TimeOfDay } from '../daynight';
 import { SKY_PRESETS, SkyRig, SunFlare } from '../skyenv';
 import { PlayerReflections } from '../reflections';
 import { Postfx, speedBlurStrength } from '../postfx';
@@ -107,14 +118,14 @@ const CRASH_EXTRA_IMPACT_FULL = 16;
  *  boost-ram wreck tumbles believably rather than blurring. */
 const CRASH_EXTRA_SPIN_CAP = 5;
 
-/** SLAM one-shot (BP UpdateSlam): peak yaw-rate (rad/s) of the parabolic
+/** SLAM one-shot (Burnout's slam): peak yaw-rate (rad/s) of the parabolic
  *  env = r − r² wobble at the strongest slam. The envelope peaks at r=0.5 so a
  *  slam ramps in then fades over its life. 0 disables the wobble. */
 const SLAM_KICK_STRENGTH = 2.0;
 /** SLAM life (s) — how long the one-shot wobble plays out. */
 const SLAM_LIFE = 0.5;
 /** SLAM rate limit (s): a fresh slam on the same car within this window is
- *  ignored (BP AddSlam is rate-limited ≥0.5 s apart, ~2/s). */
+ *  ignored (Burnout rate-limits slams to ≥0.5 s apart, ~2/s). */
 const SLAM_RATE_LIMIT = 0.5;
 
 /** Anisotropic car-to-car friction (Burnout's car-on-car contact, NON-crashing
@@ -148,7 +159,7 @@ const CONTACT_E_CLOSING_SPLIT = 0.65; // m/s: BELOW → restitutionHigh (gentler
 const WALL_REFLECT_E = 0.03; // the matGround/matCar restitution floor (NOT the 0.12 matCar/matCar one)
 const WALL_GLANCE_SPEED_KEEP = 0.82; // planar speed retained through a glance (the wall takes its toll)
 
-/** Crash master-switch raw-tumble damping (BP UpdateCrashing per-axis
+/** Crash master-switch raw-tumble damping (Burnout's crash damping, per-axis
  *  vlogefp/vexptefp decay): a CRASHED car's spin bleeds off exponentially each
  *  step (the controlled-contact friction is swapped out for this raw tumble).
  *  Per-axis half-life-ish factors per second; 1 = no damping. Roll/pitch settle
@@ -157,7 +168,7 @@ const CRASH_TUMBLE_DAMP_ROLL = 0.85; // x axis spin/s retained
 const CRASH_TUMBLE_DAMP_YAW = 0.95; // y axis spin/s retained
 const CRASH_TUMBLE_DAMP_PITCH = 0.85; // z axis spin/s retained
 
-/** Feature G — WATER KILL (BP UpdateInWaterBehaviour: a hard kill, not
+/** Feature G — WATER KILL (Burnout's water rule: a hard kill, not
  *  buoyancy). A car whose chassis sinks this far BELOW the level's seaLevel is
  *  declared drowned: its linear+angular velocity and pending force/torque rows
  *  are zeroed (it stops dead and sinks), then the off-track/respawn path the
@@ -169,11 +180,29 @@ const WATER_KILL_DEPTH = 1.5;
  *  rate + remaining life. Folded into the victim's angular velocity each step
  *  via env = r − r² until life expires. */
 interface SlamEffect {
-  sign: number; // ±1 — which way the wobble throws (seeded at AddSlam)
+  sign: number; // ±1 — which way the wobble throws (seeded when the slam is queued)
   peak: number; // peak yaw rate (rad/s) at the envelope's midpoint
   life: number; // seconds remaining
   total: number; // original life (for the r = life/total envelope)
   applied: number; // the yaw-rate this wobble has currently folded in (for the delta)
+}
+
+/** A live sustained shunt push (Burnout's shunt is a push over time, not only
+ *  a hit): a road-plane direction perpendicular to the victim's travel, the
+ *  lateral speed it drives toward, the deficit above which it gives up, and
+ *  its remaining life. Stepped in stepShuntPushes until it self-terminates. */
+interface ShuntPush {
+  dirX: number;
+  dirZ: number;
+  extra: number; // lateral Δv the push aims to add on top of what the contact left
+  /** Target lateral speed along dir (m/s). NaN until the push's first step:
+   *  it is set from the velocity the victim has AFTER the contact solver has
+   *  run (the queue happens inside the collide event, before the solver's own
+   *  separation lands), so the push adds `extra` on top of the hit rather
+   *  than being pre-empted by it. */
+  desired: number;
+  quit: number; // deficit above which the push gives up (the car is being held back)
+  life: number; // seconds remaining
 }
 
 // Feature F/G scratch — a module-local CANNON vector reused per call (no per-
@@ -258,6 +287,11 @@ export class Game {
   private byBody = new Map<number, Actor>();
   private looseParts: LoosePart[] = [];
   private player: Actor | null = null;
+  // player lamp glow (0..1): brake lenses + brake point, reverse lenses.
+  // Render-tail presentation state — ramped in updatePlayerLamps, never
+  // read by the fixed step or the world hash.
+  private brakeGlow = 0;
+  private reverseGlow = 0;
 
   private state = GameState.Idle;
   private timeScale = 1;
@@ -292,9 +326,16 @@ export class Game {
   // Feature F SLAM one-shots (BP SlamEffect): bodyId → the live parabolic yaw
   // wobble a slammed car is playing out. Stepped + drained in stepControls;
   // pin-safe (lives entirely in the deterministic step). lastSlamAt rate-limits
-  // a fresh slam on the same car (BP AddSlam ≥0.5 s apart).
+  // a fresh slam on the same car (Burnout keeps slams ≥0.5 s apart).
   private slamEffects = new Map<number, SlamEffect>();
   private lastSlamAt = new Map<number, number>();
+  // sustained shunt pushes (Burnout's shunt carries the victim sideways for a
+  // beat after the hit): bodyId → the live push. Stepped + drained in
+  // stepControls; pin-safe (fixed step only, no RNG of its own).
+  private shuntPushes = new Map<number, ShuntPush>();
+  // pre-solver angular velocity of each CRASHED vehicle (3 per actor, Infinity
+  // = not a wreck this step) for the per-variant crashed-contact spin scaling
+  private avBefore: number[] = [];
   // near-miss boost credit (B3/BP "Driving Skills"): bodyId → simTime a close
   // pass was last credited, so one fly-by earns once, not every step
   private nearMissAt = new Map<number, number>();
@@ -1240,6 +1281,7 @@ export class Game {
     this.checked.clear();
     this.slamEffects.clear();
     this.lastSlamAt.clear();
+    this.shuntPushes.clear();
     this.nearMissAt.clear();
     this.deformQueue.length = 0;
 
@@ -1630,6 +1672,9 @@ export class Game {
       }
       if (out.wallGlance && self.isPlayer) this.applyWallGlance(e, wallDir);
     }
+    // traffic freak-out: a scripted traffic car that took a knock and is still
+    // driving panics (debris counts — a flying door is a scare too)
+    if (!scenery && impact > TRAFFIC_PANIC_MIN) this.panicTraffic(self, impact);
     if (self.kind === 'barrel' && impact > 4.5 && !self.exploded && self.fuse === null) self.fuse = 0.06;
     if (self.spec?.explosive && impact > 9.5 && !self.exploded && self.fuse === null) self.fuse = 0.18;
 
@@ -1814,6 +1859,12 @@ export class Game {
     if (vb.angularVelocity.y > SHUNT_YAW_MAX) vb.angularVelocity.y = SHUNT_YAW_MAX;
     else if (vb.angularVelocity.y < -SHUNT_YAW_MAX) vb.angularVelocity.y = -SHUNT_YAW_MAX;
     vb.wakeUp();
+    // …and the sustained sideways push that follows the hit (stepShuntPushes):
+    // the victim gets carried on for a beat — the Burnout shunt feel. Queued
+    // AFTER the restitution + friction edits above so its target reads the
+    // velocity the victim actually leaves the contact with (queued before them,
+    // the friction bleed alone read as "held back" and the push quit at once).
+    this.queueShuntPush(victim, nx, nz, j / mv);
 
     // Bounce-boost: the winner powers through the now-tamer contact instead of
     // bleeding speed off it. A small forward impulse along the rammer's heading
@@ -1859,7 +1910,7 @@ export class Game {
     bleed(0, 1, 0, fr.frictionUp); // vertical — damped
   }
 
-  /** Queue a one-shot SLAM wobble (Feature F, BP AddSlam/UpdateSlam): a
+  /** Queue a one-shot SLAM wobble (Feature F, Burnout's slam): a
    *  parabolic yaw kick (env = r − r², peaks mid-life) that ramps in then fades
    *  over SLAM_LIFE, rate-limited per car (~2/s). `strength` (0..1, from the
    *  resolveContact slam intent, scaled by impact) sets the peak; the sign is
@@ -1898,7 +1949,116 @@ export class Game {
     });
   }
 
-  /** Step every live SLAM wobble (Feature F, BP UpdateSlam): decay life by dt
+  /** Queue the sustained sideways push behind a shunt/slam kick (Burnout's
+   *  shunt is a push over time, not just a hit). Direction = the road-plane
+   *  perpendicular to the victim's travel on the side the push normal points
+   *  to; the target is the victim's current lateral speed plus a fraction of
+   *  the one-shot kick's Δv, scaled by how sideways the contact was — a
+   *  square rear-end punt queues nothing. Self-terminates in stepShuntPushes
+   *  when the deficit blows past the quit threshold (held back by a wall or
+   *  another car) or the life runs out. Deterministic — no RNG. */
+  private queueShuntPush(victim: Actor, nx: number, nz: number, kickDv: number): void {
+    if (SHUNT_PUSH_FRAC <= 0 || victim.crashed) return;
+    const v = victim.body.velocity;
+    const sp = Math.hypot(v.x, v.z);
+    let dx: number;
+    let dz: number;
+    let share: number;
+    if (sp > 2) {
+      // perpendicular to travel, on the side the push points to
+      dx = -v.z / sp;
+      dz = v.x / sp;
+      share = dx * nx + dz * nz;
+      if (share < 0) {
+        dx = -dx;
+        dz = -dz;
+        share = -share;
+      }
+    } else {
+      // a near-stationary victim has no travel axis: push along the normal
+      const nl = Math.hypot(nx, nz);
+      if (nl < 1e-3) return;
+      dx = nx / nl;
+      dz = nz / nl;
+      share = 1;
+    }
+    if (share < SHUNT_PUSH_MIN_LATERAL) return;
+    const extra = SHUNT_PUSH_FRAC * kickDv * share;
+    if (extra <= 0) return;
+    this.shuntPushes.set(victim.body.id, {
+      dirX: dx,
+      dirZ: dz,
+      extra,
+      desired: NaN, // fixed on the first step, post-solver (see ShuntPush)
+      quit: extra * SHUNT_PUSH_QUIT,
+      life: SHUNT_PUSH_LIFE,
+    });
+  }
+
+  /** Step every live shunt push: while the car has a wheel on the road, add
+   *  lateral speed toward the target in proportion to the remaining deficit
+   *  (road-plane only — never a loft), decay the life, and drop the push when
+   *  the deficit exceeds its quit threshold (held back), the life expires, or
+   *  the car wrecks. Fixed step, deterministic. */
+  private stepShuntPushes(): void {
+    if (this.shuntPushes.size === 0) return;
+    for (const [id, s] of this.shuntPushes) {
+      const a = this.byBody.get(id);
+      if (!a || a.crashed) {
+        this.shuntPushes.delete(id);
+        continue;
+      }
+      s.life -= FIXED_DT;
+      if (a.susp.some((su) => su.grounded)) {
+        const v = a.body.velocity;
+        const lat = v.x * s.dirX + v.z * s.dirZ;
+        if (Number.isNaN(s.desired)) s.desired = lat + s.extra; // first step: aim above what the contact left
+        const deficit = s.desired - lat;
+        if (deficit > s.quit) {
+          // being held back (a wall, another car) — the push gives up
+          this.shuntPushes.delete(id);
+          continue;
+        }
+        if (deficit > 0) {
+          const dv = Math.min(deficit, SHUNT_PUSH_RATE * deficit * FIXED_DT);
+          v.x += s.dirX * dv;
+          v.z += s.dirZ * dv;
+          a.body.wakeUp();
+        }
+      }
+      if (s.life <= 0) this.shuntPushes.delete(id);
+    }
+  }
+
+  /** Traffic freak-out entry (Burnout's traffic panics when hit): a scripted
+   *  traffic car that took a knock it survived picks a panic by severity —
+   *  over TRAFFIC_PANIC_SPIN_SEVERITY it's a spin-out (wheel yanked to a
+   *  coin-flip side plus a yaw kick, so it actually rotates at crawl speed),
+   *  under it a swerve-and-brake. A fresh knock can escalate a swerve into a
+   *  spin-out or extend the timer, never the reverse. The side is drawn from
+   *  the seeded sim RNG (deterministic). traffic.ts plays the panic out. */
+  private panicTraffic(a: Actor, impact: number): void {
+    if (a.kind !== 'vehicle' || a.isPlayer || !a.scripted || !a.started || a.crashed) return;
+    const severity = Math.min(1, impact / TRAFFIC_PANIC_FULL);
+    const spin = severity > TRAFFIC_PANIC_SPIN_SEVERITY;
+    if (a.panicKind === 2 && !spin) return; // already spinning out — a swerve can't downgrade it
+    if (a.panicKind === 0) a.panicSteer = simRand() < 0.5 ? -1 : 1; // the coin flip
+    if (spin) {
+      // yaw kick toward the steer side (+1 = right = heading decreasing =
+      // −ω_y), BANKED for traffic.ts to pay on the next fixed step: applied
+      // here, inside the contact event, it inflated the impact readings of the
+      // same step's remaining contact points (the tail swinging into the car
+      // that tapped it) and a knock under the wreck bar wrecked the car anyway.
+      if (a.panicKind !== 2) a.panicKick = -a.panicSteer * TRAFFIC_SPIN_KICK * severity;
+      a.panicKind = 2;
+      a.panicT = Math.max(a.panicT, TRAFFIC_SPIN_OUT_SECS);
+    } else {
+      a.panicKind = 1;
+      a.panicT = Math.max(a.panicT, TRAFFIC_SWERVE_SECS * Math.max(0.4, severity / TRAFFIC_PANIC_SPIN_SEVERITY));
+    }
+  }
+
+  /** Step every live SLAM wobble (Feature F, Burnout's slam): decay life by dt
    *  and, while alive, fold the parabolic envelope env = r − r² (r = life/total,
    *  peaks at r=0.5) into the victim's yaw rate. A slam that wrecks its car, or
    *  whose car despawned, is dropped. Runs inside the fixed step — deterministic. */
@@ -1935,14 +2095,14 @@ export class Game {
 
   /** Feature F crash master-switch + Feature G water kill, per fixed step.
    *
-   *  CRASH MASTER SWITCH (BP UpdateCrashing): CJ's `crashed` flag is the master
+   *  CRASH MASTER SWITCH (Burnout's crash master switch): CJ's `crashed` flag is the master
    *  gate — a crashed car is past controlled contact, so instead of the
    *  anisotropic contact friction (applyShuntKick, gated on !crashed) it takes
    *  a RAW per-axis exponential spin damp here. This is the formalised swap the
    *  spec asks for: one `crashed` gate, controlled-contact one side, raw tumble
    *  the other — no duplicate state, layered on the existing crashed/destabilized.
    *
-   *  WATER KILL (Feature G, BP UpdateInWaterBehaviour — a hard kill, not
+   *  WATER KILL (Feature G, Burnout's water rule — a hard kill, not
    *  buoyancy): a car whose chassis has sunk WATER_KILL_DEPTH below the level's
    *  seaLevel is drowned — zero its linear+angular velocity AND the pending
    *  force/torque rows (so nothing this step re-accelerates the corpse), then
@@ -2024,6 +2184,14 @@ export class Game {
     a.howCloseToWrecked = 0;
     a.destabilizedByPlayer = false;
     a.destabilizedBy = 0;
+    a.panicT = 0; // a wreck is past panicking
+    a.panicKind = 0;
+    a.panicKick = 0;
+    for (const s of a.susp) {
+      s.scrubX = 0; // a fresh wreck starts with no scrub memory
+      s.scrubZ = 0;
+    }
+    this.shuntPushes.delete(a.body.id); // and nobody's pushing a wreck
     a.body.collisionFilterMask = -1;
     a.body.angularFactor.set(1, 1, 1); // a wreck tumbles freely (the force-driven player locks roll/pitch while driving)
     // B3: a crash collapses the earned (extended) boost bar back to 1x — the
@@ -2306,10 +2474,12 @@ export class Game {
       }
     }
 
-    // Feature F: step the one-shot SLAM wobbles + the crash master-switch raw
-    // tumble, and Feature G: the water kill switch — all inside the fixed step,
-    // before the player-drive block, so a fresh slam/water-kill is felt this
-    // step (and crashed cars take the raw tumble, not the controlled contact).
+    // Feature F: step the sustained shunt pushes, the one-shot SLAM wobbles +
+    // the crash master-switch raw tumble, and Feature G: the water kill switch
+    // — all inside the fixed step, before the player-drive block, so a fresh
+    // shunt/slam/water-kill is felt this step (and crashed cars take the raw
+    // tumble, not the controlled contact).
+    this.stepShuntPushes();
     this.stepSlams();
     this.stepCrashTumbleAndWater();
 
@@ -2480,6 +2650,7 @@ export class Game {
         }
       }
     }
+    this.updatePlayerLamps(dt);
     // weight-transfer lean is purely visual — the physics body stays level
     // so the suspension rays and collision box are unaffected
     if (this.player && !this.player.crashed) {
@@ -2491,6 +2662,46 @@ export class Game {
       lp.mesh.position.set(lp.body.position.x, lp.body.position.y, lp.body.position.z);
       lp.mesh.quaternion.set(lp.body.quaternion.x, lp.body.quaternion.y, lp.body.quaternion.z, lp.body.quaternion.w);
     }
+  }
+
+  /** Player lamp lenses — presentation only, in the render tail. Brake
+   *  lights brighten on the brake INPUT (control.braking is the sim's own
+   *  read of the recorded keys, so a replay lights them identically) and
+   *  the reverse lenses come on once the body actually backs up along its
+   *  forward axis. Both ramp over LAMP_RAMP so a tapped pedal fades rather
+   *  than strobing. The player's hull wears the swapped material CLONES
+   *  (adoptPlayerMaterials), so only its lenses change — traffic keeps the
+   *  shared showroom lens materials and the daynight sweep alone. */
+  private updatePlayerLamps(dt: number): void {
+    const p = this.player;
+    if (!p) return;
+    const alive = !p.crashed && !p.exploded;
+    // hull forward = local −z through the body quaternion
+    const q = p.body.quaternion;
+    const fx = -2 * (q.x * q.z + q.w * q.y);
+    const fy = -2 * (q.y * q.z - q.w * q.x);
+    const fz = -(1 - 2 * (q.x * q.x + q.y * q.y));
+    const v = p.body.velocity;
+    const along = v.x * fx + v.y * fy + v.z * fz;
+    const brakeTarget = alive && this.control.braking ? 1 : 0;
+    const reverseTarget = alive && along < -0.3 ? 1 : 0;
+    const step = dt > 0 ? Math.min(1, dt / LAMP_RAMP) : 1;
+    this.brakeGlow += Math.max(-step, Math.min(step, brakeTarget - this.brakeGlow));
+    this.reverseGlow += Math.max(-step, Math.min(step, reverseTarget - this.reverseGlow));
+    const tail = playerSwap.get(taillightMat);
+    if (tail) {
+      tail.emissiveIntensity = nightEmissive(tail, this.timeOfDay) + BRAKE_GLOW * this.brakeGlow;
+      // brighter red tone-maps toward salmon; pull the emissive to a purer
+      // red as it brightens so a brake light stays RED, only hotter
+      const e = taillightMat.emissive;
+      tail.emissive.setRGB(e.r, e.g * (1 - 0.7 * this.brakeGlow), e.b * (1 - 0.7 * this.brakeGlow));
+    }
+    const rev = playerSwap.get(reverseMat);
+    if (rev) rev.emissiveIntensity = REVERSE_GLOW * this.reverseGlow;
+    // the night brake point follows the same ramp (visible only at night —
+    // syncMeshes owns visibility; intensity never churns the light list)
+    const brake = p.nightLights?.brake;
+    if (brake) brake.intensity = BRAKE_INTENSITY * this.brakeGlow;
   }
 
   // wheel meshes ride the suspension and spin with the wheel's OWN angular
@@ -2814,6 +3025,13 @@ export class Game {
       for (let i = 0; i < this.actors.length; i++) {
         const a = this.actors[i];
         this.vyBefore[i] = a.kind === 'vehicle' && !a.crashed ? a.body.velocity.y : Infinity;
+        // crashed vehicles: remember the pre-solver spin for the per-variant
+        // crashed-contact spin scaling after the step (Infinity = not a wreck)
+        const wreck = a.kind === 'vehicle' && a.crashed;
+        const av = a.body.angularVelocity;
+        this.avBefore[i * 3] = wreck ? av.x : Infinity;
+        this.avBefore[i * 3 + 1] = wreck ? av.y : Infinity;
+        this.avBefore[i * 3 + 2] = wreck ? av.z : Infinity;
       }
       // capture the player's pre-solver yaw + planar velocity + grounded state for
       // the wall-graze anti-spin and the landing anti-scrub below. Suspension
@@ -2867,6 +3085,25 @@ export class Game {
       for (const a of this.actors) {
         if (a.kind !== 'vehicle' || a.crashed || !_contactIds.has(a.body.id)) continue;
         if (a.body.velocity.y > LIVE_CAR_CONTACT_VY) a.body.velocity.y = LIVE_CAR_CONTACT_VY;
+      }
+      // CRASHED-CONTACT SPIN SCALE (per variant, HANDLING.collision
+      // .crashedSpinScale): the spin a WRECK picks up from this step's contacts
+      // (walls, cars, the ground) is scaled so the heavies keep tumbling less —
+      // only the solver's DELTA is scaled, the spin it already had is untouched.
+      // Sedan = 1 (unchanged); a car wrecked mid-step keeps its full fling.
+      for (let i = 0; i < this.actors.length; i++) {
+        const a = this.actors[i];
+        if (a.kind !== 'vehicle' || !a.crashed || !_contactIds.has(a.body.id)) continue;
+        const px = this.avBefore[i * 3];
+        if (px === undefined || px === Infinity) continue;
+        const scale = HANDLING[a.spec?.variant ?? 'sedan'].collision.crashedSpinScale;
+        if (scale === 1) continue;
+        const py = this.avBefore[i * 3 + 1];
+        const pz = this.avBefore[i * 3 + 2];
+        const av = a.body.angularVelocity;
+        av.x = px + (av.x - px) * scale;
+        av.y = py + (av.y - py) * scale;
+        av.z = pz + (av.z - pz) * scale;
       }
       // WALL-GRAZE ANTI-SPIN: a barrier's off-centre friction impulse funnels
       // entirely into yaw on the grounded yaw-only chassis (angularFactor 0,1,0),

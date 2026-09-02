@@ -1,5 +1,5 @@
 import * as CANNON from 'cannon-es';
-import { FIXED_DT } from './constants';
+import { FIXED_DT, SHUNT_YAW_MAX, TRAFFIC_SPIN_OUT_SECS, TRAFFIC_SWERVE_SECS } from './constants';
 import { GameState, type Actor } from './types';
 import type { HeightSampler } from './suspension';
 import { createForceState, stepVehicleForces, type VehicleForceState } from './control/driving';
@@ -39,7 +39,11 @@ function laneHeading(dir: { x: number; z: number }): number {
 // to the far edge once they leave the map — so the junction never runs dry
 // no matter when the player arrives. Traffic never wrecks itself: only the
 // player (or the chaos the player caused) crashes it. The AI is
-// deliberately blind to the player — Burnout traffic never dodges you.
+// deliberately blind to the player — Burnout traffic never dodges you. It
+// does PANIC when hit, though (Burnout's traffic freak-out): a knock the car
+// survives puts the driver into a timed swerve-and-brake or a spin-out
+// (Game.panicTraffic decides which; the panic fields on the Actor carry it),
+// after which lane-holding resumes.
 
 const ACCEL = 7;
 const BRAKE = 16;
@@ -78,6 +82,9 @@ export function updateTraffic(actors: readonly Actor[], state: GameState, simTim
         b.quaternion.copy(a.q0);
         b.velocity.set(d.x * a.curSpeed, 0, d.z * a.curSpeed);
         b.angularVelocity.set(0, 0, 0);
+        a.panicT = 0; // recycled cars come back calm
+        a.panicKind = 0;
+        a.panicKick = 0;
       }
     }
 
@@ -134,6 +141,47 @@ export function updateTraffic(actors: readonly Actor[], state: GameState, simTim
     const lane = laneHeading(d);
     const headErr = wrapAngle(lane - bodyHeading); // + = lane is to our left
 
+    // ---- freak-out (Burnout's traffic panics when it's hit and survives): the
+    // panic overrides the lane-holding driver until it times out. A spin-out
+    // is the wheel yanked to the coin-flip side with the feet off everything,
+    // then hard on the brakes once the car is rotating; a swerve is a
+    // half-lock flinch plus brakes. Lane-hold (steer + yaw assist) is off for
+    // the duration, and the cruise target follows the car's REAL speed so it
+    // re-accelerates from wherever the panic left it, not from a stale cruise
+    // pace. -----------------------------------------------------------------
+    let panicking = false;
+    let panicSteer = 0;
+    let panicBrake = false;
+    if (a.panicT > 0) {
+      a.panicT -= FIXED_DT;
+      if (a.panicT <= 0) {
+        a.panicT = 0;
+        a.panicKind = 0;
+      } else {
+        panicking = true;
+        if (a.curSpeed > fwdSpeed) a.curSpeed = Math.max(0, fwdSpeed);
+        if (a.panicKick !== 0) {
+          // the spin-out's yaw kick, banked by the contact, paid now (one step
+          // later — see Actor.panicKick); capped like every imparted spin
+          const av = b.angularVelocity;
+          av.y = Math.max(-SHUNT_YAW_MAX, Math.min(SHUNT_YAW_MAX, av.y + a.panicKick));
+          a.panicKick = 0;
+          b.wakeUp();
+        }
+        if (a.panicKind === 2) {
+          const elapsed = TRAFFIC_SPIN_OUT_SECS - a.panicT;
+          panicSteer = fwdSpeed > 2 ? a.panicSteer : 0; // wheel over until the car's about stopped
+          panicBrake = elapsed > TRAFFIC_SPIN_OUT_SECS * 0.25;
+        } else {
+          // a swerve: a flinch on the wheel and — for a harder tap, whose
+          // window runs the full length — an opening stab of brake, then the
+          // car coasts out of it (not a stand on the pedal to a dead stop)
+          panicSteer = a.panicSteer * 0.7;
+          panicBrake = a.panicT > TRAFFIC_SWERVE_SECS * 0.7;
+        }
+      }
+    }
+
     let fs = _trafficForce.get(a);
     if (!fs) {
       fs = createForceState(a.spec?.variant ?? 'sedan', lane, a.curSpeed);
@@ -145,19 +193,21 @@ export function updateTraffic(actors: readonly Actor[], state: GameState, simTim
     fs.variant = a.spec?.variant ?? 'sedan';
 
     const tInput: ControlInput = {
-      steer: clamp(-headErr * 1.8, -1, 1), // hold the lane axis; sign per +1=right
-      throttle: a.curSpeed > fwdSpeed + 0.3,
+      steer: panicking ? panicSteer : clamp(-headErr * 1.8, -1, 1), // hold the lane axis; sign per +1=right
+      throttle: !panicking && a.curSpeed > fwdSpeed + 0.3,
       boost: false,
-      brake: a.curSpeed < fwdSpeed - 0.3 || a.curSpeed <= 0.01,
+      brake: panicking ? panicBrake : a.curSpeed < fwdSpeed - 0.3 || a.curSpeed <= 0.01,
+      noDrift: true, // traffic never drifts on purpose
     };
     stepVehicleForces(fs, a, tInput, heightAt, HANDLING[a.spec?.variant ?? 'sedan']);
 
     // crawl-speed lateral authority: below the steering lock's effective band
     // the steer command alone can't hold the lane, so add a damped yaw-assist
     // TORQUE toward the lane axis (pure yaw -> honors the grounded lock). Gated
-    // off when nearly stopped (a parked car at a red shouldn't creep-rotate).
+    // off when nearly stopped (a parked car at a red shouldn't creep-rotate)
+    // and while panicking (nobody's holding the lane in a spin-out).
     const grounded = a.susp.some((sp) => sp.grounded);
-    if (grounded && a.curSpeed > 0.5) {
+    if (grounded && !panicking && a.curSpeed > 0.5) {
       const mScale = b.mass / 1450;
       const tau = (LANE_HOLD_KP * headErr - LANE_HOLD_KD * b.angularVelocity.y) * mScale;
       _yawAssist.set(0, tau, 0);

@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import * as CANNON from 'cannon-es';
 import type { Actor } from '../types';
 import { simRand } from '../rng';
+import { WRECK_RIM_SAG } from '../constants';
 
 export interface LoosePart {
   mesh: THREE.Mesh;
@@ -25,7 +26,14 @@ export function popWheel(actor: Actor, worldPoint: THREE.Vector3, scene: THREE.S
     }
   });
   const wheel = actor.wheels.splice(best, 1)[0];
-  actor.susp.splice(best, 1); // that corner loses its spring
+  // that corner keeps a RIM: the spring stays — a wreck on its rims still rides
+  // its suspension and scrubs on the road instead of dropping its chassis box
+  // onto the ground and stopping dead — but sits a little lower (sag). Moved to
+  // the END of susp so the surviving wheels stay index-aligned with their
+  // corners (updateWheels pairs wheels[i] with susp[i]); a repair rebuilds both.
+  const corner = actor.susp.splice(best, 1)[0];
+  corner.sag = Math.min(corner.sag, WRECK_RIM_SAG);
+  actor.susp.push(corner);
   scene.attach(wheel); // keep world transform
 
   const b = new CANNON.Body({ mass: 14, material: matCar });

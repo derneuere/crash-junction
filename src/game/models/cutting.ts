@@ -48,7 +48,10 @@ function inPanelRegion(def: PanelDef, x: number, y: number, z: number): boolean 
   }
 }
 
-export function cutPanelTemplates(model: VehicleModel, defs: PanelDef[]): (PanelCut | null)[] {
+/** `noCut` vertex ranges (the lamp dressing) stay on the hull whatever
+ *  region their centroid lands in — they are display-only units, not
+ *  bodywork, and letting them into a cut would move its physics box. */
+export function cutPanelTemplates(model: VehicleModel, defs: PanelDef[], noCut: [number, number][] = []): (PanelCut | null)[] {
   const geo = model.body;
   const pos = geo.attributes.position as THREE.BufferAttribute;
   const norm = geo.attributes.normal as THREE.BufferAttribute;
@@ -65,6 +68,8 @@ export function cutPanelTemplates(model: VehicleModel, defs: PanelDef[]): (Panel
   for (const [s, e] of model.glassRanges) isGlass.fill(1, s, e);
   const isPaint = new Uint8Array(pos.count);
   for (const [s, e] of model.paintRanges) isPaint.fill(1, s, e);
+  const isKeep = new Uint8Array(pos.count);
+  for (const [s, e] of noCut) isKeep.fill(1, s, e);
 
   // assign each triangle to the first region that claims its centroid
   const triCount = index.count / 3;
@@ -74,6 +79,7 @@ export function cutPanelTemplates(model: VehicleModel, defs: PanelDef[]): (Panel
     const b = index.getX(t * 3 + 1);
     const c = index.getX(t * 3 + 2);
     if (isGlass[a] || isGlass[b] || isGlass[c]) continue;
+    if (isKeep[a] || isKeep[b] || isKeep[c]) continue;
     const x = (pos.getX(a) + pos.getX(b) + pos.getX(c)) / 3;
     const y = (pos.getY(a) + pos.getY(b) + pos.getY(c)) / 3;
     const z = (pos.getZ(a) + pos.getZ(b) + pos.getZ(c)) / 3;

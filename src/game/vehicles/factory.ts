@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import * as CANNON from 'cannon-es';
 import { GRAVITY, SUSP_MAX_COMP, SUSP_SAG, SUSP_ZETA } from '../constants';
 import type { Actor, CollideEvent, DeformablePart, SuspensionCorner, VehicleSpec } from '../types';
-import { glassMat, headlightMat, hullMat, taillightMat, wheelGeometry, wheelMat } from '../geometry';
+import { glassMat, headlightMat, hullMat, reverseMat, taillightMat, wheelGeometry, wheelMat } from '../geometry';
 import type { VehicleModel } from '../models';
 
 export function registerDeformable(
@@ -11,6 +11,7 @@ export function registerDeformable(
   glass?: [number, number][],
   head?: [number, number][],
   tail?: [number, number][],
+  reverse?: [number, number][],
 ): void {
   const pos = mesh.geometry.attributes.position as THREE.BufferAttribute;
   const col = mesh.geometry.attributes.color as THREE.BufferAttribute;
@@ -21,6 +22,7 @@ export function registerDeformable(
     glass,
     head,
     tail,
+    reverse,
   });
 }
 
@@ -54,7 +56,7 @@ export function makeModelHull(model: VehicleModel, color: number): THREE.Mesh {
     for (let i = s; i < e; i++) col.setXYZ(i, c.r, c.g, c.b);
   }
   whitenGlass(col, model.glassRanges);
-  const mesh = new THREE.Mesh(geo, geo.groups.length ? [hullMat, glassMat, headlightMat, taillightMat] : hullMat);
+  const mesh = new THREE.Mesh(geo, geo.groups.length ? [hullMat, glassMat, headlightMat, taillightMat, reverseMat] : hullMat);
   mesh.castShadow = mesh.receiveShadow = true;
   return mesh;
 }
@@ -74,8 +76,9 @@ export function exhaustAnchors(spec: VehicleSpec): [THREE.Vector3, THREE.Vector3
   return [new THREE.Vector3(-x, y, z), new THREE.Vector3(x, y, z)];
 }
 
-/** Model wheels carry tire/rim paint as vertex colors. */
-const modelWheelMat = new THREE.MeshStandardMaterial({ vertexColors: true, flatShading: true, roughness: 0.8 });
+/** Model wheels carry tire/rim paint as vertex colors. Smooth-shaded: the
+ *  wheel templates bring their own normals (round tyre, hard rim edges). */
+const modelWheelMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.7, metalness: 0.15 });
 
 // ---------- night vehicle lights ----------
 // Real dynamic lights, three.js forward-renderer budget permitting: one
@@ -87,6 +90,13 @@ const modelWheelMat = new THREE.MeshStandardMaterial({ vertexColors: true, flatS
 // render list recompiles the whole scene.
 export const HEADLIGHT_INTENSITY = 80; // candela (physical falloff)
 export const BRAKE_INTENSITY = 22;
+// Player lamp LENSES (the emissive hull groups, not the dynamic lights):
+// extra tail emissive while the brake input is held, reverse-lens emissive
+// while the body backs up, and the ramp both follow so a tapped pedal
+// fades instead of strobing. Render-tail state only — never sim.
+export const BRAKE_GLOW = 2.0;
+export const REVERSE_GLOW = 2.4;
+export const LAMP_RAMP = 0.08; // seconds, in and out
 
 export function makeVehicleLights(spec: VehicleSpec, group: THREE.Group): { head: THREE.SpotLight; brake: THREE.PointLight } {
   const lensY = -spec.rideHeight + 0.72; // group origin rides at COM height
@@ -113,8 +123,13 @@ export function buildWheels(spec: VehicleSpec, group: THREE.Group, model?: Vehic
     [-ax, zr], [ax, zr],
   ];
   for (const [wx, wz] of corners) {
-    const geo = model ? (wx < 0 ? model.wheelL : model.wheelR) : wheelGeometry(spec.wheelRadius);
+    // no model: the shared generic wheel — steel rims on the heavy variants, alloys on cars
+    const side = wx < 0 ? 'L' : 'R';
+    const style = spec.variant === 'sedan' ? 'five-spoke' : 'steelie';
+    const geo = model ? (wx < 0 ? model.wheelL : model.wheelR) : wheelGeometry(spec.wheelRadius, style, side);
     const wh = new THREE.Mesh(geo, model ? modelWheelMat : wheelMat);
+    // the coarse twin carlod.ts swaps in on non-player cars past the near ring
+    wh.userData.lodGeometry = model ? (wx < 0 ? model.wheelCoarseL : model.wheelCoarseR) : wheelGeometry(spec.wheelRadius, style, side, 'coarse');
     wh.position.set(wx, -(spec.rideHeight - spec.wheelRadius), wz);
     wh.castShadow = true;
     group.add(wh);
@@ -134,6 +149,7 @@ export function buildSuspension(spec: VehicleSpec, wheels: THREE.Mesh[], mass: n
     ax: w.position.x, az: w.position.z, preload, k, c,
     fmax: (preload + k * SUSP_MAX_COMP) * 1.5, dist: spec.rideHeight, grounded: false, sag: 1,
     load: preload, // seed at static load so the tire model has grip from frame 1
+    scrubX: 0, scrubZ: 0, // wreck-scrub memory (crashed cars only)
   }));
 }
 
@@ -146,6 +162,7 @@ export function makeActor(
     q0: body.quaternion.clone(), scripted: null, started: false, curSpeed: 0,
     isPlayer: false, crashed: false, destabilized: 0, destabilizeWindow: 0, howCloseToWrecked: 0,
     destabilizedByPlayer: false, destabilizedBy: 0,
+    panicT: 0, panicKind: 0, panicSteer: 1, panicKick: 0,
     popped: 0, damageLvl: 0, smokeT: 0,
     exploded: false, fuse: null, valueMult, cashLeft,
   };
