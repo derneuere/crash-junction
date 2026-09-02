@@ -41,6 +41,12 @@ export interface HandlingAttribs {
     speedMinAt: number; // at/above this speed lock = lockHigh (m/s)  (STEER_MIN_AT)
     ramp: number; // rate to take up lock (1/s)  (STEER_RAMP)
     visualGain: number; // presentation-only render-angle gain  (VISUAL_STEER_GAIN)
+    /** Cap on the front-wheel angle while DRIFTING (rad). In a slide the
+     *  fronts track the velocity vector (countersteer) plus the stick's
+     *  modulation; this bounds that so a deep slide can't crank the wheels
+     *  past what the geometry allows — Burnout's max steering angle during
+     *  drift. */
+    driftMaxAngle: number;
   };
   /** Drift entry/sustain/exit (BP physicsvehicledriftattribs + CJ's slip-chase). */
   drift: {
@@ -103,6 +109,13 @@ export interface HandlingAttribs {
     driftLatPeakCoeff: number; // drift lateral peak (lower/flatter — ~0.72× peak)
     driftLatFallCoeff: number; // drift lateral plateau
     adhesiveLimit: number; // static-friction adhesion ceiling — BP AdhesiveLimit
+    /** Friction-ellipse semi-axes as multiples of the corner's spring load
+     *  (the force model's tire limit = load × mu × adhesiveLimit). Lateral
+     *  sets how hard the car corners before the grip curve breaks it loose;
+     *  longitudinal is generous (arcade) so the per-gear accel table survives
+     *  and only gates drive once cornering eats the budget. */
+    latMu: number;
+    longMu: number;
   };
   /** Extra spin/launch energy injected on a crash — BP CrashExtra*Factor (flat
    *  0.3 across the whole roster) — PLUS the per-variant car-on-car CONTACT
@@ -151,6 +164,7 @@ const SEDAN: HandlingAttribs = {
     speedMinAt: 38, // STEER_MIN_AT
     ramp: 1 / 0.4, // STEER_RAMP
     visualGain: 1.8, // VISUAL_STEER_GAIN
+    driftMaxAngle: (35 * Math.PI) / 180, // fronts may countersteer up to 35° in a slide
   },
   drift: {
     maxSlip: (40 * Math.PI) / 180, // DRIFT_MAX_SLIP
@@ -202,6 +216,8 @@ const SEDAN: HandlingAttribs = {
     driftLatPeakCoeff: 0.72, // ~0.72× peak — the flatter drift curve
     driftLatFallCoeff: 0.6,
     adhesiveLimit: 1.0, // BP AdhesiveLimit intent
+    latMu: 1.7, // = the force model's former global LAT_MU (today)
+    longMu: 3.2, // = former global LONG_MU (today)
   },
   collision: {
     crashExtraRoll: 0.3, // BP CrashExtraRollVelocityFactor (flat 0.3 roster-wide)
@@ -237,6 +253,7 @@ const BUS: HandlingAttribs = {
     speedMinAt: 34, // lock fades sooner (spec SpeedForMinAngle scales w/ mass)
     ramp: 1 / 0.5, // slower to take up lock (heavier hydraulics)
     visualGain: 1.6,
+    driftMaxAngle: (28 * Math.PI) / 180, // long wheelbase — less countersteer range
   },
   drift: {
     maxSlip: (35 * Math.PI) / 180, // harder to hold a big slide
@@ -288,6 +305,8 @@ const BUS: HandlingAttribs = {
     driftLatPeakCoeff: 0.65,
     driftLatFallCoeff: 0.55,
     adhesiveLimit: 0.95,
+    latMu: 1.5, // less lateral bite per tonne — a heavy pushes wide
+    longMu: 3.0,
   },
   collision: {
     crashExtraRoll: 0.3, // flat 0.3 roster-wide
@@ -322,6 +341,7 @@ const TANKER: HandlingAttribs = {
     speedMinAt: 30, // lock fades soonest
     ramp: 1 / 0.55, // slowest to take up lock (BP TimeForLock up to 0.55)
     visualGain: 1.5,
+    driftMaxAngle: (24 * Math.PI) / 180, // the least countersteer range
   },
   drift: {
     maxSlip: (30 * Math.PI) / 180, // barely drifts — a heave, not a slide
@@ -373,6 +393,8 @@ const TANKER: HandlingAttribs = {
     driftLatPeakCoeff: 0.6,
     driftLatFallCoeff: 0.5,
     adhesiveLimit: 0.9,
+    latMu: 1.35, // the lowest lateral bite — a tanker heaves, it doesn't carve
+    longMu: 2.8,
   },
   collision: {
     crashExtraRoll: 0.3, // flat 0.3 roster-wide

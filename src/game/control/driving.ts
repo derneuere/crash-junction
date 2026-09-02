@@ -45,13 +45,7 @@ import {
   REVERSE_MAX_SPEED,
   ROLL_MAX,
   ROLL_PER_LATG,
-  STEER_FULL_BELOW,
-  STEER_LOCK_HIGH,
-  STEER_LOCK_LOW,
-  STEER_MIN_AT,
-  STEER_RAMP,
   STEER_SHAPE_BLEND,
-  VISUAL_STEER_GAIN,
   clamp,
   shapeSteer,
   wrapAngle,
@@ -67,25 +61,64 @@ import {
  * orientation when grounded (no pin). heading/velAngle/speed/yawVel are now
  * DERIVED from the body each frame for the camera, wheels, AI and HUD.
  *
- * P1 scope: grounded driving is fully force-based (engine drive + the
- * weight-loaded tire friction ellipse + steering + a basic drift). Airborne
- * still uses the kinematic air-attitude pin (orientation.ts) — ported to
- * torques in a later phase. The boost economy, gearbox, drift FSM and per-
- * variant attribs vault are reused unchanged; only the integration changed.
+ * Grounded driving is fully force-based (engine drive + the weight-loaded tire
+ * friction ellipse + steering + the drift model: velocity-tracking fronts, a
+ * slip-rate-damped yaw controller, a speed-scaled side force, chaining and a
+ * natural straightening torque). Airborne attitude is corrective torques (roll
+ * auto-level, pitch follow, yaw aftertouch). The boost economy and gearbox are
+ * read through the per-variant HANDLING vault; the sedan's numbers are the
+ * proven ones, the heavies carry their own.
  */
 
-// ---- force-model tuning (global for P1; per-variant later) -------------------
-/** Lateral friction-ellipse coefficient: how hard the car corners before the
- *  grip curve breaks it loose. Scaled per corner by the spring's normal load.
- *  Kept moderate so peak cornering load stays within the suspension's capacity
- *  (too high → a corner spring spikes to fmax and launches the car). */
-const LAT_MU = 1.7;
-/** Longitudinal friction-ellipse coefficient: generous so CJ's tuned per-gear
- *  arcade acceleration survives; it only gates drive once cornering eats grip. */
-const LONG_MU = 3.2;
-/** Rear lateral-grip multiplier while drifting — the rear lets go so the tail
- *  steps out (the dedicated drift curve does the rest). */
-const DRIFT_REAR_GRIP = 0.6;
+// ---- force-model tuning ------------------------------------------------------
+// The per-tire friction limits (latMu / longMu / adhesiveLimit), the drift rear
+// slip (wheelSlip), the drift side force and yaw torque, the steering lock and
+// the drift countersteer cap all come from the variant's HANDLING vault now —
+// one solver, per-car data. What stays here is solver shape: gains expressed
+// per unit of the body's own yaw inertia (so a bus and a sedan get the same
+// damping ratio), and the few dimensionless feel scalars below.
+/** The rear's drift grip multiplier is derived from the vault's drift
+ *  wheelSlip (more slip = less rear grip): 1 − DRIFT_WHEEL_SLIP_TO_GRIP·wheelSlip.
+ *  The sedan's 0.25 lands on the proven 0.6 rear grip. */
+const DRIFT_WHEEL_SLIP_TO_GRIP = 1.6;
+/** While drifting the fronts TRACK THE VELOCITY VECTOR (Burnout recomputes the
+ *  steering angle from the angle between velocity and nose while sliding) —
+ *  that is the countersteer you see on a drifting Burnout car, and it keeps
+ *  the front tires near their grip peak so they pivot the car instead of
+ *  scrubbing. The stick then MODULATES around that: this fraction of the
+ *  normal speed-sensitive lock is added on top (steer into the slide → the
+ *  fronts pull the nose round harder; countersteer → they push it back). */
+const DRIFT_STEER_AUTHORITY = 0.5;
+/** Drift side force: the sideways, ground-tangent push toward the inside of the
+ *  corner that makes a Burnout drift CARVE (a deeper slide is a tighter corner,
+ *  not a wider one). m/s² per unit of the vault's drift.sideForce, scaled by
+ *  driftScale and applied at the COM (yaw-neutral — the yaw PD owns the angle). */
+const DRIFT_SIDE_ACCEL_PER_UNIT = 0.9;
+/** Natural straightening (Burnout's gentle self-align when NOT actively
+ *  drifting): a yaw PD toward zero body slip, per unit of yaw inertia. The tire
+ *  model has no self-aligning moment once a slide passes ~60° (both axles
+ *  slide symmetrically), so a dropped drift or a lifted-throttle slide used to
+ *  keep its spin until the speed died. Only engages past NATURAL_MIN_SLIP so a
+ *  gripped corner's few degrees of working slip are untouched. rad/s² per rad,
+ *  rad/s² per rad/s (ζ≈0.9). */
+const NATURAL_YAW_KP = 8;
+const NATURAL_YAW_KD = 5;
+const NATURAL_MIN_SLIP = 0.1; // rad (~6°)
+/** A slide is sustained on PLANAR speed (a car sliding sideways at 13 m/s is
+ *  still drifting even if only 8 m/s of it points down the nose); below this
+ *  it hooks up. Past DRIFT_SPUN_SLIP the slide has become a spin — drop it and
+ *  let the natural straightening catch it. */
+const DRIFT_SUSTAIN_MIN_SPEED = 8;
+const DRIFT_SPUN_SLIP = (100 * Math.PI) / 180;
+/** Drift CHAINING: holding countersteer past this fraction of lock while the
+ *  slide winds down swings the tail out the OTHER way once the nose crosses
+ *  within DRIFT_CHAIN_SLIP of the velocity — a new drift without a new brake
+ *  tap (the Burnout tail-swap). Straighten the wheel instead and the drift ends. */
+const DRIFT_CHAIN_STEER = 0.5;
+const DRIFT_CHAIN_SLIP = (12 * Math.PI) / 180;
+/** Cap on the RENDERED front-wheel angle (the visual gain exaggerates the small
+ *  gripped lock; a countersteering drift is already a big real angle). */
+const VISUAL_STEER_MAX = (40 * Math.PI) / 180;
 /** Vertical fraction of ride height at which tire forces are applied below the
  *  COM. Full contact depth (1.0) is physically correct but levers a tall roll
  *  moment that lifts the inner wheels and rolls an arcade car onto its side at
@@ -99,10 +132,20 @@ const CONTACT_Y_FRAC = 0;
 /** Drift yaw PD (Burnout's drift-angle + drift-yaw model): rotate the nose to a
  *  TARGET slip angle so a drift HOLDS at a controllable angle instead of
  *  spinning. KP drives slip→target, KD damps the yaw rate (the slide settles,
- *  doesn't run away). Both scaled per variant by drift.naturalYawTorque/7000.
- *  Yaw-only, so the grounded angularFactor lock is honored. N·m. */
-const DRIFT_YAW_KP = 55000;
-const DRIFT_YAW_KD = 16000;
+ *  doesn't run away). Expressed per unit of the body's yaw inertia (rad/s² per
+ *  rad, rad/s² per rad/s — the sedan's proven 55000/16000 N·m over its
+ *  ~2990 kg·m²) so the heavies get the same damping ratio instead of an
+ *  under-powered slide, then scaled by drift.naturalYawTorque/7000 (the KD
+ *  additionally by drift.angularDamping/0.125 — the vault's extra spin bleed
+ *  while sliding). Yaw-only, so the grounded angularFactor lock is honored. */
+const DRIFT_YAW_KP = 36;
+/** The D term damps the SLIP RATE (how fast the nose is rotating relative to
+ *  the path), not the raw yaw rate: a car holding a steady drift arc has a
+ *  large constant yaw rate that is the corner, not a spin — damping it fought
+ *  the slide and left the angle 20° short of its target. A small pure yaw-rate
+ *  term stays for the vault's drift angularDamping. */
+const DRIFT_SLIP_KD = 5.35;
+const DRIFT_YAW_KD = 1.0;
 /** Faint forward thrust kept while airborne so boost/throttle still reads in a
  *  jump (no traction up there). Fraction of the grounded drive force. */
 const AIR_THRUST_FRAC = 0.35;
@@ -110,9 +153,10 @@ const AIR_THRUST_FRAC = 0.35;
  *  grip curve breaks loose at a low slip angle (~7°), so at speed a steering
  *  input can push body-slip past the peak before the rear stabilises it and the
  *  yaw runs away into a spin. This bleeds yaw RATE proportional to speed (0 below
- *  STEER_FULL_BELOW, full at STEER_MIN_AT), keeping the car from oversteer-
- *  spinning while leaving low-speed agility untouched. N·m per (rad/s) at top. */
-const YAW_DAMP_TOP = 4200;
+ *  the steering's speedFullBelow, full at speedMinAt), keeping the car from
+ *  oversteer-spinning while leaving low-speed agility untouched. Per unit of
+ *  yaw inertia (1/s; the sedan's 4200 N·m per rad/s over ~2990 kg·m²). */
+const YAW_DAMP_TOP = 1.4;
 
 /** Drift finite-state machine. NONE, or a LEFT/RIGHT slide whose
  *  direction is LATCHED from the sign of the steering input at entry; the
@@ -194,10 +238,11 @@ export interface DriveState {
 }
 
 /** Speed-sensitive steering lock (rad) — full lock low, fades to a sliver at
- *  speed (Burnout's speed-sensitive steering). Shared by the wheel steer + the visual. */
-function steerLock(speed: number): number {
-  const t = clamp((speed - STEER_FULL_BELOW) / (STEER_MIN_AT - STEER_FULL_BELOW), 0, 1);
-  return STEER_LOCK_LOW + (STEER_LOCK_HIGH - STEER_LOCK_LOW) * t;
+ *  speed (Burnout's speed-sensitive steering), from the variant's steering
+ *  vault. Shared by the wheel steer + the visual. */
+function steerLock(speed: number, st: HandlingAttribs['steering']): number {
+  const t = clamp((speed - st.speedFullBelow) / (st.speedMinAt - st.speedFullBelow), 0, 1);
+  return st.lockLow + (st.lockHigh - st.lockLow) * t;
 }
 
 /**
@@ -252,6 +297,9 @@ export interface ForceStepResult {
   forwardSpeed: number; // signed forward speed (m/s)
   desiredAccel: number; // m/s² the drivetrain wanted this step (for visual pitch)
   bodySlip: number; // wrapAngle(heading - velAngle)
+  /** The PHYSICAL front-wheel angle this step (rad, + = left; includes the
+   *  drift countersteer) — the wrapper renders it. 0 when airborne. */
+  frontSteer: number;
 }
 
 /** Build a lightweight force state for a scripted (AI/traffic) actor, seeded
@@ -331,7 +379,7 @@ export function stepVehicleForces(
   // ---- steering ramp (quartic shaping + faster return-to-centre) -------------
   const target = clamp(shapeSteer(input.steer, STEER_SHAPE_BLEND), -1, 1);
   const centering = Math.abs(target) < Math.abs(s.steer) || target * s.steer < 0;
-  const rate = STEER_RAMP * (centering ? CENTER_BIAS : 1);
+  const rate = attribs.steering.ramp * (centering ? CENTER_BIAS : 1);
   s.steer += clamp(target - s.steer, -rate * dt, rate * dt);
 
   // ---- drift FSM (entry/exit on the DERIVED body slip) ------------------------
@@ -342,6 +390,7 @@ export function stepVehicleForces(
   const bodySlip = wrapAngle(s.heading - s.velAngle); // actual slip angle now
   if (
     s.driftState === DriftState.None &&
+    !input.noDrift &&
     s.recentBrake > 0 &&
     Math.abs(s.steer) > 0.3 &&
     forwardSpeed > attribs.drift.minSpeed
@@ -354,13 +403,33 @@ export function stepVehicleForces(
   }
   s.drifting = s.driftState !== DriftState.None;
   s.tighten = Math.max(0, s.tighten - dt / 0.6);
-  // exit: the slide has wound down (driftScale decays to ~0 once you stop
-  // steering INTO it — see the grounded drift block) or it's too slow to
-  // sustain. NOT on the small ENTRY slip: driftScale is kickstarted so the slide
-  // gets a chance to build before this can fire.
-  if (s.drifting && (s.driftScale < 0.12 || forwardSpeed < 12)) {
-    s.driftState = DriftState.None;
-    s.drifting = false;
+  // exit / chain: the slide is sustained on PLANAR speed (not the forward
+  // component — a car sliding at 13 m/s with its nose 50° off is still in a
+  // drift), dropped once it's too slow or has spun past DRIFT_SPUN_SLIP. When
+  // it has wound down (driftScale decays to ~0 once you stop steering INTO it —
+  // see the grounded drift block): straightened wheel → the drift ends; held
+  // COUNTERSTEER → keep it alive at zero target (the fronts catch the slide)
+  // and, once the nose crosses within DRIFT_CHAIN_SLIP of the velocity, swing
+  // the tail out the OTHER way (drift chaining, no new tap). NOT on the small
+  // ENTRY slip: driftScale is kickstarted so the slide gets a chance to build.
+  if (s.drifting) {
+    const dirNow = driftSign(s.driftState);
+    const steerInto = -dirNow * s.steer; // +1 deepening, −1 countersteer
+    if (planarV < DRIFT_SUSTAIN_MIN_SPEED || Math.abs(bodySlip) > DRIFT_SPUN_SLIP) {
+      s.driftState = DriftState.None;
+    } else if (s.driftScale < 0.12) {
+      if (steerInto < -DRIFT_CHAIN_STEER && planarV > attribs.drift.minSpeed) {
+        if (Math.abs(bodySlip) < DRIFT_CHAIN_SLIP) {
+          s.driftState = dirNow > 0 ? DriftState.Right : DriftState.Left; // tail-swap
+          s.driftScale = 0.4;
+          s.tighten = 0;
+        }
+        // else: countersteer still catching the slide — hold the drift at ~0 target
+      } else {
+        s.driftState = DriftState.None;
+      }
+    }
+    s.drifting = s.driftState !== DriftState.None;
   }
   // grip blend (cosmetic / earn weighting; the real grip is per-tire now)
   const gripGoal = s.drifting ? 0 : 1;
@@ -370,7 +439,10 @@ export function stepVehicleForces(
   //      intended acceleration as a force. Feed it the REAL measured speed; its
   //      speed integration becomes a per-frame scratch whose delta = the accel
   //      the drivetrain wants. All gears/boost/burnout/tier logic reused as-is. -
-  const measured = Math.max(0, forwardSpeed);
+  // The economy runs on PLANAR speed while moving forward (not the forward
+  // component): in a 30° slide the nose-projected speed reads ~13% low, so a
+  // drifting car kept getting full drive past its cruise ceiling.
+  const measured = forwardSpeed > 0 ? Math.max(forwardSpeed, planarV) : 0;
   s.speed = measured;
   updateSpeed(s, input); // advances gear/boost economy + s.speed scratch
   const desiredAccel = (s.speed - measured) / dt; // m/s² the drivetrain wants
@@ -419,6 +491,7 @@ export function stepVehicleForces(
   );
 
   const airborne = !player.susp.some((su) => su.grounded);
+  let frontSteer = 0;
 
   // ---- reverse: once braking has brought the car to a near-stop, continuing to
   //      hold the brake drives it backward at a limited speed (arcade brake-is-
@@ -451,24 +524,40 @@ export function stepVehicleForces(
     // applied AT the contact → yaw/slide emerge. RWD: drive on the rear axle.
     // input.steer is +1 for RIGHT / −1 for LEFT; a +rotation about the body up
     // axis points the wheel LEFT, so negate to steer the correct way.
-    const steerAngle = -steerLock(measured) * s.steer;
+    const lock = steerLock(measured, attribs.steering);
+    const dir = driftSign(s.driftState);
+    let steerAngle = -lock * s.steer;
+    if (s.drifting) {
+      // DRIFT STEERING: the fronts point along the velocity (−bodySlip turns the
+      // wheel from the nose back onto the travel direction = countersteer), the
+      // stick modulates around that, all capped at the variant's drift max angle.
+      const maxDrift = attribs.steering.driftMaxAngle;
+      steerAngle = clamp(-bodySlip - lock * s.steer * DRIFT_STEER_AUTHORITY, -maxDrift, maxDrift);
+    }
+    frontSteer = steerAngle;
     _steerQ.setFromAxisAngle(_up, steerAngle);
 
     let rearGrounded = 0;
     let frontGrounded = 0;
     let groundedCount = 0;
+    let loadSum = 0;
     for (const su of player.susp) {
       if (!su.grounded || su.load <= 0) continue;
       groundedCount++;
+      loadSum += su.load;
       if (su.az < 0) frontGrounded++;
       else rearGrounded++;
     }
     if (groundedCount === 0) groundedCount = 1;
-    const dir = driftSign(s.driftState);
 
     const latC = latGripCurve(attribs);
     const longC = longGripCurve(attribs);
     const driftC = driftLatGripCurve(attribs);
+    // per-variant tire limits: the friction ellipse's semi-axes as load
+    // multiples, both scaled by the tire's adhesive limit
+    const latMu = attribs.grip.latMu * attribs.grip.adhesiveLimit;
+    const longMu = attribs.grip.longMu * attribs.grip.adhesiveLimit;
+    const driftRearGrip = 1 - DRIFT_WHEEL_SLIP_TO_GRIP * attribs.drift.wheelSlip;
 
     for (const su of player.susp) {
       if (!su.grounded || su.load <= 0) continue;
@@ -495,7 +584,11 @@ export function stepVehicleForces(
       let wd: number;
       if (isFront) wd = frontGrounded > 0 ? (driveForce * (1 - rearShare)) / frontGrounded : 0;
       else wd = rearGrounded > 0 ? (driveForce * rearShare) / rearGrounded : 0;
-      const wb = brakeForce / groundedCount;
+      // brake BY LOAD: each corner takes the share of the pedal its spring is
+      // carrying, so the weight that transfers onto the nose under braking is
+      // what does the stopping (front bias emerges from the load, not a table)
+      // and a lightly-loaded inside rear can't be asked to lock up.
+      const wb = loadSum > 0 ? (brakeForce * su.load) / loadSum : brakeForce / groundedCount;
 
       // drifting: the REAR uses the flatter drift curve at reduced grip so the
       // tail steps out; the front keeps full lateral grip to point the slide.
@@ -503,8 +596,8 @@ export function stepVehicleForces(
       const params: TireParams = {
         latCurve: useDrift ? driftC : latC,
         longCurve: longC,
-        latMu: useDrift ? LAT_MU * DRIFT_REAR_GRIP : LAT_MU,
-        longMu: LONG_MU,
+        latMu: useDrift ? latMu * driftRearGrip : latMu,
+        longMu,
         surfaceGrip: 1,
         cornerMass: b.mass / 4,
         dt,
@@ -525,15 +618,21 @@ export function stepVehicleForces(
       b.applyForce(_force); // at COM (no r) → no roll/pitch moment
     }
 
+    // yaw inertia of THIS body (cannon's box inertia, local y) — every yaw gain
+    // below is per unit of it, so a bus settles like a sedan does
+    const iYaw = b.inertia.y;
+    const wYawG = b.angularVelocity.y;
+
     // ---- high-speed yaw stability (Burnout's high-speed angular damping) ---------------
     // Speed-gated yaw-rate bleed: keeps a fast corner from oversteer-spinning.
     // Suppressed while drifting (the slide is intentional yaw).
     if (!s.drifting) {
       const spd = Math.abs(forwardSpeed);
-      const gate = clamp((spd - STEER_FULL_BELOW) / (STEER_MIN_AT - STEER_FULL_BELOW), 0, 1);
-      const yawDampK = YAW_DAMP_TOP * gate * (attribs.base.highSpeedAngularDamping / 0.15);
+      const st = attribs.steering;
+      const gate = clamp((spd - st.speedFullBelow) / (st.speedMinAt - st.speedFullBelow), 0, 1);
+      const yawDampK = YAW_DAMP_TOP * iYaw * gate * (attribs.base.highSpeedAngularDamping / 0.15);
       if (yawDampK > 0) {
-        _torque.set(0, -b.angularVelocity.y * yawDampK, 0);
+        _torque.set(0, -wYawG * yawDampK, 0);
         b.applyTorque(_torque);
       }
     }
@@ -542,7 +641,11 @@ export function stepVehicleForces(
     // The rear's reduced grip (drift curve, in the tire loop) lets the tail step
     // out; this yaw PD rotates the nose to a TARGET slip angle set by how hard
     // you steer INTO the slide, grown in over driftScale and damped so it holds
-    // instead of spinning. Pure yaw → honors the angularFactor lock.
+    // instead of spinning. Pure yaw → honors the angularFactor lock. The drift
+    // SIDE FORCE then bends the path toward the inside of the corner so the
+    // slide carves — without it the tires alone turn a drifting car WIDER than
+    // a gripped corner, the opposite of what a Burnout drift is for.
+    const yawScale = attribs.drift.naturalYawTorque / 7000; // per-variant (median 7000)
     if (s.drifting) {
       const steerIntoDrift = clamp(-dir * s.steer, -1, 1); // +1 deepening, −1 countersteer
       // Hold the slide at full depth while you steer INTO it (past the entry
@@ -553,11 +656,47 @@ export function stepVehicleForces(
       s.driftScale = clamp(s.driftScale + (depth - s.driftScale) * Math.min(1, scaleRate * dt), 0, 1);
       const targetSlip = dir * attribs.drift.maxSlip * s.driftScale;
       const slipErr = wrapAngle(targetSlip - bodySlip);
-      const yawScale = attribs.drift.naturalYawTorque / 7000; // per-variant (median 7000)
-      _torque.set(0, (DRIFT_YAW_KP * slipErr - DRIFT_YAW_KD * b.angularVelocity.y) * yawScale, 0);
+
+      // side force toward the inside of the corner: perpendicular-left of the
+      // velocity is (cos va, 0, −sin va) for va = velAngle; dir signs it. Scaled
+      // by speed (Burnout scales the drift lateral force by speed): at a crawl a
+      // fixed sideways push would bend the path faster than the nose can follow.
+      // Banked BEFORE the yaw PD so the slip-rate estimate below sees it.
+      const speedScale = clamp(
+        (planarV - DRIFT_SUSTAIN_MIN_SPEED) / (attribs.drift.minSpeed - DRIFT_SUSTAIN_MIN_SPEED),
+        0,
+        1,
+      );
+      const sideAccel = attribs.drift.sideForce * DRIFT_SIDE_ACCEL_PER_UNIT * s.driftScale * speedScale;
+      if (sideAccel > 0 && planarV > 1) {
+        const inv = 1 / planarV;
+        // left-perp of the planar velocity, unit
+        _force.set(dir * b.velocity.z * inv, 0, -dir * b.velocity.x * inv);
+        _force.scale(b.mass * sideAccel, _force);
+        b.applyForce(_force); // at the COM → bends the path, no yaw moment
+      }
+
+      // slip rate = yaw rate − the path's own turn rate. The path turn rate is
+      // d(velAngle)/dt = (vz·ax − vx·az)/|v|² from the horizontal forces banked
+      // so far this step (tires + boost + the side force; suspension runs after
+      // controls and is vertical on the flat anyway). In a steady slide the two
+      // rates match and the D term is silent — it only damps the approach.
+      const pathRate =
+        planarV > 1 ? (b.velocity.z * b.force.x - b.velocity.x * b.force.z) / (b.mass * planarV * planarV) : 0;
+      const slipRate = wYawG - pathRate;
+      const kdYaw = DRIFT_YAW_KD * (attribs.drift.angularDamping / 0.125);
+      _torque.set(0, iYaw * (DRIFT_YAW_KP * slipErr - DRIFT_SLIP_KD * slipRate - kdYaw * wYawG) * yawScale, 0);
       b.applyTorque(_torque);
     } else {
       s.driftScale = Math.max(0, s.driftScale - dt / 0.25); // decay out of the slide
+      // natural straightening: a residual slide (post-drift, a knock) is pulled
+      // back toward zero slip — the self-align the tire model lacks past ~60°.
+      // Forward-moving only (reversing legitimately reads as 180° of slip).
+      if (forwardSpeed > 1 && Math.abs(bodySlip) > NATURAL_MIN_SLIP) {
+        const excess = bodySlip - Math.sign(bodySlip) * NATURAL_MIN_SLIP;
+        _torque.set(0, -iYaw * (NATURAL_YAW_KP * excess + NATURAL_YAW_KD * wYawG) * yawScale, 0);
+        b.applyTorque(_torque);
+      }
     }
   } else {
     // ---- airborne: restore full rotation (jumps tumble), faint forward thrust,
@@ -615,7 +754,7 @@ export function stepVehicleForces(
     s.airRoll = Math.asin(clamp(_right.dot(UP_W), -1, 1)); // bank readout (NaN-guarded; nothing consumes it yet)
   }
 
-  return { airborne, forwardSpeed, desiredAccel, bodySlip };
+  return { airborne, forwardSpeed, desiredAccel, bodySlip, frontSteer };
 }
 
 /**
@@ -635,7 +774,13 @@ export function stepDrive(
 ): void {
   const b = player.body;
   const dt = FIXED_DT;
-  const { airborne, forwardSpeed, desiredAccel, bodySlip } = stepVehicleForces(s, player, input, heightAt, attribs);
+  const { airborne, forwardSpeed, desiredAccel, bodySlip, frontSteer } = stepVehicleForces(
+    s,
+    player,
+    input,
+    heightAt,
+    attribs,
+  );
 
   // ---- boost EARN (drift sideways / fly / near-miss) -------------------------
   let earn = s.nearMissFill;
@@ -715,7 +860,14 @@ export function stepDrive(
   }
 
   // ---- front-wheel visual steer (presentation-only) --------------------------
-  s.steerAngle = steerLock(Math.abs(forwardSpeed)) * s.steer * VISUAL_STEER_GAIN;
+  // The rendered angle is the PHYSICAL front-wheel angle (so a drifting car
+  // visibly countersteers), sign-flipped to the render convention (+ = right).
+  // The gripped lock is small on screen, so it keeps the visual gain; a drift's
+  // countersteer is already a big real angle and renders 1:1. Airborne: hold
+  // the stick's lock so the wheels don't snap straight mid-jump.
+  const visGain = s.drifting ? 1 : attribs.steering.visualGain;
+  const physAngle = airborne ? -steerLock(Math.abs(forwardSpeed), attribs.steering) * s.steer : frontSteer;
+  s.steerAngle = clamp(-physAngle * visGain, -VISUAL_STEER_MAX, VISUAL_STEER_MAX);
   s.throttling = input.throttle;
   s.braking = input.brake;
 

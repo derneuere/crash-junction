@@ -72,6 +72,20 @@ These read assets or drive a headless game; they generate no shipped artifacts:
 - `tests/{lag,harbor,cloud-perf}-probe.mjs` — headless perf probes (frame-time
   median, draw calls, shader-compile spikes). Software-GL inflates absolute ms,
   so read the deltas, not the absolutes; these are diagnostics, not gates.
+- `tests/drive-probe.mjs` — headless driving-model probe: flattens the height
+  field, teleports the player to open ground and runs scripted manoeuvres
+  (launch, full stop, gripped corners, held drifts left/right, a lifted-throttle
+  slide, a mid-drift countersteer) through the real fixed step, reporting speed,
+  body slip, yaw rate, drift state and front-wheel angle every quarter second.
+  Run it before and after a handling change and diff the two reports.
+- `tests/rival-stall-probe.mjs [simSeconds]` — deterministic rival-AI stall
+  probe: pumps SILVER LAKE RING through the fixed step with a wall-blind
+  throttle-only player, force-wrecks each rival once to exercise the respawn
+  path, and dumps the full state (body, suspension loads, solver state, racer
+  state, solver contacts) of any rival that sits clean under 1 m/s for 2 s.
+  Unlike `ai-probe.mjs` it does not sample on the wall clock, so a stall
+  reproduces step-for-step. `REPLAY_ONLY=<fixture-substring>` on
+  `run-replay-tests.mjs` runs a single fixture and prints all its stats.
 
 All of these read render-time state only — they never record a fixture or touch
 sim/physics/RNG, so running them can't perturb a replay pin. The replay
@@ -195,6 +209,28 @@ tumble and auto-level via corrective torques), and slope-following is a small
 post-step tilt. The whole model rides cannon-es's **public API**
 (`applyForce` / `applyImpulse` / `applyTorque` / `angularFactor` / `world.step`),
 so no fork of the physics engine is needed.
+
+**The feel is data.** One solver, and a per-variant vault of tuning constants
+(`src/game/handling.ts`: steering lock and ramp, tire friction limits and grip
+curves, drift angle / side force / yaw torque, downforce and drag, engine tables,
+contact response). The sedan, the bus and the tanker all run the same code.
+
+**Drifting** is Burnout's, not a sim's. A brake tap while steering above the
+drift speed latches a slide whose direction is the steering sign at entry. While
+sliding: the rear runs a flatter grip curve at reduced grip so the tail steps
+out; the **front wheels track the velocity vector** (that is the countersteer you
+see on a drifting car, and it keeps the fronts near their grip peak so they pivot
+the car instead of scrubbing) with the stick modulating around it; a yaw
+controller holds the nose at a target slip angle set by how hard you steer into
+the slide, damping the slip *rate* rather than the yaw rate so a steady arc is
+not fought; and a speed-scaled **side force** toward the inside of the corner
+makes the slide carve — a drift turns tighter than a gripped corner, which is
+what it is for. Straighten the wheel and the slide winds down and hooks up in
+under a second; hold countersteer through centre and the tail swaps sides (drift
+chaining). A slide with the throttle lifted scrubs speed physically through the
+tires (no scripted bleed) and, once it drops out, a natural straightening torque
+brings the nose back — the tire model has no self-aligning moment past ~60°, so
+without it a dropped slide kept spinning until the speed died.
 
 ## Physics bug reports & deterministic replay
 

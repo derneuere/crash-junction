@@ -357,6 +357,7 @@ export class RaceDirector {
       throttle: wantFaster,
       boost: false, // rivals lean on the rubber band, not the player's boost bar
       brake: wantSlower && r.speed > 6, // don't ride the brake to a dead stop
+      noDrift: true, // a braking rival is slowing, not tapping into a slide
     };
     // re-seed the solver state from the body each frame (heading/speed derived),
     // then bank this rival's forces. attribs = the rival's own variant vault.

@@ -149,6 +149,7 @@ export function updateTraffic(actors: readonly Actor[], state: GameState, simTim
       throttle: a.curSpeed > fwdSpeed + 0.3,
       boost: false,
       brake: a.curSpeed < fwdSpeed - 0.3 || a.curSpeed <= 0.01,
+      noDrift: true, // traffic never drifts on purpose
     };
     stepVehicleForces(fs, a, tInput, heightAt, HANDLING[a.spec?.variant ?? 'sedan']);
 

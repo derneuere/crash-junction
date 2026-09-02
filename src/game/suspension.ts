@@ -1,7 +1,5 @@
 import * as CANNON from 'cannon-es';
 import {
-  DOWNFORCE,
-  DOWNFORCE_CAP,
   FIXED_DT,
   GRAVITY,
   LAND_VY_ABSORB,
@@ -168,11 +166,14 @@ export function applySuspension(actors: Actor[], state: GameState, heightAt: Hei
       fSum += f;
     }
 
-    // aero downforce while driving (off once crashed, so wrecks can fly)
+    // aero downforce while driving (off once crashed, so wrecks can fly) —
+    // the textbook quadratic, coefficient + cap per variant (sedan = the old
+    // DOWNFORCE / DOWNFORCE_CAP globals; the heavies get less per speed)
     if (!a.crashed && state !== GameState.Idle && grounded >= 3) {
+      const aero = HANDLING[a.spec.variant].base;
       const v = b.velocity;
       const v2 = v.x * v.x + v.z * v.z;
-      b.force.y -= Math.min(DOWNFORCE * v2, DOWNFORCE_CAP * Math.abs(GRAVITY)) * b.mass;
+      b.force.y -= Math.min(aero.downforce * v2, aero.downforceCap * Math.abs(GRAVITY)) * b.mass;
     }
 
     // kinematic ground-follow for driven cars: the spring/damper alone can't

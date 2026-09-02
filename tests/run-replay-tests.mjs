@@ -27,7 +27,16 @@ if (parseInt(process.versions.node, 10) < 18) {
   process.exit(1);
 }
 
-const manifest = JSON.parse(readFileSync(path.join(root, 'tests', 'replays', 'manifest.json'), 'utf8'));
+const manifestAll = JSON.parse(readFileSync(path.join(root, 'tests', 'replays', 'manifest.json'), 'utf8'));
+// REPLAY_ONLY=<substring of a fixture file name> runs just the matching
+// fixtures (a single-fixture loop is ~15 s instead of the whole suite) and
+// prints every stat the replay reported, for bisecting a physics change.
+const ONLY = process.env.REPLAY_ONLY ?? '';
+const manifest = ONLY ? manifestAll.filter((e) => e.file.includes(ONLY)) : manifestAll;
+if (ONLY && manifest.length === 0) {
+  console.error(`REPLAY_ONLY=${ONLY} matches no fixture in tests/replays/manifest.json`);
+  process.exit(1);
+}
 
 function startVite() {
   const proc = spawn(
@@ -139,6 +148,7 @@ try {
         console.error(`FAIL  ${entry.name}  (${statsStr})`);
         for (const f of failures) console.error(`      - ${f}`);
       }
+      if (ONLY && stats) console.log(`      stats: ${JSON.stringify(stats)}`);
     }
   } finally {
     await browser.close();

@@ -7,17 +7,23 @@ import {
   BOOST_ACCEL,
   BURNOUT_ACCEL,
   BURNOUT_ENTER,
-  COAST_DRAG,
-  DRIFT_MAX_SLIP,
-  DRIFT_SCRUB,
   KICK_ACCEL,
   KICK_BELOW,
   KICK_TIME,
   SHIFT_CUT,
   TOP_HARD,
   clamp,
-  wrapAngle,
 } from './constants';
+
+/** Downshift hysteresis (m/s). The gear walk reads the MEASURED body speed
+ *  (the force model feeds it back each step), so at a gear ceiling the speed
+ *  hovers a few cm/s either side of the boundary: without hysteresis the box
+ *  upshifts, the shift cut kills the drive, the car eases a hair under the
+ *  ceiling, it downshifts, re-upshifts, cuts again — and the car is pinned at
+ *  the boundary forever (the sedan sat at 29 m/s, never reaching its 32 m/s
+ *  cruise). An auto box drops a gear only once the speed has fallen a clear
+ *  margin under the gear's floor (Burnout's GearDownRPM below the up-RPM). */
+const GEAR_DOWN_HYST = 2;
 
 /** The mutable longitudinal/boost state the speed step reads and writes. */
 export interface SpeedState {
@@ -123,6 +129,9 @@ export function updateSpeed(s: SpeedState, input: ControlInput): void {
   // sees the identical walk. ----
   let g = 0;
   while (g < GEAR_TOPS.length - 1 && s.speed > GEAR_TOPS[g]) g++;
+  // hold the current gear while the speed is only marginally under its floor
+  // (see GEAR_DOWN_HYST) — a real slow-down still walks the gears down
+  if (g < s.gear && s.speed > GEAR_TOPS[s.gear - 1] - GEAR_DOWN_HYST) g = s.gear;
   if (model.torqueModel) {
     // up-RPM short-shift: if we're past the gear's up-RPM and there's a gear to
     // take, go up one (auto-box behaviour from gear ratios + up-RPM threshold).
@@ -168,7 +177,8 @@ export function updateSpeed(s: SpeedState, input: ControlInput): void {
     const acc = s.shiftT > 0 ? 0 : engineAccel(GEAR_ACCEL[s.gear]);
     s.speed = Math.min(CRUISE, s.speed + acc * dt);
   } else if (!input.throttle && !s.boosting && !input.brake) {
-    s.speed = Math.max(0, s.speed - COAST_DRAG * dt); // coast down
+    // coast down at the variant's linear drag (sedan = the old COAST_DRAG)
+    s.speed = Math.max(0, s.speed - HANDLING[variant].base.linearDrag * dt);
     if (model.torqueModel && s.enginePower !== undefined) s.enginePower = 0; // engine spools down off-throttle
   }
   if (s.boosting) {
@@ -198,11 +208,10 @@ export function updateSpeed(s: SpeedState, input: ControlInput): void {
     const decel = model.brakeCurve ? brakeDecelCurve(BRAKE, s.brakePedal ?? 0, model) : BRAKE;
     s.speed = Math.max(0, s.speed - decel * dt);
   }
-  if (s.drifting) {
-    // a deeper angle scrubs more speed — shallow drifts carry momentum
-    const sideways = Math.abs(wrapAngle(s.heading - s.velAngle)) / DRIFT_MAX_SLIP;
-    s.speed = Math.max(10, s.speed - DRIFT_SCRUB * (0.35 + 0.65 * sideways) * dt);
-  }
+  // NOTE: no scripted drift scrub here any more. The force model's tires scrub
+  // a sliding car physically (the lateral force at a slip angle has a component
+  // against travel), so a scalar scrub on top was a double bleed — a lifted-
+  // throttle slide lost 16 m/s² and spun out as the speed collapsed.
   if (s.speed > top) s.speed = Math.max(top, s.speed - 6 * dt); // settle down a tier
   if (s.speed > TOP_HARD) s.speed = TOP_HARD; // absolute clamp
 }
