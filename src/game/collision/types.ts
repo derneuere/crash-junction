@@ -45,7 +45,7 @@ export interface ContactOutcome {
   /** The mirrored kick when SELF is the one slammed — the sideways force
    *  that makes a slam felt without scripting a wreck. */
   shoveSelf: number;
-  /** Feature F SLAM (BP UpdateSlam): the victim of a SLAM gets a one-shot
+  /** Feature F SLAM (Burnout's slam): the victim of a SLAM gets a one-shot
    *  parabolic yaw wobble (env = r − r², peaks mid-life) layered on top of the
    *  lateral shove — the contact-time wallop that ramps in then fades. Which
    *  car it lands on follows the shove: `slamOther` rides shoveOther (the

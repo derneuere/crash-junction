@@ -44,7 +44,7 @@ export class PlayerControl {
   visualPitch = 0; // squat/dive, applied to the visual hull only
   visualRoll = 0; // body lean, ditto
   // PRESENTATION-ONLY (read by Game.updateWheels, never by the sim): the BP
-  // GetSteeringAngle the front wheels visually turn to, and the throttle/brake
+  // steering angle the front wheels visually turn to, and the throttle/brake
   // input flags that drive wheelspin/lockup. All three are pure derived values —
   // nothing in the fixed step reads them, so replay checksums stay identical.
   steerAngle = 0; // front-wheel visual steer lock (radians), speed-sensitive

@@ -191,8 +191,8 @@ export const GRIP_MOD_FLOOR = 0.45;
 // the heavier variants (which read bigger BP sideForce/naturalYawTorque numbers)
 // get a more pronounced step-out and self-align.
 //
-// MaintainDriftSpeed: anti-scrub impulse along the velocity blend so a slide
-// doesn't bleed all its speed (BP MaintainDriftSpeed, findings §8). As a CJ
+// Drift speed-maintain: anti-scrub impulse along the velocity blend so a slide
+// doesn't bleed all its speed (Burnout's drift speed-maintain). As a CJ
 // kinematic nudge: top the drift speed back up toward a maintained target at
 // this fraction of the deficit per second, gated on throttle.
 export const DRIFT_MAINTAIN_STRENGTH = 1.0; // 0 = no anti-scrub (raw scrub only); gated on input.throttle
@@ -214,7 +214,7 @@ export const DRIFT_ANGDAMP_STRENGTH = 1.0; // 0 = no extra spin bleed
 
 // ---- steering input shaping (BP ModifyControlsForSteeringWheelInput) --------
 // BP applies a quartic stiffening to the raw stick: soft centre, sharp extreme
-// (`−1.0 − sign·(s⁴·1.25)`, findings §8). On a keyboard the steer input is
+// (`−1.0 − sign·(s⁴·1.25)`). On a keyboard the steer input is
 // already ±1 binary, but analog pads / the AI feed continuous values, and the
 // quartic gives the sedan a calmer centre without losing full lock. Blend keeps
 // the sedan close to linear (the proven feel) while letting heavier variants use

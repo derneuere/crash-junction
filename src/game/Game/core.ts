@@ -118,14 +118,14 @@ const CRASH_EXTRA_IMPACT_FULL = 16;
  *  boost-ram wreck tumbles believably rather than blurring. */
 const CRASH_EXTRA_SPIN_CAP = 5;
 
-/** SLAM one-shot (BP UpdateSlam): peak yaw-rate (rad/s) of the parabolic
+/** SLAM one-shot (Burnout's slam): peak yaw-rate (rad/s) of the parabolic
  *  env = r − r² wobble at the strongest slam. The envelope peaks at r=0.5 so a
  *  slam ramps in then fades over its life. 0 disables the wobble. */
 const SLAM_KICK_STRENGTH = 2.0;
 /** SLAM life (s) — how long the one-shot wobble plays out. */
 const SLAM_LIFE = 0.5;
 /** SLAM rate limit (s): a fresh slam on the same car within this window is
- *  ignored (BP AddSlam is rate-limited ≥0.5 s apart, ~2/s). */
+ *  ignored (Burnout rate-limits slams to ≥0.5 s apart, ~2/s). */
 const SLAM_RATE_LIMIT = 0.5;
 
 /** Anisotropic car-to-car friction (Burnout's car-on-car contact, NON-crashing
@@ -159,7 +159,7 @@ const CONTACT_E_CLOSING_SPLIT = 0.65; // m/s: BELOW → restitutionHigh (gentler
 const WALL_REFLECT_E = 0.03; // the matGround/matCar restitution floor (NOT the 0.12 matCar/matCar one)
 const WALL_GLANCE_SPEED_KEEP = 0.82; // planar speed retained through a glance (the wall takes its toll)
 
-/** Crash master-switch raw-tumble damping (BP UpdateCrashing per-axis
+/** Crash master-switch raw-tumble damping (Burnout's crash damping, per-axis
  *  vlogefp/vexptefp decay): a CRASHED car's spin bleeds off exponentially each
  *  step (the controlled-contact friction is swapped out for this raw tumble).
  *  Per-axis half-life-ish factors per second; 1 = no damping. Roll/pitch settle
@@ -168,7 +168,7 @@ const CRASH_TUMBLE_DAMP_ROLL = 0.85; // x axis spin/s retained
 const CRASH_TUMBLE_DAMP_YAW = 0.95; // y axis spin/s retained
 const CRASH_TUMBLE_DAMP_PITCH = 0.85; // z axis spin/s retained
 
-/** Feature G — WATER KILL (BP UpdateInWaterBehaviour: a hard kill, not
+/** Feature G — WATER KILL (Burnout's water rule: a hard kill, not
  *  buoyancy). A car whose chassis sinks this far BELOW the level's seaLevel is
  *  declared drowned: its linear+angular velocity and pending force/torque rows
  *  are zeroed (it stops dead and sinks), then the off-track/respawn path the
@@ -180,7 +180,7 @@ const WATER_KILL_DEPTH = 1.5;
  *  rate + remaining life. Folded into the victim's angular velocity each step
  *  via env = r − r² until life expires. */
 interface SlamEffect {
-  sign: number; // ±1 — which way the wobble throws (seeded at AddSlam)
+  sign: number; // ±1 — which way the wobble throws (seeded when the slam is queued)
   peak: number; // peak yaw rate (rad/s) at the envelope's midpoint
   life: number; // seconds remaining
   total: number; // original life (for the r = life/total envelope)
@@ -321,7 +321,7 @@ export class Game {
   // Feature F SLAM one-shots (BP SlamEffect): bodyId → the live parabolic yaw
   // wobble a slammed car is playing out. Stepped + drained in stepControls;
   // pin-safe (lives entirely in the deterministic step). lastSlamAt rate-limits
-  // a fresh slam on the same car (BP AddSlam ≥0.5 s apart).
+  // a fresh slam on the same car (Burnout keeps slams ≥0.5 s apart).
   private slamEffects = new Map<number, SlamEffect>();
   private lastSlamAt = new Map<number, number>();
   // sustained shunt pushes (Burnout's shunt carries the victim sideways for a
@@ -1905,7 +1905,7 @@ export class Game {
     bleed(0, 1, 0, fr.frictionUp); // vertical — damped
   }
 
-  /** Queue a one-shot SLAM wobble (Feature F, BP AddSlam/UpdateSlam): a
+  /** Queue a one-shot SLAM wobble (Feature F, Burnout's slam): a
    *  parabolic yaw kick (env = r − r², peaks mid-life) that ramps in then fades
    *  over SLAM_LIFE, rate-limited per car (~2/s). `strength` (0..1, from the
    *  resolveContact slam intent, scaled by impact) sets the peak; the sign is
@@ -2053,7 +2053,7 @@ export class Game {
     }
   }
 
-  /** Step every live SLAM wobble (Feature F, BP UpdateSlam): decay life by dt
+  /** Step every live SLAM wobble (Feature F, Burnout's slam): decay life by dt
    *  and, while alive, fold the parabolic envelope env = r − r² (r = life/total,
    *  peaks at r=0.5) into the victim's yaw rate. A slam that wrecks its car, or
    *  whose car despawned, is dropped. Runs inside the fixed step — deterministic. */
@@ -2090,14 +2090,14 @@ export class Game {
 
   /** Feature F crash master-switch + Feature G water kill, per fixed step.
    *
-   *  CRASH MASTER SWITCH (BP UpdateCrashing): CJ's `crashed` flag is the master
+   *  CRASH MASTER SWITCH (Burnout's crash master switch): CJ's `crashed` flag is the master
    *  gate — a crashed car is past controlled contact, so instead of the
    *  anisotropic contact friction (applyShuntKick, gated on !crashed) it takes
    *  a RAW per-axis exponential spin damp here. This is the formalised swap the
    *  spec asks for: one `crashed` gate, controlled-contact one side, raw tumble
    *  the other — no duplicate state, layered on the existing crashed/destabilized.
    *
-   *  WATER KILL (Feature G, BP UpdateInWaterBehaviour — a hard kill, not
+   *  WATER KILL (Feature G, Burnout's water rule — a hard kill, not
    *  buoyancy): a car whose chassis has sunk WATER_KILL_DEPTH below the level's
    *  seaLevel is drowned — zero its linear+angular velocity AND the pending
    *  force/torque rows (so nothing this step re-accelerates the corpse), then
