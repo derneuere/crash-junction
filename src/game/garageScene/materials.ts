@@ -34,7 +34,9 @@ export function interiorMat(track: Track): THREE.Material[] {
 }
 
 export function wheelMat(track: Track): THREE.Material {
-  const m = new THREE.MeshStandardMaterial({ vertexColors: true, flatShading: true, roughness: 0.78 });
+  // smooth-shaded: the wheel geometry carries its own normals (round tyre,
+  // hard rim lip); a touch of metalness lets the alloy pick up the showroom lights
+  const m = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.55, metalness: 0.2 });
   track(m);
   return m;
 }

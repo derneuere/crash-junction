@@ -80,7 +80,7 @@ export function buildCar(model: VehicleModel, color: number, track: Track): THRE
   // bake is a near-flat disc that reads as a naked spoke pinwheel this close
   // up. Neither geometry is tracked for disposal here: the generic wheel is
   // a shared cache, the model wheels are owned by the template.
-  const genericGeo = model.showroomWheels ? null : wheelGeometry(SPECS.sedan.wheelRadius);
+  const generic = (side: 'L' | 'R') => wheelGeometry(SPECS.sedan.wheelRadius, 'five-spoke', side);
   const corners: [number, number][] = [
     [-model.arch.x, model.arch.zFront],
     [model.arch.x, model.arch.zFront],
@@ -89,7 +89,7 @@ export function buildCar(model: VehicleModel, color: number, track: Track): THRE
   ];
   const wmat = wheelMat(track);
   for (const [wx, wz] of corners) {
-    const geo = genericGeo ?? (wx < 0 ? model.wheelL : model.wheelR);
+    const geo = model.showroomWheels ? (wx < 0 ? model.wheelL : model.wheelR) : generic(wx < 0 ? 'L' : 'R');
     const wh = new THREE.Mesh(geo, wmat);
     wh.position.set(wx, model.wheelY, wz);
     group.add(wh);

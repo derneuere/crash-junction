@@ -4,6 +4,7 @@ export {
   registerPlayerSwappable, adoptPlayerMaterials, setPlayerEnvMap,
   buildNormalSmoothing, applyNormalSmoothing,
   glassParams, applyGlassParams, type GlassParams,
+  buildWheelGeometry, TYRE_HALF_WIDTH, type WheelStyle, type WheelSide,
 } from './shared';
 export { makeSedanGeometry } from './sedan';
 export { makeBoxHullGeometry } from './boxHull';

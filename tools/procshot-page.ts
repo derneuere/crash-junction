@@ -18,6 +18,7 @@ import { SPECS } from '../src/game/vehicles';
 import { buildProceduralModel, PROC_RECIPES } from '../src/game/models/procgen';
 import { buildCar } from '../src/game/garageScene/car';
 import { FLOOR_Y } from '../src/game/garageScene/constants';
+import type { WheelStyle } from '../src/game/geometry';
 
 const SILVER = 0xc9ccd2; // judge shape in the references' own silver
 
@@ -27,7 +28,7 @@ declare global {
       ready: boolean;
       cars: string[];
       poses: string[];
-      setCar: (id: string, color?: number) => boolean;
+      setCar: (id: string, color?: number, wheel?: string) => boolean;
       shoot: (pose: string) => string;
     };
   }
@@ -101,9 +102,11 @@ const orthoCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 100);
 let carGroup: THREE.Group | null = null;
 let disposables: { dispose(): void }[] = [];
 
-function setCar(id: string, color: number = SILVER): boolean {
-  const recipe = PROC_RECIPES[id];
-  if (!recipe) return false;
+function setCar(id: string, color: number = SILVER, wheel?: string): boolean {
+  const base = PROC_RECIPES[id];
+  if (!base) return false;
+  // --wheel: swap the recipe's wheel style (the wheel builder's own iteration loop)
+  const recipe = wheel ? { ...base, wheels: { ...base.wheels, style: wheel as WheelStyle } } : base;
   if (carGroup) scene.remove(carGroup);
   for (const d of disposables) d.dispose();
   disposables = [];

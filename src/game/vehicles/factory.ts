@@ -74,8 +74,9 @@ export function exhaustAnchors(spec: VehicleSpec): [THREE.Vector3, THREE.Vector3
   return [new THREE.Vector3(-x, y, z), new THREE.Vector3(x, y, z)];
 }
 
-/** Model wheels carry tire/rim paint as vertex colors. */
-const modelWheelMat = new THREE.MeshStandardMaterial({ vertexColors: true, flatShading: true, roughness: 0.8 });
+/** Model wheels carry tire/rim paint as vertex colors. Smooth-shaded: the
+ *  wheel templates bring their own normals (round tyre, hard rim edges). */
+const modelWheelMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.7, metalness: 0.15 });
 
 // ---------- night vehicle lights ----------
 // Real dynamic lights, three.js forward-renderer budget permitting: one
@@ -113,7 +114,10 @@ export function buildWheels(spec: VehicleSpec, group: THREE.Group, model?: Vehic
     [-ax, zr], [ax, zr],
   ];
   for (const [wx, wz] of corners) {
-    const geo = model ? (wx < 0 ? model.wheelL : model.wheelR) : wheelGeometry(spec.wheelRadius);
+    // no model: the shared generic wheel — steel rims on the heavy variants, alloys on cars
+    const geo = model
+      ? (wx < 0 ? model.wheelL : model.wheelR)
+      : wheelGeometry(spec.wheelRadius, spec.variant === 'sedan' ? 'five-spoke' : 'steelie', wx < 0 ? 'L' : 'R');
     const wh = new THREE.Mesh(geo, model ? modelWheelMat : wheelMat);
     wh.position.set(wx, -(spec.rideHeight - spec.wheelRadius), wz);
     wh.castShadow = true;

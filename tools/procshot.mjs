@@ -2,7 +2,7 @@
 //
 //   fnm exec --using=22 -- node tools/procshot.mjs [--car metro] [--tag work]
 //                                 [--poses side,front,...] [--color 0xRRGGBB]
-//                                 [--port 5195]
+//                                 [--port 5195] [--wheel five-spoke]
 //
 // The procgen iteration loop: boots a vite dev server, opens
 // tools/procshot-page.html (which builds the recipe's VehicleModel directly —
@@ -32,6 +32,8 @@ const CAR = flag('--car', 'metro');
 const TAG = flag('--tag', 'shot');
 const ONLY = flag('--poses', null);
 const COLOR = flag('--color', null);
+// --wheel <style>: render the recipe with another WheelStyle (wheel-builder iteration)
+const WHEEL = flag('--wheel', null);
 // --ref <image>: ALSO write <tag>-<pose>-vs.png with the render stacked over
 // the reference photo at matched width — the precise-comparison view.
 const REF = flag('--ref', null);
@@ -117,9 +119,10 @@ try {
   await page.waitForFunction(() => window.__proc?.ready === true, { timeout: 30_000, polling: 100 });
 
   const ok = await page.evaluate(
-    (id, color) => window.__proc.setCar(id, color ? Number(color) : undefined),
+    (id, color, wheel) => window.__proc.setCar(id, color ? Number(color) : undefined, wheel ?? undefined),
     CAR,
     COLOR,
+    WHEEL,
   );
   if (!ok) throw new Error(`unknown recipe id '${CAR}' (page cars: ${await page.evaluate(() => window.__proc.cars.join(','))})`);
 

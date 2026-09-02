@@ -23,7 +23,8 @@ export interface Station {
   halfW: number;
 }
 
-export type WheelStyle = 'seven-spoke' | 'steelie' | 'five-spoke' | 'turbine' | 'deep-dish';
+import type { WheelStyle } from '../../geometry/shared/wheelBuilder';
+export type { WheelStyle };
 export type GrilleStyle = 'bar' | 'closed' | 'chrome';
 export type LightStyle = 'pods' | 'strip' | 'quad-round';
 
