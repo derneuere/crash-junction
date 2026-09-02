@@ -232,6 +232,23 @@ tires (no scripted bleed) and, once it drops out, a natural straightening torque
 brings the nose back — the tire model has no self-aligning moment past ~60°, so
 without it a dropped slide kept spinning until the speed died.
 
+**Crashes** follow Burnout's contact model rather than the solver's defaults.
+A car that wins a ram punts the loser with a contact-normal impulse (so a
+flank hit spins them out) and then keeps **carrying them sideways for a beat**
+— a sustained push toward a target lateral speed that gives up on its own when
+something is holding the car back — while the loser's controlled contact
+response (anisotropic body-axis friction, closing-speed restitution) is
+per-variant data. A **wreck** switches to the raw tumble: no controlled
+contact, per-axis spin damping, extra tumble energy scaled by the hit, and each
+wheel still touching the road **scrubs from its own spring load**, applied at
+the wheel, so a broadside slide stops and yaws into settling while a wreck
+still pointing the way it travels rolls on; a torn-off wheel leaves a rim, so
+a wreck never drops its chassis onto the road and stops dead. Heavier wrecks
+take less spin from follow-up knocks. **Traffic panics** when it is hit and
+survives: a light tap is a timed swerve-and-brake, a harder knock a spin-out to
+a coin-flip side (seeded, so replays match), after which the driver settles
+back into lane-holding. `tests/crash-probe.mjs` demonstrates all three.
+
 ## Physics bug reports & deterministic replay
 
 Saw the physics do something wrong? Press **R** (any time — recording is

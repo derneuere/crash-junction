@@ -137,6 +137,18 @@ export interface HandlingAttribs {
      *  speeds (resolves to restitutionLow). */
     restitutionLow: number; // e for a harder hit (closing ≥ 0.65 m/s)
     restitutionHigh: number; // e for the gentler hit (closing < 0.65 m/s)
+    /** Wreck tire scrub (a crashed car sliding on its wheels, suspension.ts):
+     *  Coulomb limits as a fraction of each corner's spring load, split by
+     *  wheel axis. Lateral is the sideways scrub that stops a broadside slide
+     *  and turns an off-centre ground reaction into settling yaw; longitudinal
+     *  is rolling resistance — low lets a wreck still pointing the way it
+     *  travels roll on, high (bent axles, dragging bodywork) plants it. */
+    wreckScrubLat: number;
+    wreckScrubLong: number;
+    /** Spin a WRECK picks up from further contacts (walls, other cars, the
+     *  ground) is scaled by this — the heavies keep tumbling less than a
+     *  sedan does. 1 = the solver's own response, untouched. */
+    crashedSpinScale: number;
   };
 }
 
@@ -228,6 +240,9 @@ const SEDAN: HandlingAttribs = {
     frictionLat: 0.18, // = old global CAR_FRICTION_LAT (today)
     restitutionLow: 0.65, // inline literals (closing ≥ 0.65 m/s)
     restitutionHigh: 0.7, // (closing < 0.65 m/s)
+    wreckScrubLat: 0.85, // = the old flat wreck grip (a broadside slide stops as before)
+    wreckScrubLong: 0.45, // a wreck rolling the way it points carries on further than it scrubs
+    crashedSpinScale: 1, // the sedan's wreck takes the solver's spin as-is
   },
 };
 
@@ -317,6 +332,9 @@ const BUS: HandlingAttribs = {
     frictionLat: 0.22, // grips harder sideways — a heavy contact plants
     restitutionLow: 0.65,
     restitutionHigh: 0.7,
+    wreckScrubLat: 0.95, // a wrecked bus digs in sideways
+    wreckScrubLong: 0.6, // and drags rather than rolls (bent axles, dragging bodywork)
+    crashedSpinScale: 0.6, // 11 t of wreck doesn't get spun up by the next knock
   },
 };
 
@@ -405,6 +423,9 @@ const TANKER: HandlingAttribs = {
     frictionLat: 0.26, // strongest sideways grip — contacts plant dead
     restitutionLow: 0.65,
     restitutionHigh: 0.7,
+    wreckScrubLat: 1.0, // the tanker's wreck scrubs hardest sideways
+    wreckScrubLong: 0.65, // and barely rolls
+    crashedSpinScale: 0.5, // the heaviest wreck shrugs off follow-up spin the most
   },
 };
 
